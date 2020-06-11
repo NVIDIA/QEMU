@@ -2798,12 +2798,51 @@ static bool vtd_process_iotlb_desc(IntelIOMMUState *s, VTDInvDesc *inv_desc)
     return true;
 }
 
+static void vtd_piotlb_pasid_invalidate_notify(IntelIOMMUState *s,
+                                               bool global,
+                                               uint16_t domain_id,
+                                               uint32_t pasid)
+{
+    VTDAddressSpace *vtd_as;
+    VTDContextEntry ce;
+
+    QLIST_FOREACH(vtd_as, &(s->vtd_as_with_notifiers), next) {
+        if (!vtd_dev_to_context_entry(s, pci_bus_num(vtd_as->bus),
+                                      vtd_as->devfn, &ce) &&
+            (global || domain_id == vtd_get_domain_id(s, &ce, vtd_as->pasid)) &&
+            !vtd_as_has_map_notifier(vtd_as)) {
+            uint32_t rid2pasid = VTD_CE_GET_RID2PASID(&ce);
+            IOMMUNotifier *notifier;
+
+            if ((vtd_as->pasid != PCI_NO_PASID || pasid != rid2pasid) &&
+                pasid != vtd_as->pasid && pasid != PCI_NO_PASID) {
+                continue;
+            }
+
+            IOMMU_NOTIFIER_FOREACH(notifier, &vtd_as->iommu) {
+                IOMMUTLBEvent event;
+
+                event.type = IOMMU_NOTIFIER_UNMAP |
+                             IOMMU_NOTIFIER_DEVIOTLB_UNMAP;
+                event.entry.target_as = &address_space_memory;
+                event.entry.iova = notifier->start;
+                event.entry.perm = IOMMU_NONE;
+                event.entry.addr_mask = notifier->end - notifier->start;
+                event.entry.translated_addr = 0;
+
+                memory_region_notify_iommu_one(notifier, &event);
+            }
+        }
+    }
+}
+
 static void vtd_piotlb_domain_invalidate(IntelIOMMUState *s, uint16_t domain_id)
 {
     vtd_iommu_lock(s);
     g_hash_table_foreach_remove(s->iotlb, vtd_hash_remove_by_domain,
                                 &domain_id);
     vtd_iommu_unlock(s);
+    vtd_piotlb_pasid_invalidate_notify(s, false, domain_id, PCI_NO_PASID);
 }
 
 static gboolean vtd_hash_remove_by_pasid(gpointer key, gpointer value,
@@ -2828,6 +2867,7 @@ static void vtd_piotlb_pasid_invalidate(IntelIOMMUState *s,
     g_hash_table_foreach_remove(s->iotlb, vtd_hash_remove_by_pasid,
                                 &info);
     vtd_iommu_unlock(s);
+    vtd_piotlb_pasid_invalidate_notify(s, false, domain_id, pasid);
 }
 
 static void vtd_piotlb_page_invalidate(IntelIOMMUState *s, uint16_t domain_id,
@@ -2835,6 +2875,9 @@ static void vtd_piotlb_page_invalidate(IntelIOMMUState *s, uint16_t domain_id,
                                        bool ih)
 {
     VTDIOTLBPageInvInfo info;
+    VTDAddressSpace *vtd_as;
+    VTDContextEntry ce;
+    hwaddr size = (1 << am) * VTD_PAGE_SIZE;
 
     info.domain_id = domain_id;
     info.pasid = pasid;
@@ -2845,6 +2888,30 @@ static void vtd_piotlb_page_invalidate(IntelIOMMUState *s, uint16_t domain_id,
     g_hash_table_foreach_remove(s->iotlb,
                                 vtd_hash_remove_by_page_piotlb, &info);
     vtd_iommu_unlock(s);
+
+    QLIST_FOREACH(vtd_as, &(s->vtd_as_with_notifiers), next) {
+        if (!vtd_dev_to_context_entry(s, pci_bus_num(vtd_as->bus),
+                                      vtd_as->devfn, &ce) &&
+            domain_id == vtd_get_domain_id(s, &ce, vtd_as->pasid) &&
+            !vtd_as_has_map_notifier(vtd_as)) {
+            uint32_t rid2pasid = VTD_CE_GET_RID2PASID(&ce);
+            IOMMUTLBEvent event;
+
+            if ((vtd_as->pasid != PCI_NO_PASID || pasid != rid2pasid) &&
+                pasid != vtd_as->pasid) {
+                continue;
+            }
+
+            event.type = IOMMU_NOTIFIER_UNMAP | IOMMU_NOTIFIER_DEVIOTLB_UNMAP;
+            event.entry.target_as = &address_space_memory;
+            event.entry.iova = addr;
+            event.entry.perm = IOMMU_NONE;
+            event.entry.addr_mask = size - 1;
+            event.entry.translated_addr = 0;
+
+            memory_region_notify_iommu(&vtd_as->iommu, 0, event);
+        }
+    }
 }
 
 static bool vtd_process_piotlb_desc(IntelIOMMUState *s,
@@ -2917,6 +2984,7 @@ static bool vtd_process_pasid_desc(IntelIOMMUState *s,
     case VTD_INV_DESC_PASIDC_GLOBAL:
         trace_vtd_pasid_cache_gsi();
         vtd_reset_iotlb(s);
+        vtd_piotlb_pasid_invalidate_notify(s, true, 0, PCI_NO_PASID);
         break;
 
     default:
