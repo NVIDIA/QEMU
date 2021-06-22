@@ -16,6 +16,8 @@
 #include "smmuv3-internal.h"
 #include CONFIG_DEVICES
 
+typedef struct Tegra241CMDQV Tegra241CMDQV;
+
 typedef struct SMMUS2Hwpt {
     IOMMUFDBackend *iommufd;
     uint32_t hwpt_id;
@@ -29,6 +31,7 @@ typedef struct SMMUViommu {
     SMMUState *smmu;
     uint32_t bypass_hwpt_id;
     uint32_t abort_hwpt_id;
+    struct iommu_viommu_tegra241_cmdqv cmdqv_data;
     QLIST_HEAD(, SMMUv3AccelDevice) device_list;
 } SMMUViommu;
 
@@ -56,6 +59,8 @@ typedef struct SMMUv3AccelState {
     QemuMutex event_thread_mutex;
 
     struct iommu_hw_info_arm_smmuv3 info;
+    struct iommu_hw_info_tegra241_cmdqv cmdqv_info;
+    Tegra241CMDQV *cmdqv;
 } SMMUv3AccelState;
 
 #if defined(CONFIG_ARM_SMMUV3) && defined(CONFIG_IOMMUFD)
@@ -69,6 +74,10 @@ void smmuv3_accel_batch_cmd(SMMUState *bs, SMMUDevice *sdev,
                            uint32_t *cons);
 void smmuv3_accel_init_regs(SMMUv3State *s);
 void smmu_realloc_veventq(SMMUState *bs, uint32_t log2size);
+#if defined(CONFIG_TEGRA241_CMDQV)
+Tegra241CMDQV *tegra241_cmdqv_init(SMMUv3State *s);
+void tegra241_cmdqv_reset(Tegra241CMDQV *cmdqv);
+#endif
 #else
 static inline void smmuv3_accel_init(SMMUv3State *d)
 {

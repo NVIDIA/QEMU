@@ -1919,6 +1919,10 @@ static void smmu_reset_exit(Object *obj, ResetType type)
     smmuv3_init_regs(s);
     if (sys->accel) {
         smmuv3_accel_init_regs(s);
+
+        if (s->s_accel->cmdqv) {
+            tegra241_cmdqv_reset(s->s_accel->cmdqv);
+        }
     }
 }
 

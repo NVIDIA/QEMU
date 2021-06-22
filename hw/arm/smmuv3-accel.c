@@ -73,6 +73,23 @@ void smmuv3_accel_init_regs(SMMUv3State *s)
         goto out_err;
     }
 
+    if (s_accel->cmdqv) {
+        data_type = IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV;
+        ret = smmuv3_accel_host_hw_info(accel_dev, &data_type,
+                                        sizeof(s_accel->cmdqv_info),
+                                        &s_accel->cmdqv_info);
+        if (ret) {
+            error_report("Failed to get Host CMDQV device info");
+            goto out_err;
+        }
+
+        if (data_type != IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV) {
+            error_report("Wrong data type (%d) for Host CMDQV device info",
+                         data_type);
+            goto out_err;
+        }
+    }
+
 init_regs:
     trace_smmuv3_accel_host_hw_info(s_accel->info.idr[0], s_accel->info.idr[1],
                                     s_accel->info.idr[3], s_accel->info.idr[5]);
@@ -495,22 +512,35 @@ smmuv3_accel_dev_alloc_viommu(SMMUv3AccelDevice *accel_dev,
     SMMUv3State *s = ARM_SMMUV3(bs);
     SMMUv3AccelState *s_accel = s->s_accel;
     uint32_t s2_hwpt_id = idev->hwpt_id;
+    uint32_t viommu_id = 0;
     SMMUS2Hwpt *s2_hwpt;
     SMMUViommu *viommu;
-    uint32_t viommu_id;
 
     if (s_accel->viommu) {
         accel_dev->viommu = s_accel->viommu;
         return true;
     }
 
-    if (!iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
-                                      IOMMU_VIOMMU_TYPE_ARM_SMMUV3, s2_hwpt_id,
-                                      NULL, 0, &viommu_id, errp)) {
-        return false;
+    viommu = g_new0(SMMUViommu, 1);
+
+    if (bs->has_cmdqv) {
+        if (!iommufd_backend_alloc_viommu(
+                idev->iommufd, idev->devid, IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV,
+                s2_hwpt_id, &viommu->cmdqv_data, sizeof(viommu->cmdqv_data),
+                &viommu_id, errp)) {
+            error_report("CMDQV is unsupported, falling back to nested smmuv3");
+            bs->has_cmdqv = false;
+        }
     }
 
-    viommu = g_new0(SMMUViommu, 1);
+    if (!viommu_id) {
+        if (!iommufd_backend_alloc_viommu(
+                idev->iommufd, idev->devid, IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
+                s2_hwpt_id, NULL, 0, &viommu_id, errp)) {
+            goto free_viommu;
+        }
+    }
+
     viommu->core.viommu_id = viommu_id;
     viommu->core.s2_hwpt_id = s2_hwpt_id;
     viommu->core.iommufd = idev->iommufd;
@@ -728,6 +758,7 @@ static const PCIIOMMUOps smmuv3_accel_ops = {
 
 void smmuv3_accel_init(SMMUv3State *s)
 {
+    SMMUState *bs = ARM_SMMU(s);
     SMMUv3AccelState *s_accel;
 
     s->s_accel = s_accel = g_new0(SMMUv3AccelState, 1);
@@ -737,6 +768,10 @@ void smmuv3_accel_init(SMMUv3State *s)
                              memory_region_size(get_system_memory()));
     memory_region_add_subregion(&s_accel->root, 0, &s_accel->sysmem);
     qemu_mutex_init(&s_accel->event_thread_mutex);
+
+    if (bs->has_cmdqv) {
+        s_accel->cmdqv = tegra241_cmdqv_init(s);
+    }
 }
 
 static void smmuv3_accel_class_init(ObjectClass *oc, const void *data)

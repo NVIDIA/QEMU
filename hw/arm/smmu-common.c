@@ -939,7 +939,11 @@ static const PCIIOMMUOps *smmu_iommu_ops_by_type(SMMUState *s)
     SMMUBaseClass *sbc;
 
     if (s->accel) {
-        sbc = ARM_SMMU_CLASS(object_class_by_name(TYPE_ARM_SMMUV3_ACCEL));
+        if (s->has_cmdqv) {
+            sbc = ARM_SMMU_CLASS(object_class_by_name(TYPE_TEGRA241_CMDQV));
+        } else {
+            sbc = ARM_SMMU_CLASS(object_class_by_name(TYPE_ARM_SMMUV3_ACCEL));
+        }
     } else {
         sbc = ARM_SMMU_CLASS(object_class_by_name(TYPE_ARM_SMMU));
     }
@@ -1020,9 +1024,10 @@ static void smmu_base_reset_exit(Object *obj, ResetType type)
 static const Property smmu_dev_properties[] = {
     DEFINE_PROP_UINT8("bus_num", SMMUState, bus_num, 0),
     DEFINE_PROP_BOOL("smmu_per_bus", SMMUState, smmu_per_bus, false),
-    DEFINE_PROP_LINK("primary-bus", SMMUState, primary_bus,
-                     TYPE_PCI_BUS, PCIBus *),
+    DEFINE_PROP_LINK("primary-bus", SMMUState, primary_bus, TYPE_PCI_BUS,
+                     PCIBus *),
     DEFINE_PROP_BOOL("accel", SMMUState, accel, false),
+    DEFINE_PROP_BOOL("cmdqv", SMMUState, has_cmdqv, false),
 };
 
 static void smmu_base_class_init(ObjectClass *klass, const void *data)

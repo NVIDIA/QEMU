@@ -75,6 +75,10 @@ smmuv3_accel_host_hw_info(uint32_t idr0, uint32_t idr1, uint32_t idr3, uint32_t 
 strongarm_uart_update_parameters(const char *label, int speed, char parity, int data_bits, int stop_bits) "%s speed=%d parity=%c data=%d stop=%d"
 strongarm_ssp_read_underrun(void) "SSP rx underrun"
 
+# tegra241-cmdqv
+tegra241_cmdqv_init(uint32_t param) "hw info received. param: 0x%04X"
+tegra241_cmdqv_err_map(uint32_t map3, uint32_t map2, uint32_t map1, uint32_t map0) "hw irq received. error (hex) maps: %04X:%04X:%04X:%04X"
+
 # z2.c
 z2_lcd_reg_update(uint8_t cur, uint8_t i_0, uint8_t i_1, uint8_t i_2, uint32_t value) "cur_reg = 0x%x, buf = [0x%x, 0x%x, 0x%x], value = 0x%x"
 z2_lcd_enable_disable_result(const char *result) "LCD %s"
