@@ -55,6 +55,7 @@
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "hw/pci/pci_bus.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/virtio/virtio-pci.h"
 #include "hw/core/sysbus-fdt.h"
@@ -176,6 +177,7 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_NVDIMM_ACPI] =        { 0x09090000, NVDIMM_ACPI_IO_LEN},
     [VIRT_PVTIME] =             { 0x090a0000, 0x00010000 },
     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
+    [VIRT_CMDQV] =              { 0x090c0000, 0x00050000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -221,7 +223,8 @@ static const int a15irqmap[] = {
     [VIRT_MMIO] = 16, /* ...to 16 + NUM_VIRTIO_TRANSPORTS - 1 */
     [VIRT_GIC_V2M] = 48, /* ...to 48 + NUM_GICV2M_SPIS - 1 */
     [VIRT_SMMU] = 74,    /* ...to 74 + NUM_SMMU_IRQS - 1 */
-    [VIRT_PLATFORM_BUS] = 112, /* ...to 112 + PLATFORM_BUS_NUM_IRQS -1 */
+    [VIRT_CMDQV] = 78,
+    [VIRT_PLATFORM_BUS] = 112, /* ...to 112 + PLATFORM_BUS_NUM_IRQS -1 (179) */
 };
 
 static void create_randomness(MachineState *ms, const char *node)
@@ -1356,6 +1359,41 @@ static void create_pcie_irq_map(const MachineState *ms,
                            0x7           /* PCI irq */);
 }
 
+static void create_cmdqv(const VirtMachineState *vms,
+                         DeviceState *smmu_dev)
+{
+    hwaddr smmu_base = vms->memmap[VIRT_SMMU].base;
+    hwaddr base = vms->memmap[VIRT_CMDQV].base;
+    hwaddr size = vms->memmap[VIRT_CMDQV].size;
+    const char compat[] = "tegra241,cmdqv";
+    MachineState *ms = MACHINE(vms);
+    char *node, *smmu_node;
+    DeviceState *dev;
+
+    if (!vms->cmdqv) {
+        return;
+    }
+
+    dev = qdev_new("tegra241-cmdqv");
+    object_property_set_link(OBJECT(dev), "smmuv3", OBJECT(smmu_dev),
+                             &error_abort);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+
+    memory_region_add_subregion(get_system_memory(), base,
+                                sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
+
+    node = g_strdup_printf("/cmdqv@%" PRIx64, base);
+    qemu_fdt_add_subnode(ms->fdt, node);
+    qemu_fdt_setprop(ms->fdt, node, "compatible", compat, sizeof(compat));
+    qemu_fdt_setprop_sized_cells(ms->fdt, node, "reg", 2, base, 2, size);
+
+    smmu_node = g_strdup_printf("/smmuv3@%" PRIx64, smmu_base);
+    qemu_fdt_setprop_phandle(ms->fdt, node, "smmu", smmu_node);
+    g_free(smmu_node);
+
+    g_free(node);
+}
+
 static void create_smmu(const VirtMachineState *vms,
                         PCIBus *bus)
 {
@@ -1382,6 +1420,9 @@ static void create_smmu(const VirtMachineState *vms,
         object_property_set_link(OBJECT(dev), "iommufd", OBJECT(vms->iommufd),
                                  &error_abort);
         object_property_set_bool(OBJECT(dev), "nested", true, &error_abort);
+        if (vms->cmdqv) {
+            object_property_set_bool(OBJECT(dev), "cmdqv", true, &error_abort);
+        }
     } else if (!vms->iommufd) {
         error_report("FATAL: invalid iommufd");
     }
@@ -1412,6 +1453,9 @@ static void create_smmu(const VirtMachineState *vms,
 
     qemu_fdt_setprop_cell(ms->fdt, node, "phandle", vms->iommu_phandle);
     g_free(node);
+
+    create_cmdqv(vms, dev);
+    return;
 }
 
 static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
@@ -2673,6 +2717,20 @@ static void virt_set_default_bus_bypass_iommu(Object *obj, bool value,
     vms->default_bus_bypass_iommu = value;
 }
 
+static bool virt_get_cmdqv(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->cmdqv;
+}
+
+static void virt_set_cmdqv(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->cmdqv = value;
+}
+
 static CpuInstanceProperties
 virt_cpu_index_to_props(MachineState *ms, unsigned cpu_index)
 {
@@ -3114,6 +3172,11 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
                                           "Set on/off to enable/disable "
                                           "bypass_iommu for default root bus");
 
+    object_class_property_add_bool(oc, "cmdqv", virt_get_cmdqv, virt_set_cmdqv);
+    object_class_property_set_description(oc, "cmdqv",
+                                          "Set on/off to enable/disable "
+                                          "CMDQV for iommu=nested-smmuv3");
+
     object_class_property_add_bool(oc, "ras", virt_get_ras,
                                    virt_set_ras);
     object_class_property_set_description(oc, "ras",
@@ -3205,6 +3268,9 @@ static void virt_instance_init(Object *obj)
 
     /* The default root bus is attached to iommu by default */
     vms->default_bus_bypass_iommu = false;
+
+    /* Default disallows cmdqv instantiation */
+    vms->cmdqv = false;
 
     /* Default disallows RAS instantiation */
     vms->ras = false;

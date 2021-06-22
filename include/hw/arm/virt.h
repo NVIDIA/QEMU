@@ -62,6 +62,7 @@ enum {
     VIRT_GIC_ITS,
     VIRT_GIC_REDIST,
     VIRT_SMMU,
+    VIRT_CMDQV,
     VIRT_UART,
     VIRT_MMIO,
     VIRT_RTC,
@@ -155,6 +156,7 @@ struct VirtMachineState {
     bool ras;
     bool mte;
     bool dtb_randomness;
+    bool cmdqv;
     OnOffAuto acpi;
     VirtGICType gic_version;
     struct IOMMUFDBackend *iommufd;

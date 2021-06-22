@@ -217,6 +217,40 @@ static void acpi_dsdt_add_tpm(Aml *scope, VirtMachineState *vms)
 #define ROOT_COMPLEX_ENTRY_SIZE 36
 #define IORT_NODE_OFFSET 48
 
+static void acpi_dsdt_add_cmdqv(Aml *scope, uint32_t cmdqv_irq,
+                                hwaddr base, hwaddr size, hwaddr base_smmu, int idx)
+{
+    fprintf(stderr, "%s: adding cmdqv %d\n", __func__, idx);
+
+    Aml *dev = aml_device("CV%.02u", idx);
+    aml_append(dev, aml_name_decl("_HID", aml_string("NVDA200C")));
+    aml_append(dev, aml_name_decl("_UID", aml_int(idx + 1)));
+    aml_append(dev, aml_name_decl("_CCA", aml_int(1)));
+
+    Aml *crs = aml_resource_template();
+    Aml *addr = aml_qword_memory(AML_POS_DECODE, AML_MIN_FIXED, AML_MAX_FIXED,
+                                 AML_CACHEABLE,AML_READ_WRITE, 0x0,
+                                 base, base + size - 0x1, 0x0, size);
+    aml_append(crs, addr);
+    aml_append(crs, aml_interrupt(AML_CONSUMER, AML_EDGE, AML_ACTIVE_HIGH,
+                                 AML_EXCLUSIVE, &cmdqv_irq, 1));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+
+    Aml *pkg2 = aml_package(2);
+    aml_append(pkg2, aml_string("smmu-instance-addr"));
+    aml_append(pkg2, aml_int(base_smmu));
+
+    Aml *pkg1 = aml_package(1);
+    aml_append(pkg1, pkg2);
+
+    Aml *dsd = aml_package(2);
+    aml_append(dsd, aml_touuid("DAFFD814-6EBA-4D8C-8A91-BC9BBF4AA301"));
+    aml_append(dsd, pkg1);
+    aml_append(dev, aml_name_decl("_DSD", dsd));
+
+    aml_append(scope, dev);
+}
+
 static void
 build_iort_id_mapping(GArray *table_data, uint32_t input_base,
                       uint32_t id_count, uint32_t out_ref, uint32_t flags)
@@ -909,6 +943,15 @@ build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
 #ifdef CONFIG_TPM
     acpi_dsdt_add_tpm(scope, vms);
 #endif
+
+    if (virt_has_smmuv3(vms) && vms->cmdqv) {
+        hwaddr size_cmdqv = memmap[VIRT_CMDQV].size;
+        hwaddr base_cmdqv = memmap[VIRT_CMDQV].base;
+        hwaddr base_smmu = memmap[VIRT_SMMU].base;
+        int irq = irqmap[VIRT_CMDQV] + ARM_SPI_BASE;
+
+        acpi_dsdt_add_cmdqv(scope, irq, base_cmdqv, size_cmdqv, base_smmu, 0);
+    }
 
     aml_append(dsdt, scope);
 
