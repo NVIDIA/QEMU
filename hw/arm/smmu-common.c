@@ -78,6 +78,10 @@ SMMUTLBEntry *smmu_iotlb_lookup(SMMUState *bs, SMMUTransCfg *cfg,
     uint8_t level = 4 - (inputsize - 4) / stride;
     SMMUTLBEntry *entry = NULL;
 
+    /* With CMDQV, TLBI commands will not be trapped so it cannot use iotlb */
+    if (bs->has_cmdqv) {
+        return NULL;
+    }
     while (level <= 3) {
         uint64_t subpage_size = 1ULL << level_shift(level, tt->granule_sz);
         uint64_t mask = subpage_size - 1;
@@ -113,6 +117,10 @@ void smmu_iotlb_insert(SMMUState *bs, SMMUTransCfg *cfg, SMMUTLBEntry *new)
     SMMUIOTLBKey *key = g_new0(SMMUIOTLBKey, 1);
     uint8_t tg = (new->granule - 10) / 2;
 
+    /* With CMDQV, TLBI commands will not be trapped so it cannot use iotlb */
+    if (bs->has_cmdqv) {
+        return;
+    }
     if (g_hash_table_size(bs->iotlb) >= SMMU_IOTLB_MAX_SIZE) {
         smmu_iotlb_inv_all(bs);
     }
@@ -698,6 +706,20 @@ static SMMUS2Hwpt *smmu_dev_attach_s2_hwpt(SMMUDevice *sdev,
     s2_hwpt->ioas_id = idev->ioas_id;
 
     QLIST_INSERT_HEAD(&s->s2_hwpt_list, s2_hwpt, next);
+
+    if (s->has_cmdqv) {
+        if (s->viommu) {
+            iommufd_backend_free_id(s->iommufd, s2_hwpt_id);
+            error_setg(errp, "Multi CMDQV-enabled vSMMU case is not supported");
+        }
+        s->viommu = iommufd_backend_alloc_viommu(s->iommufd, idev->devid,
+                        IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV, s2_hwpt_id);
+        if (!s->viommu) {
+            error_report("Unable to allocate viommu");
+            s->has_cmdqv = false;
+        }
+    }
+
     return s2_hwpt;
 }
 
@@ -709,6 +731,7 @@ static int smmu_dev_set_iommu_device(PCIBus *bus, void *opaque, int devfn,
     SMMUState *s = opaque;
     SMMUPciBus *sbus = smmu_get_sbus(s, bus);
     SMMUDevice *sdev = smmu_get_sdev(s, sbus, bus, devfn);
+    int ret;
 
     if (!s->iommufd) {
         return -ENOENT;
@@ -740,6 +763,12 @@ static int smmu_dev_set_iommu_device(PCIBus *bus, void *opaque, int devfn,
     sdev->s2_hwpt = s2_hwpt;
     QLIST_INSERT_HEAD(&s2_hwpt->device_list, sdev, next);
     trace_smmu_set_iommu_device(devfn, smmu_get_sid(sdev));
+
+    ret = smmu_iommu_dev_set_virtual_id(sdev, smmu_get_sid(sdev));
+    if (ret) {
+        error_report("failed to set Virtual id %d", smmu_get_sid(sdev));
+        return ret;
+    }
 
     return 0;
 }
@@ -933,7 +962,7 @@ int smmu_iommu_dev_set_virtual_id(SMMUDevice *sdev, uint64_t id)
 
 void *smmu_iommu_get_shared_page(SMMUState *s, uint32_t size, bool readonly)
 {
-    if (!s->iommufd || !s->viommu) {
+    if (!s->iommufd || !s->viommu || !s->has_cmdqv) {
         return NULL;
     }
     return iommufd_viommu_get_shared_page(s->viommu,
@@ -942,7 +971,7 @@ void *smmu_iommu_get_shared_page(SMMUState *s, uint32_t size, bool readonly)
 
 void smmu_iommu_put_shared_page(SMMUState *s, void *page, uint32_t size)
 {
-    if (!s->iommufd || !s->viommu) {
+    if (!s->iommufd || !s->viommu || !s->has_cmdqv) {
         return;
     }
     iommufd_viommu_put_shared_page(s->viommu, page, size);
@@ -1028,6 +1057,7 @@ static Property smmu_dev_properties[] = {
     DEFINE_PROP_LINK("iommufd", SMMUState, iommufd,
                      TYPE_IOMMUFD_BACKEND, IOMMUFDBackend *),
     DEFINE_PROP_BOOL("nested", SMMUState, nested, false),
+    DEFINE_PROP_BOOL("cmdqv", SMMUState, has_cmdqv, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
