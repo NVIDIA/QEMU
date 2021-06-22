@@ -37,6 +37,7 @@ config ARM_VIRT
     select VIRTIO_MEM_SUPPORTED
     select ACPI_CXL
     select ACPI_HMAT
+    select TEGRA241_CMDQV
 
 config CUBIEBOARD
     bool
@@ -578,6 +579,9 @@ config FSL_IMX7
     select UNIMP
 
 config ARM_SMMUV3
+    bool
+
+config TEGRA241_CMDQV
     bool
 
 config FSL_IMX6UL

@@ -942,9 +942,23 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
     viommu = g_new0(SMMUViommu, 1);
     viommu->smmu = s;
 
-    viommu->core = iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
-                                                IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
-                                                s2_hwpt_id, 0, NULL);
+    if (s->has_cmdqv) {
+        viommu->core = iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
+                                                    IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV,
+                                                    s2_hwpt_id, sizeof(viommu->cmdqv_data),
+                                                    &viommu->cmdqv_data);
+        if (!viommu->core) {
+            error_report("CMDQV is unsupported, falling back to nested smmuv3");
+            s->has_cmdqv = false;
+        }
+    }
+
+    if (!viommu->core) {
+        viommu->core = iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
+                                                    IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
+                                                    s2_hwpt_id, 0, NULL);
+    }
+
     if (!viommu->core) {
         error_report("failed to allocate a viommu");
         goto free_viommu;
@@ -1212,7 +1226,7 @@ int smmu_viommu_invalidate_cache(IOMMUFDViommu *viommu, uint32_t type,
 
 void *smmu_viommu_get_shared_page(SMMUState *s, uint32_t size)
 {
-    if (!s->viommu) {
+    if (!s->viommu || !s->has_cmdqv) {
         return NULL;
     }
 
@@ -1221,7 +1235,7 @@ void *smmu_viommu_get_shared_page(SMMUState *s, uint32_t size)
 
 void smmu_viommu_put_shared_page(SMMUState *s, void *page, uint32_t size)
 {
-    if (!s->viommu) {
+    if (!s->viommu || !s->has_cmdqv) {
         return;
     }
 
@@ -1296,6 +1310,7 @@ static const Property smmu_dev_properties[] = {
     DEFINE_PROP_LINK("primary-bus", SMMUState, primary_bus,
                      TYPE_PCI_BUS, PCIBus *),
     DEFINE_PROP_BOOL("nested", SMMUState, nested, false),
+    DEFINE_PROP_BOOL("cmdqv", SMMUState, has_cmdqv, false),
 };
 
 static void smmu_base_class_init(ObjectClass *klass, void *data)

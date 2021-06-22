@@ -136,6 +136,7 @@ typedef struct SMMUViommu {
     IOMMUFDVeventq *veventq;
     uint32_t bypass_hwpt_id;
     uint32_t abort_hwpt_id;
+    struct iommu_viommu_tegra241_cmdqv cmdqv_data;
     QLIST_HEAD(, SMMUDevice) device_list;
     QLIST_ENTRY(SMMUViommu) next;
 } SMMUViommu;
@@ -195,6 +196,7 @@ struct SMMUState {
 
     /* Nested SMMU */
     bool nested;
+    bool has_cmdqv;
     SMMUViommu *viommu;
     QemuThread event_thread_id;
     bool event_thread_stop;
