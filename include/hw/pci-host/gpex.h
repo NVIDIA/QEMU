@@ -45,6 +45,7 @@ struct GPEXConfig {
     MemMapEntry pio;
     int         irq;
     PCIBus      *bus;
+    bool        preserve_config;
 };
 
 typedef struct GPEXIrq GPEXIrq;
