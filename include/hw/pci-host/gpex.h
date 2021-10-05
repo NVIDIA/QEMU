@@ -47,6 +47,7 @@ struct GPEXConfig {
     MemMapEntry pio;
     int         irq;
     PCIBus      *bus;
+    bool        preserve_config;
 };
 
 struct GPEXHost {
