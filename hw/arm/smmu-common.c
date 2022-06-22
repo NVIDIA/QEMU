@@ -20,6 +20,7 @@
 #include "trace.h"
 #include "exec/target_page.h"
 #include "hw/core/cpu.h"
+#include "hw/pci/pci_device.h"
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/jhash.h"
@@ -632,9 +633,132 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
     return &sdev->as;
 }
 
+static SMMUS2Hwpt *smmu_dev_attach_s2_hwpt(SMMUDevice *sdev,
+                                           HIODIOMMUFD *idev, Error **errp)
+{
+    SMMUState *s = sdev->smmu;
+    SMMUS2Hwpt *s2_hwpt;
+    uint32_t s2_hwpt_id;
+    int ret;
+
+    QLIST_FOREACH(s2_hwpt, &s->s2_hwpt_list, next) {
+        if (!hiod_iommufd_attach_hwpt(idev, s2_hwpt->hwpt_id, NULL)) {
+            return s2_hwpt;
+        }
+    }
+
+    ret = iommufd_backend_alloc_hwpt(s->iommufd, idev->devid,
+                                     idev->ioas_id,
+                                     IOMMU_HWPT_ALLOC_NEST_PARENT,
+                                     IOMMU_HWPT_DATA_NONE, 0, NULL,
+                                     &s2_hwpt_id);
+    if (ret) {
+        error_setg(errp, "failed to allocate an S2 hwpt");
+        return NULL;
+    }
+
+    ret = hiod_iommufd_attach_hwpt(idev, s2_hwpt_id, errp);
+    if (ret) {
+        iommufd_backend_free_id(s->iommufd, s2_hwpt_id);
+        error_setg(errp, "failed to attach stage-2 HW pagetable: %d", ret);
+        return NULL;
+    }
+
+    s2_hwpt = g_new0(SMMUS2Hwpt, 1);
+    s2_hwpt->iommufd = s->iommufd;
+    s2_hwpt->hwpt_id = s2_hwpt_id;
+    s2_hwpt->ioas_id = idev->ioas_id;
+
+    QLIST_INSERT_HEAD(&s->s2_hwpt_list, s2_hwpt, next);
+    return s2_hwpt;
+}
+
+static int smmu_dev_set_iommu_device(PCIBus *bus, void *opaque, int devfn,
+                                     HostIOMMUDevice *hiod, Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(hiod);
+    SMMUS2Hwpt *s2_hwpt;
+    SMMUState *s = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(s, bus);
+    SMMUDevice *sdev = smmu_get_sdev(s, sbus, bus, devfn);
+
+    if (!s->iommufd) {
+        return -ENOENT;
+    }
+
+    if (!s->nested) {
+        return 0;
+    }
+
+    if (sdev->idev) {
+        if (sdev->idev != idev) {
+            return -EEXIST;
+        } else {
+            return 0;
+        }
+    }
+
+    if (!idev) {
+        return 0;
+    }
+
+    s2_hwpt = smmu_dev_attach_s2_hwpt(sdev, idev, errp);
+    if (!s2_hwpt) {
+        error_report("Unable to get stage-2 HW pagetable");
+        return -ENOMEM;
+    }
+
+    sdev->idev = idev;
+    sdev->s2_hwpt = s2_hwpt;
+    QLIST_INSERT_HEAD(&s2_hwpt->device_list, sdev, next);
+    trace_smmu_set_iommu_device(devfn, smmu_get_sid(sdev));
+
+    return 0;
+}
+
+static void smmu_dev_unset_iommu_device(PCIBus *bus, void *opaque, int devfn)
+{
+    SMMUDevice *sdev;
+    SMMUS2Hwpt *s2_hwpt;
+    SMMUState *s = opaque;
+    SMMUPciBus *sbus = g_hash_table_lookup(s->smmu_pcibus_by_busptr, bus);
+
+    if (!s->iommufd || !s->nested) {
+        return;
+    }
+
+    if (!sbus) {
+        return;
+    }
+
+    sdev = sbus->pbdev[devfn];
+    if (!sdev) {
+        return;
+    }
+
+    if (hiod_iommufd_attach_hwpt(sdev->idev, sdev->idev->ioas_id, NULL)) {
+        error_report("Unable to attach dev to the default HW pagetable");
+    }
+
+    s2_hwpt = sdev->s2_hwpt;
+
+    sdev->idev = NULL;
+    sdev->s2_hwpt = NULL;
+    QLIST_REMOVE(sdev, next);
+    trace_smmu_unset_iommu_device(devfn, smmu_get_sid(sdev));
+
+    if (QLIST_EMPTY(&s2_hwpt->device_list)) {
+        iommufd_backend_free_id(s2_hwpt->iommufd, s2_hwpt->hwpt_id);
+        QLIST_REMOVE(s2_hwpt, next);
+        g_free(s2_hwpt);
+    }
+}
+
 static const PCIIOMMUOps smmu_ops = {
     .get_address_space = smmu_find_add_as,
     .get_msi_address_space = smmu_find_add_as,
+    .set_iommu_device = smmu_dev_set_iommu_device,
+    .unset_iommu_device = smmu_dev_unset_iommu_device,
 };
 
 SMMUDevice *smmu_find_sdev(SMMUState *s, uint32_t sid)

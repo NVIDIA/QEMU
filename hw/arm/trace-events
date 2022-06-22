@@ -5,6 +5,8 @@ virt_acpi_setup(void) "No fw cfg or ACPI disabled. Bailing out."
 
 # smmu-common.c
 smmu_add_mr(const char *name) "%s"
+smmu_set_iommu_device(int devfn, uint32_t sid) "devfn=%d (sid=%d)"
+smmu_unset_iommu_device(int devfn, uint32_t sid) "devfn=%d (sid=%d)"
 smmu_ptw_level(int stage, int level, uint64_t iova, size_t subpage_size, uint64_t baseaddr, uint32_t offset, uint64_t pte) "stage=%d level=%d iova=0x%"PRIx64" subpage_sz=0x%zx baseaddr=0x%"PRIx64" offset=%d => pte=0x%"PRIx64
 smmu_ptw_invalid_pte(int stage, int level, uint64_t baseaddr, uint64_t pteaddr, uint32_t offset, uint64_t pte) "stage=%d level=%d base@=0x%"PRIx64" pte@=0x%"PRIx64" offset=%d pte=0x%"PRIx64
 smmu_ptw_page_pte(int stage, int level,  uint64_t iova, uint64_t baseaddr, uint64_t pteaddr, uint64_t pte, uint64_t address) "stage=%d level=%d iova=0x%"PRIx64" base@=0x%"PRIx64" pte@=0x%"PRIx64" pte=0x%"PRIx64" page address = 0x%"PRIx64
