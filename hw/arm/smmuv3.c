@@ -1743,6 +1743,11 @@ static void smmu_realize(DeviceState *d, Error **errp)
     SysBusDevice *dev = SYS_BUS_DEVICE(d);
     Error *local_err = NULL;
 
+    if (s->stage && !strcmp("2", s->stage)) {
+        /* Cannot support nested with an stage2 only vSMMU */
+        sys->nested = false;
+    }
+
     c->parent_realize(d, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
