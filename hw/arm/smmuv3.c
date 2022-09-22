@@ -254,8 +254,38 @@ void smmuv3_record_event(SMMUv3State *s, SMMUEventInfo *info)
     info->recorded = true;
 }
 
+static int smmuv3_init_hw_regs(SMMUDevice *sdev)
+{
+    struct iommu_hw_info_arm_smmuv3 *info = &sdev->info;
+    uint32_t data_type;
+    int ret;
+
+    ret = smmu_dev_get_info(sdev, &data_type, sizeof(*info), info);
+    if (ret) {
+        error_report("failed to get SMMU device info");
+        return ret;
+    }
+
+    if (data_type != IOMMU_HW_INFO_TYPE_ARM_SMMUV3) {
+        error_report( "Wrong data type (%d)!", data_type);
+        return -ENOENT;
+    }
+
+    trace_smmuv3_get_device_info(info->idr[0], info->idr[1],
+                                 info->idr[3], info->idr[5]);
+
+    /* FIXME check iidr and aidr registrs too */
+
+    return 0;
+}
+
 static void smmuv3_init_regs(SMMUv3State *s)
 {
+    SMMUState *bs = ARM_SMMU(s);
+    SMMUDevice *sdev = NULL;
+    SMMUS2Hwpt *s2_hwpt;
+    uint32_t val;
+
     /* Based on sys property, the stages supported in smmu will be advertised.*/
     if (s->stage && !strcmp("2", s->stage)) {
         s->idr[0] = FIELD_DP32(s->idr[0], IDR0, S2P, 1);
@@ -291,6 +321,58 @@ static void smmuv3_init_regs(SMMUv3State *s)
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN4K, 1);
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, 1);
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, 1);
+
+    /*
+     * FIXME with nested-smmuv3, there is only one vSMMU instance at this point,
+     * so the vSMMU can support only one copy of hw_info, i.e. it cannot support
+     * physical SMMUs with different capabilities. With that, take the first.
+     */
+    if (bs->nested) {
+        /*
+         * FIXME a passthrough device can be hotplugged after system boots. So
+         * the s2_hwpt_list might be empty until the hotplug happens, in which
+         * case the nested SMMU should be idle and reset after such a hotplug.
+         */
+        s2_hwpt = QLIST_FIRST(&bs->s2_hwpt_list);
+        if (s2_hwpt) {
+            sdev = QLIST_FIRST(&s2_hwpt->device_list);
+        }
+    }
+    if (sdev && (sdev->info.idr[0] || !smmuv3_init_hw_regs(sdev))) {
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, BTM);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, BTM, val);
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, ATS);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, ATS, val);
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, ASID16);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, ASID16, val);
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, TERM_MODEL);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, TERM_MODEL, val);
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, STALL_MODEL);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, STALL_MODEL, val);
+        val = FIELD_EX32(sdev->info.idr[0], IDR0, STLEVEL);
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, STLEVEL, val);
+
+        val = FIELD_EX32(sdev->info.idr[1], IDR1, SIDSIZE);
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SIDSIZE, val);
+        val = FIELD_EX32(sdev->info.idr[1], IDR1, SSIDSIZE);
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SSIDSIZE, val);
+
+        val = FIELD_EX32(sdev->info.idr[3], IDR3, HAD);
+        s->idr[3] = FIELD_DP32(s->idr[3], IDR3, HAD, val);
+        val = FIELD_EX32(sdev->info.idr[3], IDR3, RIL);
+        s->idr[3] = FIELD_DP32(s->idr[3], IDR3, RIL, val);
+        val = FIELD_EX32(sdev->info.idr[3], IDR3, BBML);
+        s->idr[3] = FIELD_DP32(s->idr[3], IDR3, BBML, val);
+
+        val = FIELD_EX32(sdev->info.idr[5], IDR5, GRAN4K);
+        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN4K, val);
+        val = FIELD_EX32(sdev->info.idr[5], IDR5, GRAN16K);
+        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, val);
+        val = FIELD_EX32(sdev->info.idr[5], IDR5, GRAN64K);
+        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, val);
+        val = FIELD_EX32(sdev->info.idr[5], IDR5, OAS);
+        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, val);
+    }
 
     s->cmdq.base = deposit64(s->cmdq.base, 0, 5, SMMU_CMDQS);
     s->cmdq.prod = 0;
@@ -658,8 +740,10 @@ static int smmu_find_ste(SMMUv3State *s, uint32_t sid, STE *ste,
     return 0;
 }
 
-static int decode_cd(SMMUTransCfg *cfg, CD *cd, SMMUEventInfo *event)
+static int decode_cd(SMMUv3State *s, SMMUTransCfg *cfg, CD *cd,
+                     SMMUEventInfo *event)
 {
+    uint32_t idr5_oas = FIELD_EX32(s->idr[5], IDR5, OAS);
     int ret = -EINVAL;
     int i;
 
@@ -681,7 +765,7 @@ static int decode_cd(SMMUTransCfg *cfg, CD *cd, SMMUEventInfo *event)
     cfg->stage = 1;
 
     cfg->oas = oas2bits(CD_IPS(cd));
-    cfg->oas = MIN(oas2bits(SMMU_IDR5_OAS), cfg->oas);
+    cfg->oas = MIN(oas2bits(idr5_oas), cfg->oas);
     cfg->tbi = CD_TBI(cd);
     cfg->asid = CD_ASID(cd);
     cfg->affd = CD_AFFD(cd);
@@ -771,7 +855,7 @@ static int smmuv3_decode_config(IOMMUMemoryRegion *mr, SMMUTransCfg *cfg,
         return ret;
     }
 
-    return decode_cd(cfg, &cd, event);
+    return decode_cd(s, cfg, &cd, event);
 }
 
 /**
