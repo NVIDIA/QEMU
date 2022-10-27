@@ -1185,6 +1185,20 @@
             '*node-affinity': ['uint16'] } }
 
 ##
+# @RmeGuestMeasurementAlgorithm:
+#
+# @sha256: Use the SHA256 algorithm
+#
+# @sha512: Use the SHA512 algorithm
+#
+# Algorithm to use for realm measurements
+#
+# Since: 10.0
+##
+{ 'enum': 'RmeGuestMeasurementAlgorithm',
+  'data': ['sha256', 'sha512'] }
+
+##
 # @RmeGuestProperties:
 #
 # Properties for rme-guest objects.
@@ -1193,10 +1207,14 @@
 #     This optional parameter allows to uniquely identify the VM instance
 #     during attestation. (default: all-zero)
 #
+# @measurement-algorithm: Realm measurement algorithm
+#     (default: sha512)
+#
 # Since: 10.0
 ##
 { 'struct': 'RmeGuestProperties',
-  'data': { '*personalization-value': 'str' } }
+  'data': { '*personalization-value': 'str',
+            '*measurement-algorithm': 'RmeGuestMeasurementAlgorithm' } }
 
 ##
 # @ObjectType:
