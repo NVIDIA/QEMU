@@ -523,9 +523,46 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_CTX_ENTRY_LEGACY_SIZE     16
 #define VTD_CTX_ENTRY_SCALABLE_SIZE   32
 
+#define VTD_SM_CONTEXT_ENTRY_PDTS(val)      (((val) >> 9) & 0x7)
 #define VTD_SM_CONTEXT_ENTRY_RID2PASID_MASK 0xfffff
 #define VTD_SM_CONTEXT_ENTRY_RSVD_VAL0(aw)  (0x1e0ULL | ~VTD_HAW_MASK(aw))
 #define VTD_SM_CONTEXT_ENTRY_RSVD_VAL1      0xffffffffffe00000ULL
+
+typedef enum VTDPCInvType {
+    /* force reset all */
+    VTD_PASID_CACHE_FORCE_RESET = 0,
+    /* pasid cache invalidation rely on guest PASID entry */
+    VTD_PASID_CACHE_GLOBAL_INV,
+    VTD_PASID_CACHE_DOMSI,
+    VTD_PASID_CACHE_PASIDSI,
+} VTDPCInvType;
+
+typedef struct VTDPASIDCacheInfo {
+    VTDPCInvType type;
+    uint16_t domain_id;
+    uint32_t pasid;
+    PCIBus *bus;
+    uint16_t devfn;
+} VTDPASIDCacheInfo;
+
+struct pasid_key {
+    uint32_t pasid;
+    uint16_t sid;
+};
+
+typedef struct VTDPASIDCacheEntry {
+    struct VTDPASIDEntry pasid_entry;
+} VTDPASIDCacheEntry;
+
+typedef struct VTDPASIDAddressSpace {
+    PCIBus *bus;
+    uint8_t devfn;
+    uint32_t pasid;
+    IntelIOMMUState *iommu_state;
+    VTDContextCacheEntry context_cache_entry;
+    QLIST_ENTRY(VTDPASIDAddressSpace) next;
+    VTDPASIDCacheEntry pasid_cache_entry;
+} VTDPASIDAddressSpace;
 
 /* PASID Table Related Definitions */
 #define VTD_PASID_DIR_BASE_ADDR_MASK  (~0xfffULL)
@@ -538,6 +575,7 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_PASID_TABLE_BITS_MASK     (0x3fULL)
 #define VTD_PASID_TABLE_INDEX(pasid)  ((pasid) & VTD_PASID_TABLE_BITS_MASK)
 #define VTD_PASID_ENTRY_FPD           (1ULL << 1) /* Fault Processing Disable */
+#define VTD_PASID_TBL_ENTRY_NUM       (1ULL << 6)
 
 /* PASID Granular Translation Type Mask */
 #define VTD_PASID_ENTRY_P              1ULL

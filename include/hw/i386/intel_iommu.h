@@ -293,6 +293,7 @@ struct IntelIOMMUState {
 
     GHashTable *vtd_address_spaces;             /* VTD address spaces */
     VTDAddressSpace *vtd_as_cache[VTD_PCI_BUS_MAX]; /* VTD address space cache */
+    GHashTable *vtd_pasid_as;       /* VTDPASIDAddressSpace instances */
     /* list of registered notifiers */
     QLIST_HEAD(, VTDAddressSpace) vtd_as_with_notifiers;
 
