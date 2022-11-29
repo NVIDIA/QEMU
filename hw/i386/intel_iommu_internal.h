@@ -525,6 +525,23 @@ typedef struct VTDRootEntry VTDRootEntry;
 
 #define VTD_SM_PASID_ENTRY_FLPM          3ULL
 
+#define VTD_SM_PASID_ENTRY_FLPM          3ULL
+#define VTD_SM_PASID_ENTRY_FLPTPTR       (~0xfffULL)
+
+/* Paging Structure common */
+#define VTD_FL_PT_PAGE_SIZE_MASK    (1ULL << 7)
+/* Bits to decide the offset for each level */
+#define VTD_FL_LEVEL_BITS           9
+
+/* First Level Paging Structure */
+#define VTD_FL_PT_LEVEL             1
+#define VTD_FL_PT_ENTRY_NR          512
+
+/* Masks for First Level Paging Entry */
+#define VTD_FL_RW_MASK              (1ULL << 1)
+#define VTD_FL_PT_BASE_ADDR_MASK(aw) (~(VTD_PAGE_SIZE - 1) & VTD_HAW_MASK(aw))
+#define VTD_PASID_ENTRY_FPD         (1ULL << 1) /* Fault Processing Disable */
+
 /* Second Level Page Translation Pointer*/
 #define VTD_SM_PASID_ENTRY_SLPTPTR     (~0xfffULL)
 

@@ -964,7 +964,11 @@ static uint32_t vtd_get_iova_level(IntelIOMMUState *s,
 
     if (s->root_scalable) {
         vtd_ce_get_rid2pasid_entry(s, ce, &pe, pasid);
-        return VTD_PE_GET_LEVEL(&pe);
+        if (s->scalable_modern) {
+            return VTD_PE_GET_FLPT_LEVEL(&pe);
+        } else {
+            return VTD_PE_GET_LEVEL(&pe);
+        }
     }
 
     return vtd_ce_get_level(ce);
@@ -1051,7 +1055,11 @@ static dma_addr_t vtd_get_iova_pgtbl_base(IntelIOMMUState *s,
 
     if (s->root_scalable) {
         vtd_ce_get_rid2pasid_entry(s, ce, &pe, pasid);
-        return pe.val[0] & VTD_SM_PASID_ENTRY_SLPTPTR;
+        if (s->scalable_modern) {
+            return pe.val[2] & VTD_SM_PASID_ENTRY_FLPTPTR;
+        } else {
+            return pe.val[0] & VTD_SM_PASID_ENTRY_SLPTPTR;
+        }
     }
 
     return vtd_ce_get_slpt_base(ce);
@@ -1853,6 +1861,106 @@ out:
     trace_vtd_pt_enable_fast_path(source_id, success);
 }
 
+/* The shift of an addr for a certain level of paging structure */
+static inline uint32_t vtd_flpt_level_shift(uint32_t level)
+{
+    assert(level != 0);
+    return VTD_PAGE_SHIFT_4K + (level - 1) * VTD_FL_LEVEL_BITS;
+}
+
+/*
+ * Given an iova and the level of paging structure, return the offset
+ * of current level.
+ */
+static inline uint32_t vtd_iova_fl_level_offset(uint64_t iova, uint32_t level)
+{
+    return (iova >> vtd_flpt_level_shift(level)) &
+            ((1ULL << VTD_FL_LEVEL_BITS) - 1);
+}
+
+/* Get the content of a flpte located in @base_addr[@index] */
+static uint64_t vtd_get_flpte(dma_addr_t base_addr, uint32_t index)
+{
+    uint64_t flpte;
+
+    assert(index < VTD_FL_PT_ENTRY_NR);
+
+    if (dma_memory_read(&address_space_memory,
+                        base_addr + index * sizeof(flpte), &flpte,
+                        sizeof(flpte), MEMTXATTRS_UNSPECIFIED)) {
+        flpte = (uint64_t)-1;
+        return flpte;
+    }
+    flpte = le64_to_cpu(flpte);
+    return flpte;
+}
+
+static inline bool vtd_flpte_present(uint64_t flpte)
+{
+    return !!(flpte & 0x1);
+}
+
+/* Whether the pte indicates the address of the page frame */
+static inline bool vtd_is_last_flpte(uint64_t flpte, uint32_t level)
+{
+    return level == VTD_FL_PT_LEVEL || (flpte & VTD_FL_PT_PAGE_SIZE_MASK);
+}
+
+static inline uint64_t vtd_get_flpte_addr(uint64_t flpte, uint8_t aw)
+{
+    return flpte & VTD_FL_PT_BASE_ADDR_MASK(aw);
+}
+
+/*
+ * Given the @iova, get relevant @flptep. @flpte_level will be the last level
+ * of the translation, can be used for deciding the size of large page.
+ */
+static int vtd_iova_to_flpte(IntelIOMMUState *s, VTDContextEntry *ce,
+                             uint64_t iova, bool is_write,
+                             uint64_t *flptep, uint32_t *flpte_level,
+                             bool *reads, bool *writes, uint8_t aw_bits,
+                             uint32_t pasid)
+{
+    dma_addr_t addr = vtd_get_iova_pgtbl_base(s, ce, pasid);
+    uint32_t level = vtd_get_iova_level(s, ce, pasid);
+    uint32_t offset;
+    uint64_t flpte;
+
+    while (true) {
+        offset = vtd_iova_fl_level_offset(iova, level);
+        flpte = vtd_get_flpte(addr, offset);
+        if (flpte == (uint64_t)-1) {
+            if (level == vtd_get_iova_level(s, ce, pasid)) {
+                /* Invalid programming of context-entry */
+                return -VTD_FR_CONTEXT_ENTRY_INV;
+            } else {
+                return -VTD_FR_PAGING_ENTRY_INV;
+            }
+        }
+
+        if (!vtd_flpte_present(flpte)) {
+            *reads = false;
+            *writes = false;
+            return -VTD_FR_PAGING_ENTRY_INV;
+        }
+
+        *reads = true;
+        *writes = (*writes) && (flpte & VTD_FL_RW_MASK);
+        if (is_write && !(flpte & VTD_FL_RW_MASK)) {
+            return -VTD_FR_WRITE;
+        }
+
+        if (vtd_is_last_flpte(flpte, level)) {
+            *flptep = flpte;
+            *flpte_level = level;
+            return 0;
+        }
+
+        addr = vtd_get_flpte_addr(flpte, aw_bits);
+        level--;
+    }
+}
+
 static void vtd_report_fault(IntelIOMMUState *s,
                              int err, bool is_fpd_set,
                              uint16_t source_id,
@@ -2001,8 +2109,13 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
         }
     }
 
-    ret_fr = vtd_iova_to_slpte(s, &ce, addr, is_write, &pte, &level,
-                               &reads, &writes, s->aw_bits, pasid);
+    if (s->scalable_modern) {
+        ret_fr = vtd_iova_to_flpte(s, &ce, addr, is_write, &pte, &level,
+                                   &reads, &writes, s->aw_bits, pasid);
+    } else {
+        ret_fr = vtd_iova_to_slpte(s, &ce, addr, is_write, &pte, &level,
+                                   &reads, &writes, s->aw_bits, pasid);
+    }
 
     if (ret_fr) {
         vtd_report_fault(s, -ret_fr, is_fpd_set, source_id,
