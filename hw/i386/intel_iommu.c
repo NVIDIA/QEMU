@@ -4210,6 +4210,12 @@ static int vtd_check_legacy_hdev(IntelIOMMUState *s,
     HIOD_LEGACY_INFO info;
     int ret;
 
+    if (s->scalable_modern) {
+        /* Modern vIOMMU and legacy backend */
+        error_setg(errp, "Need IOMMUFD backend in scalable modern mode");
+        return -EINVAL;
+    }
+
     ret = hiodc->get_host_iommu_info(hiod, &info, sizeof(info), errp);
     if (ret) {
         return ret;
@@ -4251,6 +4257,21 @@ static int vtd_check_iommufd_hdev(IntelIOMMUState *s,
         return -EINVAL;
     }
 
+    if (!s->scalable_modern) {
+        goto done;
+    }
+
+    if (!(vtd->ecap_reg & VTD_ECAP_NEST)) {
+        error_setg(errp, "Host IOMMU doesn't support nested translation");
+        return -EINVAL;
+    }
+
+    if (s->fl1gp && !(vtd->cap_reg & VTD_CAP_FL1GP)) {
+        error_setg(errp, "Stage-1 1GB huge page is unsupported by host IOMMU");
+        return -EINVAL;
+    }
+
+done:
     return 0;
 }
 
