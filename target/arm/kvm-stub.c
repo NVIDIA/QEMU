@@ -139,3 +139,8 @@ int kvm_arm_rme_vm_type(MachineState *ms)
 {
     g_assert_not_reached();
 }
+
+int kvm_arm_rme_vcpu_init(CPUState *cs)
+{
+    g_assert_not_reached();
+}
