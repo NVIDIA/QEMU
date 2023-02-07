@@ -12,6 +12,7 @@
 #include "kvm_arm.h"
 #include "migration/blocker.h"
 #include "qapi/error.h"
+#include "qemu/base64.h"
 #include "qemu/error-report.h"
 #include "qom/object_interfaces.h"
 #include "system/confidential-guest-support.h"
@@ -33,6 +34,9 @@ struct RmeGuest {
     Notifier rom_load_notifier;
     GSList *ram_regions;
 
+    char *personalization_value_str;
+    uint8_t personalization_value[ARM_RME_CONFIG_RPV_SIZE];
+
     RmeRamRegion init_ram;
 };
 
@@ -41,6 +45,48 @@ OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(RmeGuest, rme_guest, RME_GUEST,
                                           { TYPE_USER_CREATABLE }, { })
 
 static RmeGuest *rme_guest;
+
+static int rme_configure_one(RmeGuest *guest, uint32_t cfg, Error **errp)
+{
+    int ret;
+    const char *cfg_str;
+    struct arm_rme_config args = {
+        .cfg = cfg,
+    };
+
+    switch (cfg) {
+    case ARM_RME_CONFIG_RPV:
+        memcpy(args.rpv, guest->personalization_value, ARM_RME_CONFIG_RPV_SIZE);
+        cfg_str = "personalization value";
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+                            KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&args);
+    if (ret) {
+        error_setg_errno(errp, -ret, "failed to configure %s", cfg_str);
+    }
+    return ret;
+}
+
+static int rme_configure(Error **errp)
+{
+    int ret;
+    size_t option;
+    const uint32_t config_options[] = {
+        ARM_RME_CONFIG_RPV,
+    };
+
+    for (option = 0; option < ARRAY_SIZE(config_options); option++) {
+        ret = rme_configure_one(rme_guest, config_options[option], errp);
+        if (ret) {
+            return ret;
+        }
+    }
+    return 0;
+}
 
 static int rme_init_ram(RmeRamRegion *ram, Error **errp)
 {
@@ -122,6 +168,10 @@ static int rme_create_realm(Error **errp)
 {
     int ret;
 
+    if (rme_configure(errp)) {
+        return -1;
+    }
+
     ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
                             KVM_CAP_ARM_RME_CREATE_REALM);
     if (ret) {
@@ -167,8 +217,43 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
     }
 }
 
+static char *rme_get_rpv(Object *obj, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    return g_strdup(guest->personalization_value_str);
+}
+
+static void rme_set_rpv(Object *obj, const char *value, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+    g_autofree uint8_t *rpv;
+    size_t len;
+
+    rpv = qbase64_decode(value, -1, &len, errp);
+    if (!rpv) {
+        return;
+    }
+
+    if (len != sizeof(guest->personalization_value)) {
+        error_setg(errp,
+                   "expecting a Realm Personalization Value of size %zu, got %zu\n",
+                   sizeof(guest->personalization_value), len);
+        return;
+    }
+    memcpy(guest->personalization_value, rpv, len);
+
+    /* Save the value so we don't need to encode it in the getter */
+    g_free(guest->personalization_value_str);
+    guest->personalization_value_str = g_strdup(value);
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
+    object_class_property_add_str(oc, "personalization-value", rme_get_rpv,
+                                  rme_set_rpv);
+    object_class_property_set_description(oc, "personalization-value",
+            "Realm personalization value (64 bytes encodede in base64)");
 }
 
 static void rme_guest_init(Object *obj)
