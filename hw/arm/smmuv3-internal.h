@@ -553,6 +553,7 @@ typedef struct CD {
 
 #define STE_S1FMT(x)       extract32((x)->word[0], 4 , 2)
 #define STE_S1CDMAX(x)     extract32((x)->word[1], 27, 5)
+#define STE_S1DSS(x)       extract32((x)->word[2], 0,  2)
 #define STE_S1STALLD(x)    extract32((x)->word[2], 27, 1)
 #define STE_EATS(x)        extract32((x)->word[2], 28, 2)
 #define STE_STRW(x)        extract32((x)->word[2], 30, 2)

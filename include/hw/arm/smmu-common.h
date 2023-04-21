@@ -122,6 +122,7 @@ typedef struct SMMUS1Hwpt {
     IOMMUFDBackend *iommufd;
     SMMUS2Hwpt *s2_hwpt;
     uint32_t hwpt_id;
+    uint32_t asid;
     QLIST_HEAD(, SMMUDevice) device_list;
     QLIST_ENTRY(SMMUS2Hwpt) next;
 } SMMUS1Hwpt;
@@ -139,6 +140,7 @@ typedef struct SMMUDevice {
     uint32_t           cfg_cache_hits;
     uint32_t           cfg_cache_misses;
     struct iommu_hw_info_arm_smmuv3 info;
+    uint32_t           ste[16];
     QLIST_ENTRY(SMMUDevice) next;
 } SMMUDevice;
 
