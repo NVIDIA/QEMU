@@ -227,6 +227,19 @@ static inline bool smmuv3_gerror_irq_enabled(SMMUv3State *s)
 #define Q_CONS_WRAP(q) (((q)->cons & WRAP_MASK(q)) >> (q)->log2size)
 #define Q_PROD_WRAP(q) (((q)->prod & WRAP_MASK(q)) >> (q)->log2size)
 
+#define Q_IDX(llq, p)                   ((p) & ((1 << (llq)->max_n_shift) - 1))
+
+static inline int smmuv3_q_ncmds(SMMUQueue *q)
+{
+	uint32_t prod = Q_PROD(q);
+	uint32_t cons = Q_CONS(q);
+
+	if (Q_PROD_WRAP(q) == Q_CONS_WRAP(q))
+		return prod - cons;
+	else
+		return WRAP_MASK(q) - cons + prod;
+}
+
 static inline bool smmuv3_q_full(SMMUQueue *q)
 {
     return ((q->cons ^ q->prod) & WRAP_INDEX_MASK(q)) == WRAP_MASK(q);

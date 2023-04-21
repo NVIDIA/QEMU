@@ -1330,16 +1330,180 @@ smmuv3_invalidate_ste(gpointer key, gpointer value, gpointer user_data)
     return true;
 }
 
+/**
+ * SMMUCommandBatch - batch of commands to issue for nested SMMU invalidation
+ * @cmds: Pointer to list of commands
+ * @cons: Pointer to list of CONS corresponding to the commands
+ * @ncmds: Total ncmds in the batch
+ * @s2_hwpt: Current onwer of the batch. NULL means broadcast across.
+ */
+typedef struct SMMUCommandBatch {
+    Cmd *cmds;
+    uint32_t *cons;
+    uint32_t ncmds;
+    SMMUS2Hwpt *s2_hwpt;
+} SMMUCommandBatch;
+
+/* Update batch->ncmds to the number of execute cmds */
+static int smmuv3_hwpt_invalidate_cache(SMMUS2Hwpt *s2_hwpt,
+                                        SMMUCommandBatch *batch)
+{
+    uint32_t total = batch->ncmds;
+    SMMUDevice *sdev = NULL;
+    int ret = 0;
+
+    /*
+     * Though a HWPT invalidation is issed to a nested s1_hwpt, SMMUv3 driver
+     * in the host linux kernel accepts TLBI invalidation commands per VMID,
+     * i.e. per s2_hwpt. So, any nested s1_hwpt associated to the s2_hwpt can
+     * be used to issue the batch owned by the same s2_hwpt.
+     */
+    QLIST_FOREACH(sdev, &s2_hwpt->device_list, next) {
+        if (sdev->s1_hwpt) {
+            break;
+        }
+    }
+
+    /* Nested Translation is not enabled for any device yet */
+    if (!sdev) {
+        return 0;
+    }
+
+    ret = smmu_hwpt_invalidate_cache(sdev->s1_hwpt, IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                     sizeof(Cmd), &batch->ncmds, batch->cmds);
+    if (total != batch->ncmds) {
+        error_report("%s failed: ret=%d, total=%d, done=%d",
+                      __func__, ret, total, batch->ncmds);
+    }
+    return ret;
+}
+
+/* Broadcast to all physical SMMUs via s2_hwpts */
+static int smmuv3_hwpt_invalidate_cache_all(SMMUState *bs,
+                                            SMMUCommandBatch *batch)
+{
+    SMMUS2Hwpt *s2_hwpt;
+    int ret = 0;
+
+    if (!bs->nested) {
+        return 0;
+    }
+
+    QLIST_FOREACH(s2_hwpt, &bs->s2_hwpt_list, next) {
+        ret = smmuv3_hwpt_invalidate_cache(s2_hwpt, batch);
+        if (ret) {
+            return ret;
+        }
+    }
+    return ret;
+}
+
+static int _smmuv3_issue_cmd_batch(SMMUState *bs, SMMUCommandBatch *batch)
+{
+    if (batch->s2_hwpt) {
+        return smmuv3_hwpt_invalidate_cache(batch->s2_hwpt, batch);
+    } else {
+        return smmuv3_hwpt_invalidate_cache_all(bs, batch);
+    }
+}
+
+static int smmuv3_issue_cmd_batch(SMMUState *bs, SMMUCommandBatch *batch)
+{
+    int ret;
+
+    ret = _smmuv3_issue_cmd_batch(bs, batch);
+    if (ret) {
+        return ret;
+    }
+    batch->ncmds = 0;
+    batch->s2_hwpt = NULL;
+    return ret;
+}
+
+/*
+ * Though two s1_hwpts behind different s2_hwpts can have two identical asids,
+ * this won't happen since those two s1_hwpts are behind the same vSMMU in VM.
+ * So, either we find the unique s1_hwpt or nothing.
+ */
+static SMMUS1Hwpt *smmuv3_find_s1hwpt_by_asid(SMMUState *bs, uint16_t asid)
+{
+    SMMUS2Hwpt *s2_hwpt;
+    SMMUDevice *sdev;
+
+    QLIST_FOREACH(s2_hwpt, &bs->s2_hwpt_list, next) {
+        QLIST_FOREACH(sdev, &s2_hwpt->device_list, next) {
+            if (sdev->s1_hwpt && sdev->s1_hwpt->asid == asid) {
+                return sdev->s1_hwpt;
+            }
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Add a new HWPT/TLBI command with the current CONS index to the batch
+ *  - If the new cmd isn't compatible with the batch, consume the batch first
+ *  - If the batch executing fails, rewind the CONS index
+ */
+static int smmuv3_hwpt_batch_cmds(SMMUState *bs, SMMUCommandBatch *batch,
+                                  Cmd *cmd, uint32_t *cons)
+{
+    SMMUS2Hwpt *s2_hwpt = NULL;
+    SMMUS1Hwpt *s1_hwpt = NULL;
+    int ret;
+
+    switch (CMD_TYPE(cmd)) {
+    case SMMU_CMD_TLBI_NH_ASID:
+    case SMMU_CMD_TLBI_NH_VA:
+        s1_hwpt = smmuv3_find_s1hwpt_by_asid(bs, CMD_ASID(cmd));
+        if (!s1_hwpt) {
+            /*
+             * FIXME if asid isn't matched, the command should be ignored.
+             * However, the asid lookup function is flawed because asid(s) used
+             * by substreams are not logged in the list. So a TLBI command per
+             * any of those asids will be mistakenly ignored at this point. Till
+             * the CD lookup function for ssid!=0 is supported, work around this
+             */
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (s1_hwpt) {
+        s2_hwpt = s1_hwpt->s2_hwpt;
+    }
+
+    if (batch->ncmds && s2_hwpt != batch->s2_hwpt) {
+        ret = smmuv3_issue_cmd_batch(bs, batch);
+        if (ret) {
+            *cons = batch->cons[batch->ncmds];
+            return ret;
+        }
+    }
+    batch->s2_hwpt = s2_hwpt;
+    batch->cmds[batch->ncmds] = *cmd;
+    batch->cons[batch->ncmds++] = *cons;
+    return 0;
+}
+
 static int smmuv3_cmdq_consume(SMMUv3State *s)
 {
     SMMUState *bs = ARM_SMMU(s);
     SMMUCmdError cmd_error = SMMU_CERROR_NONE;
     SMMUQueue *q = &s->cmdq;
     SMMUCommandType type = 0;
+    SMMUCommandBatch batch = {};
+    uint32_t ncmds = 0;
 
     if (!smmuv3_cmdq_enabled(s)) {
         return 0;
     }
+
+    ncmds = smmuv3_q_ncmds(q);
+    batch.cmds = g_new0(Cmd, ncmds);
+    batch.cons = g_new0(uint32_t, ncmds);
+
     /*
      * some commands depend on register values, typically CR0. In case those
      * register values change while handling the command, spec says it
@@ -1449,6 +1613,11 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             trace_smmuv3_cmdq_tlbi_nh_asid(asid);
             smmu_inv_notifiers_all(&s->smmu_state);
             smmu_iotlb_inv_asid(bs, asid);
+
+            if (smmuv3_hwpt_batch_cmds(bs, &batch, &cmd, &q->cons)) {
+                cmd_error = SMMU_CERROR_ILL;
+                break;
+            }
             break;
         }
         case SMMU_CMD_TLBI_NH_ALL:
@@ -1461,6 +1630,11 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             trace_smmuv3_cmdq_tlbi_nh();
             smmu_inv_notifiers_all(&s->smmu_state);
             smmu_iotlb_inv_all(bs);
+
+            if (smmuv3_hwpt_batch_cmds(bs, &batch, &cmd, &q->cons)) {
+                cmd_error = SMMU_CERROR_ILL;
+                break;
+            }
             break;
         case SMMU_CMD_TLBI_NH_VAA:
         case SMMU_CMD_TLBI_NH_VA:
@@ -1469,6 +1643,11 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
                 break;
             }
             smmuv3_range_inval(bs, &cmd);
+
+            if (smmuv3_hwpt_batch_cmds(bs, &batch, &cmd, &q->cons)) {
+                cmd_error = SMMU_CERROR_ILL;
+                break;
+            }
             break;
         case SMMU_CMD_TLBI_S12_VMALL:
         {
@@ -1526,12 +1705,22 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
          */
         queue_cons_incr(q);
     }
+    qemu_mutex_lock(&s->mutex);
+    if (!cmd_error && batch.ncmds) {
+        if (smmuv3_issue_cmd_batch(bs, &batch)) {
+            q->cons = batch.cons[batch.ncmds];
+            cmd_error = SMMU_CERROR_ILL;
+        }
+    }
+    qemu_mutex_unlock(&s->mutex);
 
     if (cmd_error) {
         trace_smmuv3_cmdq_consume_error(smmu_cmd_string(type), cmd_error);
         smmu_write_cmdq_err(s, cmd_error);
         smmuv3_trigger_irq(s, SMMU_IRQ_GERROR, R_GERROR_CMDQ_ERR_MASK);
     }
+    g_free(batch.cmds);
+    g_free(batch.cons);
 
     trace_smmuv3_cmdq_consume_out(Q_PROD(q), Q_CONS(q),
                                   Q_PROD_WRAP(q), Q_CONS_WRAP(q));
