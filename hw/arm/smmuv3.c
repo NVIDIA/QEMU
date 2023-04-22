@@ -627,13 +627,14 @@ static int decode_ste(SMMUv3State *s, SMMUTransCfg *cfg,
         }
     }
 
-    if (STE_S1CDMAX(ste) != 0) {
+    if (!FIELD_EX32(s->idr[1], IDR1, SSIDSIZE) && STE_S1CDMAX(ste) != 0) {
         qemu_log_mask(LOG_UNIMP,
                       "SMMUv3 does not support multiple context descriptors yet\n");
         goto bad_ste;
     }
 
-    if (STE_S1STALLD(ste)) {
+    /* STALL_MODEL being 0b01 means "stall is not supported" */
+    if ((FIELD_EX32(s->idr[0], IDR0, STALL_MODEL) & 0x1) && STE_S1STALLD(ste)) {
         qemu_log_mask(LOG_UNIMP,
                       "SMMUv3 S1 stalling fault model not allowed yet\n");
         goto bad_ste;
