@@ -245,4 +245,6 @@ int smmu_dev_invalidate_cache(SMMUDevice *sdev, uint32_t type,
 int smmu_hwpt_invalidate_cache(SMMUS1Hwpt *s1_hwpt, uint32_t type, uint32_t len,
                                uint32_t *num, void *reqs);
 int smmu_iommu_dev_set_virtual_id(SMMUDevice *sdev, uint64_t id);
+void *smmu_iommu_get_shared_page(SMMUState *s, uint32_t size, bool readonly);
+void smmu_iommu_put_shared_page(SMMUState *s, void *page, uint32_t size);
 #endif /* HW_ARM_SMMU_COMMON_H */
