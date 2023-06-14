@@ -31,6 +31,7 @@
 #include "qemu/option.h"
 #include "qemu/units.h"
 #include "qemu/bswap.h"
+#include "kvm_arm.h"
 
 #include <sys/ioctl.h>
 #include "qapi/error.h"
@@ -1353,6 +1354,9 @@ void arm_load_kernel(ARMCPU *cpu, MachineState *ms, struct arm_boot_info *info)
 
     /* We assume the CPU passed as argument is the primary CPU.  */
     info->primary_cpu = cpu;
+
+    /* Mark all Realm memory as RAM */
+    kvm_arm_rme_init_guest_ram(info->loader_start, info->ram_size);
 
     /* Load the kernel.  */
     if (!info->kernel_filename || info->firmware_loaded) {
