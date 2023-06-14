@@ -297,4 +297,14 @@ int kvm_arm_rme_vm_type(MachineState *ms);
  */
 int kvm_arm_rme_vcpu_init(CPUState *cs);
 
+/*
+ * kvm_arm_rme_init_guest_ram
+ * @base: base address of RAM
+ * @size: size of RAM
+ *
+ * If the user requested a Realm, set the base and size of guest RAM, in order
+ * to initialize the Realm IPA space.
+ */
+void kvm_arm_rme_init_guest_ram(hwaddr base, size_t size);
+
 #endif
