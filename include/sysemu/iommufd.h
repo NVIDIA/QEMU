@@ -38,6 +38,13 @@ int iommufd_backend_unmap_dma(IOMMUFDBackend *be, uint32_t ioas_id,
 int iommufd_backend_get_device_info(IOMMUFDBackend *be, uint32_t devid,
                                     enum iommu_hw_info_type *type,
                                     void *data, uint32_t len, Error **errp);
+int iommufd_backend_alloc_hwpt(IOMMUFDBackend *be, uint32_t dev_id,
+                               uint32_t pt_id, uint32_t flags,
+                               uint32_t data_type, uint32_t data_len,
+                               void *data_ptr, uint32_t *out_hwpt);
+int iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t hwpt_id,
+                                     uint32_t data_type, uint32_t entry_len,
+                                     uint32_t *entry_num, void *data_ptr);
 
 typedef struct HIOD_IOMMUFD_INFO {
     enum iommu_hw_info_type type;
