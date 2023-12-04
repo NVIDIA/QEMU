@@ -537,6 +537,7 @@ typedef struct VTDPASIDCacheEntry {
 typedef struct VTDIOASContainer {
     struct IOMMUFDBackend *iommufd;
     uint32_t ioas_id;
+    uint32_t errata;
     MemoryListener listener;
     QLIST_HEAD(, VTDS2Hwpt) s2_hwpt_list;
     QLIST_ENTRY(VTDIOASContainer) next;
@@ -674,6 +675,7 @@ typedef struct VTDHostIOMMUDevice {
     PCIBus *bus;
     uint8_t devfn;
     HostIOMMUDevice *dev;
+    uint32_t errata;
     QLIST_ENTRY(VTDHostIOMMUDevice) next;
 } VTDHostIOMMUDevice;
 #endif
