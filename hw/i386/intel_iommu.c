@@ -41,6 +41,7 @@
 #include "migration/vmstate.h"
 #include "trace.h"
 #include "qemu/jhash.h"
+#include "sysemu/iommufd.h"
 
 /* context entry operations */
 #define VTD_CE_GET_RID2PASID(ce) \
@@ -809,6 +810,24 @@ static inline uint16_t vtd_pe_get_domain_id(VTDPASIDEntry *pe)
 static inline uint32_t vtd_sm_ce_get_pdt_entry_num(VTDContextEntry *ce)
 {
     return 1U << (VTD_SM_CONTEXT_ENTRY_PDTS(ce->val[0]) + 7);
+}
+
+static inline dma_addr_t vtd_pe_get_flpt_base(VTDPASIDEntry *pe)
+{
+    return pe->val[2] & VTD_SM_PASID_ENTRY_FLPTPTR;
+}
+
+static inline uint32_t vtd_pe_get_fl_aw(VTDPASIDEntry *pe)
+{
+    return 48 + ((pe->val[2] >> 2) & VTD_SM_PASID_ENTRY_FLPM) * 9;
+}
+
+static inline void pasid_cache_info_set_error(VTDPASIDCacheInfo *pc_info)
+{
+    if (pc_info->error_happened) {
+        return;
+    }
+    pc_info->error_happened = true;
 }
 
 static inline bool vtd_pdire_present(VTDPASIDDirEntry *pdire)
@@ -1607,6 +1626,34 @@ static int vtd_dev_to_context_entry(IntelIOMMUState *s, uint8_t bus_num,
     return 0;
 }
 
+static int vtd_dev_get_rid2pasid(IntelIOMMUState *s, uint8_t bus_num,
+                                 uint8_t devfn, uint32_t *rid_pasid)
+{
+    VTDContextEntry ce;
+    int ret;
+
+    /*
+     * Currently, ECAP.RPS bit is likely to be reported as "Clear".
+     * And per VT-d 3.1 spec, it will use PASID #0 as RID2PASID when
+     * RPS bit is reported as "Clear".
+     */
+    if (likely(!(s->ecap & VTD_ECAP_RPS))) {
+        *rid_pasid = 0;
+        return 0;
+    }
+
+    /*
+     * In future, to improve performance, could try to fetch context
+     * entry from cache firstly.
+     */
+    ret = vtd_dev_to_context_entry(s, bus_num, devfn, &ce);
+    if (!ret) {
+        *rid_pasid = VTD_CE_GET_RID2PASID(&ce);
+    }
+
+    return ret;
+}
+
 static int vtd_sync_shadow_page_hook(IOMMUTLBEvent *event,
                                      void *private)
 {
@@ -1684,6 +1731,17 @@ static int vtd_address_space_sync(VTDAddressSpace *vtd_as)
     return vtd_sync_shadow_page_table_range(vtd_as, &ce, 0, UINT64_MAX);
 }
 
+static bool vtd_pe_pgtt_is_pt(VTDPASIDEntry *pe)
+{
+    return (VTD_PE_GET_TYPE(pe) == VTD_SM_PASID_ENTRY_PT);
+}
+
+/* check if pgtt is first stage translation */
+static bool vtd_pe_pgtt_is_flt(VTDPASIDEntry *pe)
+{
+    return (VTD_PE_GET_TYPE(pe) == VTD_SM_PASID_ENTRY_FLT);
+}
+
 /*
  * Check if specific device is configured to bypass address
  * translation for DMA requests. In Scalable Mode, bypass
@@ -1705,7 +1763,7 @@ static bool vtd_dev_pt_enabled(IntelIOMMUState *s, VTDContextEntry *ce,
              */
             return false;
         }
-        return (VTD_PE_GET_TYPE(&pe) == VTD_SM_PASID_ENTRY_PT);
+        return vtd_pe_pgtt_is_pt(&pe);
     }
 
     return (vtd_ce_get_type(ce) == VTD_CONTEXT_TT_PASS_THROUGH);
@@ -2252,6 +2310,515 @@ static void vtd_context_global_invalidate(IntelIOMMUState *s)
      * VT-d emulation codes.
      */
     vtd_iommu_replay_all(s);
+}
+
+static bool iommufd_listener_skipped_section(MemoryRegionSection *section)
+{
+    return !memory_region_is_ram(section->mr) ||
+           memory_region_is_protected(section->mr) ||
+           /*
+            * Sizing an enabled 64-bit BAR can cause spurious mappings to
+            * addresses in the upper part of the 64-bit address space.  These
+            * are never accessed by the CPU and beyond the address width of
+            * some IOMMU hardware.  TODO: VFIO should tell us the IOMMU width.
+            */
+           section->offset_within_address_space & (1ULL << 63);
+}
+
+static void iommufd_listener_region_add_s2domain(MemoryListener *listener,
+                                                 MemoryRegionSection *section)
+{
+    VTDIOASContainer *container = container_of(listener,
+                                               VTDIOASContainer, listener);
+    IOMMUFDBackend *iommufd = container->iommufd;
+    uint32_t ioas_id = container->ioas_id;
+    hwaddr iova;
+    Int128 llend, llsize;
+    void *vaddr;
+    Error *err = NULL;
+    int ret;
+
+    if (iommufd_listener_skipped_section(section)) {
+        return;
+    }
+    iova = REAL_HOST_PAGE_ALIGN(section->offset_within_address_space);
+    llend = int128_make64(section->offset_within_address_space);
+    llend = int128_add(llend, section->size);
+    llend = int128_and(llend, int128_exts64(qemu_real_host_page_mask()));
+    llsize = int128_sub(llend, int128_make64(iova));
+    vaddr = memory_region_get_ram_ptr(section->mr) +
+            section->offset_within_region +
+            (iova - section->offset_within_address_space);
+
+    memory_region_ref(section->mr);
+
+    ret = iommufd_backend_map_dma(iommufd, ioas_id, iova, int128_get64(llsize),
+                                  vaddr, section->readonly);
+    if (!ret) {
+        return;
+    }
+
+    error_setg(&err,
+               "iommufd_listener_region_add_s2domain(%p, 0x%"HWADDR_PRIx", "
+               "0x%"HWADDR_PRIx", %p) = %d (%s)",
+               container, iova, int128_get64(llsize), vaddr, ret,
+               strerror(-ret));
+
+    if (memory_region_is_ram_device(section->mr)) {
+        /* Allow unexpected mappings not to be fatal for RAM devices */
+        error_report_err(err);
+        return;
+    }
+
+    if (!container->error) {
+        error_propagate_prepend(&container->error, err, "Region %s: ",
+                                memory_region_name(section->mr));
+    } else {
+        error_free(err);
+    }
+}
+
+static void iommufd_listener_region_del_s2domain(MemoryListener *listener,
+                                                 MemoryRegionSection *section)
+{
+    VTDIOASContainer *container = container_of(listener,
+                                               VTDIOASContainer, listener);
+    IOMMUFDBackend *iommufd = container->iommufd;
+    uint32_t ioas_id = container->ioas_id;
+    hwaddr iova;
+    Int128 llend, llsize;
+    int ret;
+
+    if (iommufd_listener_skipped_section(section)) {
+        return;
+    }
+    iova = REAL_HOST_PAGE_ALIGN(section->offset_within_address_space);
+    llend = int128_make64(section->offset_within_address_space);
+    llend = int128_add(llend, section->size);
+    llend = int128_and(llend, int128_exts64(qemu_real_host_page_mask()));
+    llsize = int128_sub(llend, int128_make64(iova));
+
+    ret = iommufd_backend_unmap_dma(iommufd, ioas_id,
+                                    iova, int128_get64(llsize));
+    if (ret) {
+        error_report("iommufd_listener_region_del_s2domain(%p, "
+                     "0x%"HWADDR_PRIx", 0x%"HWADDR_PRIx") = %d (%s)",
+                     container, iova, int128_get64(llsize), ret,
+                     strerror(-ret));
+    }
+
+    memory_region_unref(section->mr);
+}
+
+static const MemoryListener iommufd_s2domain_memory_listener = {
+    .name = "iommufd_s2domain",
+    .priority = 1000,
+    .region_add = iommufd_listener_region_add_s2domain,
+    .region_del = iommufd_listener_region_del_s2domain,
+};
+
+static void vtd_init_s1_hwpt_data(struct iommu_hwpt_vtd_s1 *vtd,
+                                  VTDPASIDEntry *pe)
+{
+    memset(vtd, 0, sizeof(*vtd));
+
+    vtd->flags =  (VTD_SM_PASID_ENTRY_SRE_BIT(pe->val[2]) ?
+                                        IOMMU_VTD_S1_SRE : 0) |
+                  (VTD_SM_PASID_ENTRY_WPE_BIT(pe->val[2]) ?
+                                        IOMMU_VTD_S1_WPE : 0) |
+                  (VTD_SM_PASID_ENTRY_EAFE_BIT(pe->val[2]) ?
+                                        IOMMU_VTD_S1_EAFE : 0);
+    vtd->addr_width = vtd_pe_get_fl_aw(pe);
+    vtd->pgtbl_addr = (uint64_t)vtd_pe_get_flpt_base(pe);
+}
+
+static int vtd_create_s1_hwpt(HIODIOMMUFD *idev,
+                              VTDS2Hwpt *s2_hwpt, VTDHwpt *hwpt,
+                              VTDPASIDEntry *pe, Error **errp)
+{
+    struct iommu_hwpt_vtd_s1 vtd;
+    uint32_t hwpt_id, s2_hwpt_id = s2_hwpt->hwpt_id;
+    int ret;
+
+    vtd_init_s1_hwpt_data(&vtd, pe);
+
+    ret = iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid,
+                                     s2_hwpt_id, 0, IOMMU_HWPT_DATA_VTD_S1,
+                                     sizeof(vtd), &vtd, &hwpt_id);
+    if (ret) {
+        error_setg(errp, "Failed to allocate stage-1 page table, devid %d",
+                   idev->devid);
+        return ret;
+    }
+
+    hwpt->hwpt_id = hwpt_id;
+
+    return 0;
+}
+
+static void vtd_destroy_s1_hwpt(HIODIOMMUFD *idev, VTDHwpt *hwpt)
+{
+    iommufd_backend_free_id(idev->iommufd, hwpt->hwpt_id);
+}
+
+static VTDS2Hwpt *vtd_ioas_container_get_s2_hwpt(VTDIOASContainer *container,
+                                                 uint32_t hwpt_id)
+{
+    VTDS2Hwpt *s2_hwpt;
+
+    QLIST_FOREACH(s2_hwpt, &container->s2_hwpt_list, next) {
+        if (s2_hwpt->hwpt_id == hwpt_id) {
+            return s2_hwpt;
+        }
+    }
+
+    s2_hwpt = g_malloc0(sizeof(*s2_hwpt));
+
+    s2_hwpt->hwpt_id = hwpt_id;
+    s2_hwpt->container = container;
+    QLIST_INSERT_HEAD(&container->s2_hwpt_list, s2_hwpt, next);
+
+    return s2_hwpt;
+}
+
+static void vtd_ioas_container_put_s2_hwpt(VTDS2Hwpt *s2_hwpt)
+{
+    VTDIOASContainer *container = s2_hwpt->container;
+
+    if (s2_hwpt->users) {
+        return;
+    }
+
+    QLIST_REMOVE(s2_hwpt, next);
+    iommufd_backend_free_id(container->iommufd, s2_hwpt->hwpt_id);
+    g_free(s2_hwpt);
+}
+
+static void vtd_ioas_container_destroy(VTDIOASContainer *container)
+{
+    if (!QLIST_EMPTY(&container->s2_hwpt_list)) {
+        return;
+    }
+
+    QLIST_REMOVE(container, next);
+    memory_listener_unregister(&container->listener);
+    iommufd_backend_free_id(container->iommufd, container->ioas_id);
+    g_free(container);
+}
+
+static int vtd_device_attach_hwpt(VTDHostIOMMUDevice *vtd_hdev,
+                                  uint32_t rid_pasid, VTDPASIDEntry *pe,
+                                  VTDS2Hwpt *s2_hwpt, VTDHwpt *hwpt,
+                                  Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(vtd_hdev->dev);
+    int ret;
+
+    if (vtd_pe_pgtt_is_flt(pe)) {
+        ret = vtd_create_s1_hwpt(idev, s2_hwpt, hwpt, pe, errp);
+        if (ret) {
+            return ret;
+        }
+    } else {
+        hwpt->hwpt_id = s2_hwpt->hwpt_id;
+    }
+
+    ret = hiod_iommufd_attach_hwpt(idev, hwpt->hwpt_id, errp);
+    trace_vtd_device_attach_hwpt(idev->devid, rid_pasid, hwpt->hwpt_id, ret);
+    if (ret) {
+        if (vtd_pe_pgtt_is_flt(pe)) {
+            vtd_destroy_s1_hwpt(idev, hwpt);
+        }
+        hwpt->hwpt_id = 0;
+        error_report("devid %d pasid %d failed to attach hwpt %d",
+                     idev->devid, rid_pasid, hwpt->hwpt_id);
+        return ret;
+    }
+
+    s2_hwpt->users++;
+    hwpt->s2_hwpt = s2_hwpt;
+
+    return 0;
+}
+
+static void vtd_device_detach_hwpt(VTDHostIOMMUDevice *vtd_hdev,
+                                   uint32_t rid_pasid, VTDPASIDEntry *pe,
+                                   VTDHwpt *hwpt, Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(vtd_hdev->dev);
+    int ret;
+
+    if (vtd_hdev->iommu_state->dmar_enabled) {
+        ret = hiod_iommufd_detach_hwpt(idev, errp);
+        trace_vtd_device_detach_hwpt(idev->devid, rid_pasid, ret);
+    } else {
+        ret = hiod_iommufd_attach_hwpt(idev, idev->ioas_id, errp);
+        trace_vtd_device_reattach_def_ioas(idev->devid, rid_pasid,
+                                           idev->ioas_id, ret);
+    }
+
+    if (ret) {
+        error_report("devid %d pasid %d failed to attach hwpt %d",
+                     idev->devid, rid_pasid, hwpt->hwpt_id);
+    }
+
+    if (vtd_pe_pgtt_is_flt(pe)) {
+        vtd_destroy_s1_hwpt(idev, hwpt);
+    }
+
+    hwpt->s2_hwpt->users--;
+    hwpt->s2_hwpt = NULL;
+    hwpt->hwpt_id = 0;
+}
+
+static int vtd_device_attach_container(VTDHostIOMMUDevice *vtd_hdev,
+                                       VTDIOASContainer *container,
+                                       uint32_t rid_pasid,
+                                       VTDPASIDEntry *pe,
+                                       VTDHwpt *hwpt,
+                                       Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(vtd_hdev->dev);
+    IOMMUFDBackend *iommufd = idev->iommufd;
+    VTDS2Hwpt *s2_hwpt;
+    uint32_t s2_hwpt_id;
+    Error *err = NULL;
+    int ret;
+
+    /* try to attach to an existing hwpt in this container */
+    QLIST_FOREACH(s2_hwpt, &container->s2_hwpt_list, next) {
+        ret = vtd_device_attach_hwpt(vtd_hdev, rid_pasid, pe,
+                                     s2_hwpt, hwpt, &err);
+        if (ret) {
+            const char *msg = error_get_pretty(err);
+
+            trace_vtd_device_fail_attach_existing_hwpt(msg);
+            error_free(err);
+            err = NULL;
+        } else {
+            goto found_hwpt;
+        }
+    }
+
+    ret = iommufd_backend_alloc_hwpt(iommufd, idev->devid,
+                                     container->ioas_id,
+                                     IOMMU_HWPT_ALLOC_NEST_PARENT,
+                                     IOMMU_HWPT_DATA_NONE,
+                                     0, NULL, &s2_hwpt_id);
+    if (ret) {
+        error_setg_errno(errp, errno, "error alloc parent hwpt");
+        return ret;
+    }
+
+    s2_hwpt = vtd_ioas_container_get_s2_hwpt(container, s2_hwpt_id);
+
+    /* Attach vtd device to a new allocated hwpt within iommufd */
+    ret = vtd_device_attach_hwpt(vtd_hdev, rid_pasid, pe, s2_hwpt, hwpt, errp);
+    if (ret) {
+        goto err_attach_hwpt;
+    }
+
+found_hwpt:
+    trace_vtd_device_attach_container(iommufd->fd, idev->devid, rid_pasid,
+                                      container->ioas_id, hwpt->hwpt_id);
+    return 0;
+
+err_attach_hwpt:
+    vtd_ioas_container_put_s2_hwpt(s2_hwpt);
+    return ret;
+}
+
+static void vtd_device_detach_container(VTDHostIOMMUDevice *vtd_hdev,
+                                        uint32_t rid_pasid,
+                                        VTDPASIDEntry *pe,
+                                        VTDHwpt *hwpt,
+                                        Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(vtd_hdev->dev);
+    IOMMUFDBackend *iommufd = idev->iommufd;
+    VTDS2Hwpt *s2_hwpt = hwpt->s2_hwpt;
+
+    trace_vtd_device_detach_container(iommufd->fd, idev->devid, rid_pasid);
+    vtd_device_detach_hwpt(vtd_hdev, rid_pasid, pe, hwpt, errp);
+    vtd_ioas_container_put_s2_hwpt(s2_hwpt);
+}
+
+static int vtd_device_attach_iommufd(VTDHostIOMMUDevice *vtd_hdev,
+                                     uint32_t rid_pasid,
+                                     VTDPASIDEntry *pe,
+                                     VTDHwpt *hwpt,
+                                     Error **errp)
+{
+    HIODIOMMUFD *idev = HIOD_IOMMUFD(vtd_hdev->dev);
+    IOMMUFDBackend *iommufd = idev->iommufd;
+    IntelIOMMUState *s = vtd_hdev->iommu_state;
+    VTDIOASContainer *container;
+    Error *err = NULL;
+    uint32_t ioas_id;
+    int ret;
+
+    /* try to attach to an existing container in this space */
+    QLIST_FOREACH(container, &s->containers, next) {
+        if (container->iommufd != iommufd) {
+            continue;
+        }
+
+        if (vtd_device_attach_container(vtd_hdev, container,
+                                        rid_pasid, pe, hwpt, &err)) {
+            const char *msg = error_get_pretty(err);
+
+            trace_vtd_device_fail_attach_existing_container(msg);
+            error_free(err);
+            err = NULL;
+        } else {
+            return 0;
+        }
+    }
+
+    /* Need to allocate a new dedicated container */
+    ret = iommufd_backend_alloc_ioas(iommufd, &ioas_id, errp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    trace_vtd_device_alloc_ioas(iommufd->fd, ioas_id);
+
+    container = g_malloc0(sizeof(*container));
+    container->iommufd = iommufd;
+    container->ioas_id = ioas_id;
+    QLIST_INIT(&container->s2_hwpt_list);
+
+    if (vtd_device_attach_container(vtd_hdev, container,
+                                    rid_pasid, pe, hwpt, errp)) {
+        goto err_attach_container;
+    }
+
+    container->listener = iommufd_s2domain_memory_listener;
+    memory_listener_register(&container->listener, &address_space_memory);
+
+    if (container->error) {
+        ret = -1;
+        error_propagate_prepend(errp, container->error,
+                                "memory listener initialization failed: ");
+        goto err_listener_register;
+    }
+
+    QLIST_INSERT_HEAD(&s->containers, container, next);
+
+    return 0;
+
+err_listener_register:
+    vtd_device_detach_container(vtd_hdev, rid_pasid, pe, hwpt, errp);
+err_attach_container:
+    iommufd_backend_free_id(iommufd, container->ioas_id);
+    g_free(container);
+    return ret;
+}
+
+static void vtd_device_detach_iommufd(VTDHostIOMMUDevice *vtd_hdev,
+                                      uint32_t rid_pasid,
+                                      VTDPASIDEntry *pe,
+                                      VTDHwpt *hwpt,
+                                      Error **errp)
+{
+    VTDIOASContainer *container = hwpt->s2_hwpt->container;
+
+    vtd_device_detach_container(vtd_hdev, rid_pasid, pe, hwpt, errp);
+    vtd_ioas_container_destroy(container);
+}
+
+static int vtd_device_attach_pgtbl(VTDHostIOMMUDevice *vtd_hdev,
+                                   VTDPASIDEntry *pe,
+                                   VTDPASIDAddressSpace *vtd_pasid_as,
+                                   uint32_t rid_pasid)
+{
+    /*
+     * If pe->gptt != FLT, should be go ahead to do bind as host only
+     * accepts guest FLT under nesting. If pe->pgtt==PT, should setup
+     * the pasid with GPA page table. Otherwise should return failure.
+     */
+    if (!vtd_pe_pgtt_is_flt(pe) && !vtd_pe_pgtt_is_pt(pe)) {
+        return -EINVAL;
+    }
+
+    /* Should fail if the FLPT base is 0 */
+    if (vtd_pe_pgtt_is_flt(pe) && !vtd_pe_get_flpt_base(pe)) {
+        return -EINVAL;
+    }
+
+    return vtd_device_attach_iommufd(vtd_hdev, rid_pasid, pe,
+                                     &vtd_pasid_as->hwpt, &error_abort);
+}
+
+static int vtd_device_detach_pgtbl(VTDHostIOMMUDevice *vtd_hdev,
+                                  VTDPASIDAddressSpace *vtd_pasid_as,
+                                  uint32_t rid_pasid)
+{
+    VTDPASIDEntry *cached_pe = vtd_pasid_as->pasid_cache_entry.cache_filled ?
+                       &vtd_pasid_as->pasid_cache_entry.pasid_entry : NULL;
+
+    if (!cached_pe ||
+        (!vtd_pe_pgtt_is_flt(cached_pe) && !vtd_pe_pgtt_is_pt(cached_pe))) {
+        return 0;
+    }
+
+    vtd_device_detach_iommufd(vtd_hdev, rid_pasid, cached_pe,
+                              &vtd_pasid_as->hwpt, &error_abort);
+
+    return 0;
+}
+
+/**
+ * Caller should hold iommu_lock.
+ */
+static int vtd_bind_guest_pasid(VTDPASIDAddressSpace *vtd_pasid_as,
+                                VTDPASIDEntry *pe, VTDPASIDOp op)
+{
+    IntelIOMMUState *s = vtd_pasid_as->iommu_state;
+    VTDHostIOMMUDevice *vtd_hdev;
+    uint32_t rid_pasid;
+    int devfn = vtd_pasid_as->devfn;
+    int ret = -EINVAL;
+    struct vtd_as_key key = {
+        .bus = vtd_pasid_as->bus,
+        .devfn = devfn,
+    };
+
+    vtd_hdev = g_hash_table_lookup(s->vtd_host_iommu_dev, &key);
+    if (!vtd_hdev || !vtd_hdev->dev) {
+        /* means no need to go further, e.g. for emulated devices */
+        return 0;
+    }
+
+    if (vtd_dev_get_rid2pasid(s, pci_bus_num(vtd_pasid_as->bus),
+                              devfn, &rid_pasid)) {
+        error_report("Unable to get rid_pasid for devfn: %d!", devfn);
+        return ret;
+    }
+
+    if (vtd_pasid_as->pasid != rid_pasid) {
+        error_report("Non-rid_pasid %d not supported yet", vtd_pasid_as->pasid);
+        return ret;
+    }
+
+    switch (op) {
+    case VTD_PASID_UPDATE:
+    case VTD_PASID_BIND:
+    {
+        ret = vtd_device_attach_pgtbl(vtd_hdev, pe, vtd_pasid_as, rid_pasid);
+        break;
+    }
+    case VTD_PASID_UNBIND:
+    {
+        ret = vtd_device_detach_pgtbl(vtd_hdev, vtd_pasid_as, rid_pasid);
+        break;
+    }
+    default:
+        error_report_once("Unknown VTDPASIDOp!!!\n");
+        break;
+    }
+
+    return ret;
 }
 
 /* Do a context-cache device-selective invalidation.
@@ -3033,22 +3600,30 @@ static bool vtd_pasid_entry_compare(VTDPASIDEntry *p1, VTDPASIDEntry *p2)
  * This function fills in the pasid entry in &vtd_pasid_as. Caller
  * of this function should hold iommu_lock.
  */
-static void vtd_fill_pe_in_cache(IntelIOMMUState *s,
-                                 VTDPASIDAddressSpace *vtd_pasid_as,
-                                 VTDPASIDEntry *pe)
+static int vtd_fill_pe_in_cache(IntelIOMMUState *s,
+                                VTDPASIDAddressSpace *vtd_pasid_as,
+                                VTDPASIDEntry *pe)
 {
     VTDPASIDCacheEntry *pc_entry = &vtd_pasid_as->pasid_cache_entry;
+    int ret;
 
-    if (vtd_pasid_entry_compare(pe, &pc_entry->pasid_entry)) {
-        /* No need to go further as cached pasid entry is latest */
-        return;
+    if (pc_entry->cache_filled) {
+        if (vtd_pasid_entry_compare(pe, &pc_entry->pasid_entry)) {
+            /* No need to go further as cached pasid entry is latest */
+            return 0;
+        }
+        ret = vtd_bind_guest_pasid(vtd_pasid_as,
+                                   pe, VTD_PASID_UPDATE);
+    } else {
+        ret = vtd_bind_guest_pasid(vtd_pasid_as,
+                                   pe, VTD_PASID_BIND);
     }
 
-    pc_entry->pasid_entry = *pe;
-    /*
-     * TODO:
-     * - send pasid bind to host for passthru devices
-     */
+    if (!ret) {
+        pc_entry->pasid_entry = *pe;
+        pc_entry->cache_filled = true;
+    }
+    return ret;
 }
 
 /*
@@ -3111,7 +3686,11 @@ static gboolean vtd_flush_pasid(gpointer key, gpointer value,
         goto remove;
     }
 
-    vtd_fill_pe_in_cache(s, vtd_pasid_as, &pe);
+    if (vtd_fill_pe_in_cache(s, vtd_pasid_as, &pe)) {
+        pasid_cache_info_set_error(pc_info);
+        return true;
+    }
+
     /*
      * TODO:
      * - when pasid-base-iotlb(piotlb) infrastructure is ready,
@@ -3121,10 +3700,14 @@ static gboolean vtd_flush_pasid(gpointer key, gpointer value,
 remove:
     /*
      * TODO:
-     * - send pasid bind to host for passthru devices
      * - when pasid-base-iotlb(piotlb) infrastructure is ready,
      *   should invalidate QEMU piotlb together with this change.
      */
+    if (vtd_bind_guest_pasid(vtd_pasid_as,
+                             NULL, VTD_PASID_UNBIND)) {
+        pasid_cache_info_set_error(pc_info);
+    }
+
     return true;
 }
 
@@ -3171,6 +3754,22 @@ static VTDPASIDAddressSpace *vtd_add_find_pasid_as(IntelIOMMUState *s,
 }
 
 /* Caller of this function should hold iommu_lock. */
+static void vtd_remove_pasid_as(VTDPASIDAddressSpace *vtd_pasid_as)
+{
+    IntelIOMMUState *s = vtd_pasid_as->iommu_state;
+    PCIBus *bus = vtd_pasid_as->bus;
+    struct pasid_key key;
+    int devfn = vtd_pasid_as->devfn;
+    uint32_t pasid = vtd_pasid_as->pasid;
+    uint16_t sid;
+
+    sid = PCI_BUILD_BDF(pci_bus_num(bus), devfn);
+    vtd_init_pasid_key(pasid, sid, &key);
+
+    g_hash_table_remove(s->vtd_pasid_as, &key);
+}
+
+/* Caller of this function should hold iommu_lock. */
 static void vtd_sm_pasid_table_walk_one(IntelIOMMUState *s,
                                         dma_addr_t pt_base,
                                         int start,
@@ -3200,7 +3799,10 @@ static void vtd_sm_pasid_table_walk_one(IntelIOMMUState *s,
                 pasid = pasid_next;
                 continue;
             }
-            vtd_fill_pe_in_cache(s, vtd_pasid_as, &pe);
+            if (vtd_fill_pe_in_cache(s, vtd_pasid_as, &pe)) {
+                vtd_remove_pasid_as(vtd_pasid_as);
+                pasid_cache_info_set_error(info);
+            }
         }
         pasid = pasid_next;
     }
@@ -3309,6 +3911,9 @@ static void vtd_replay_guest_pasid_bindings(IntelIOMMUState *s,
         walk_info.devfn = vtd_hdev->devfn;
         vtd_replay_pasid_bind_for_dev(s, start, end, &walk_info);
     }
+    if (walk_info.error_happened) {
+        pasid_cache_info_set_error(pc_info);
+    }
 }
 
 /*
@@ -3378,7 +3983,7 @@ static void vtd_pasid_cache_sync(IntelIOMMUState *s,
 /* Caller of this function should hold iommu_lock */
 static void vtd_pasid_cache_reset(IntelIOMMUState *s)
 {
-    VTDPASIDCacheInfo pc_info;
+    VTDPASIDCacheInfo pc_info = { .error_happened = false, };
 
     trace_vtd_pasid_cache_reset();
 
@@ -3400,9 +4005,9 @@ static void vtd_pasid_cache_reset(IntelIOMMUState *s)
 static bool vtd_process_pasid_desc(IntelIOMMUState *s,
                                    VTDInvDesc *inv_desc)
 {
+    VTDPASIDCacheInfo pc_info = { .error_happened = false, };
     uint16_t domain_id;
     uint32_t pasid;
-    VTDPASIDCacheInfo pc_info;
 
     if ((inv_desc->val[0] & VTD_INV_DESC_PASIDC_RSVD_VAL0) ||
         (inv_desc->val[1] & VTD_INV_DESC_PASIDC_RSVD_VAL1) ||
@@ -3447,7 +4052,7 @@ static bool vtd_process_pasid_desc(IntelIOMMUState *s,
     }
 
     vtd_pasid_cache_sync(s, &pc_info);
-    return true;
+    return !pc_info.error_happened ? true : false;
 }
 
 static bool vtd_process_inv_iec_desc(IntelIOMMUState *s,

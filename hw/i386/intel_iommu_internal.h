@@ -197,6 +197,7 @@
 #define VTD_ECAP_SMTS               (1ULL << 43)
 #define VTD_ECAP_SLTS               (1ULL << 46)
 #define VTD_ECAP_FLTS               (1ULL << 47)
+#define VTD_ECAP_RPS                (1ULL << 49)
 
 /* CAP_REG */
 /* (offset >> 4) << 24 */
@@ -528,6 +529,39 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_SM_CONTEXT_ENTRY_RSVD_VAL0(aw)  (0x1e0ULL | ~VTD_HAW_MASK(aw))
 #define VTD_SM_CONTEXT_ENTRY_RSVD_VAL1      0xffffffffffe00000ULL
 
+typedef struct VTDPASIDCacheEntry {
+    struct VTDPASIDEntry pasid_entry;
+    bool cache_filled;
+} VTDPASIDCacheEntry;
+
+typedef struct VTDIOASContainer {
+    struct IOMMUFDBackend *iommufd;
+    uint32_t ioas_id;
+    MemoryListener listener;
+    QLIST_HEAD(, VTDS2Hwpt) s2_hwpt_list;
+    QLIST_ENTRY(VTDIOASContainer) next;
+    Error *error;
+} VTDIOASContainer;
+
+typedef struct VTDS2Hwpt {
+    uint32_t users;
+    uint32_t hwpt_id;
+    VTDIOASContainer *container;
+    QLIST_ENTRY(VTDS2Hwpt) next;
+} VTDS2Hwpt;
+
+typedef struct VTDHwpt {
+    uint32_t hwpt_id;
+    VTDS2Hwpt *s2_hwpt;
+} VTDHwpt;
+
+typedef enum VTDPASIDOp {
+    VTD_PASID_BIND,
+    VTD_PASID_UPDATE,
+    VTD_PASID_UNBIND,
+    VTD_OP_NUM
+} VTDPASIDOp;
+
 typedef enum VTDPCInvType {
     /* force reset all */
     VTD_PASID_CACHE_FORCE_RESET = 0,
@@ -543,6 +577,7 @@ typedef struct VTDPASIDCacheInfo {
     uint32_t pasid;
     PCIBus *bus;
     uint16_t devfn;
+    bool error_happened;
 } VTDPASIDCacheInfo;
 
 struct pasid_key {
@@ -550,14 +585,11 @@ struct pasid_key {
     uint16_t sid;
 };
 
-typedef struct VTDPASIDCacheEntry {
-    struct VTDPASIDEntry pasid_entry;
-} VTDPASIDCacheEntry;
-
 typedef struct VTDPASIDAddressSpace {
     PCIBus *bus;
     uint8_t devfn;
     uint32_t pasid;
+    VTDHwpt hwpt;
     IntelIOMMUState *iommu_state;
     VTDContextCacheEntry context_cache_entry;
     QLIST_ENTRY(VTDPASIDAddressSpace) next;
@@ -587,6 +619,12 @@ typedef struct VTDPASIDAddressSpace {
 
 #define VTD_SM_PASID_ENTRY_AW          7ULL /* Adjusted guest-address-width */
 #define VTD_SM_PASID_ENTRY_DID(val)    ((val) & VTD_DOMAIN_ID_MASK)
+
+#define VTD_SM_PASID_ENTRY_FLPM          3ULL
+#define VTD_SM_PASID_ENTRY_FLPTPTR       (~0xfffULL)
+#define VTD_SM_PASID_ENTRY_SRE_BIT(val)  (!!((val) & 1ULL))
+#define VTD_SM_PASID_ENTRY_WPE_BIT(val)  (!!(((val) >> 4) & 1ULL))
+#define VTD_SM_PASID_ENTRY_EAFE_BIT(val) (!!(((val) >> 7) & 1ULL))
 
 #define VTD_SM_PASID_ENTRY_FLPM          3ULL
 

@@ -299,6 +299,8 @@ struct IntelIOMMUState {
 
     GHashTable *vtd_host_iommu_dev;             /* VTDHostIOMMUDevice */
 
+    QLIST_HEAD(, VTDIOASContainer) containers;
+
     /* interrupt remapping */
     bool intr_enabled;              /* Whether guest enabled IR */
     dma_addr_t intr_root;           /* Interrupt remapping table pointer */
