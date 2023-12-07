@@ -615,6 +615,9 @@ static SMMUDevice *smmu_get_sdev(SMMUState *s, SMMUPciBus *sbus,
         memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
                                  s->mrtypename,
                                  OBJECT(s), name, UINT64_MAX);
+        if (s->nested) {
+            address_space_init(&sdev->as_sysmem, &s->root, name);
+        }
         address_space_init(&sdev->as,
                            MEMORY_REGION(&sdev->iommu), name);
         trace_smmu_add_mr(name);
@@ -624,7 +627,32 @@ static SMMUDevice *smmu_get_sdev(SMMUState *s, SMMUPciBus *sbus,
     return sdev;
 }
 
+static bool smmu_dev_is_behind_nested_smmu(SMMUDevice *sdev)
+{
+    PCIDevice *pdev;
+
+    pdev = pci_find_device(sdev->bus, pci_bus_num(sdev->bus), sdev->devfn);
+
+    if (!pdev) {
+        return false;
+    }
+    return !!object_dynamic_cast(OBJECT(pdev), "vfio-pci");
+}
+
 static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
+{
+    SMMUState *s = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(s, bus);
+    SMMUDevice *sdev = smmu_get_sdev(s, sbus, bus, devfn);
+
+    if (s->nested && smmu_dev_is_behind_nested_smmu(sdev)) {
+        return &sdev->as_sysmem;
+    } else {
+        return &sdev->as;
+    }
+}
+
+static AddressSpace *smmu_find_msi_add_as(PCIBus *bus, void *opaque, int devfn)
 {
     SMMUState *s = opaque;
     SMMUPciBus *sbus = smmu_get_sbus(s, bus);
@@ -756,7 +784,7 @@ static void smmu_dev_unset_iommu_device(PCIBus *bus, void *opaque, int devfn)
 
 static const PCIIOMMUOps smmu_ops = {
     .get_address_space = smmu_find_add_as,
-    .get_msi_address_space = smmu_find_add_as,
+    .get_msi_address_space = smmu_find_msi_add_as,
     .set_iommu_device = smmu_dev_set_iommu_device,
     .unset_iommu_device = smmu_dev_unset_iommu_device,
 };
@@ -821,6 +849,13 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
                 /* revert nested setup */
                 s->nested = false;
             }
+        }
+        if (s->nested) {
+            memory_region_init(&s->root, OBJECT(s), "root", UINT64_MAX);
+            memory_region_init_alias(&s->sysmem, OBJECT(s),
+                                     "smmu-sysmem", get_system_memory(), 0,
+                                     memory_region_size(get_system_memory()));
+            memory_region_add_subregion(&s->root, 0, &s->sysmem);
         }
     }
 
