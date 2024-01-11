@@ -642,8 +642,27 @@ static void vfio_iommu_iommufd_class_init(ObjectClass *klass, void *data)
     vioc->pci_hot_reset = iommufd_cdev_pci_hot_reset;
 };
 
+static int hiod_iommufd_vfio_attach_hwpt(HIODIOMMUFD *idev, uint32_t hwpt_id,
+                                         Error **errp)
+{
+    VFIODevice *vbasedev = HIOD_IOMMUFD_VFIO(idev)->vdev;
+
+    return iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt_id, errp);
+}
+
+static int hiod_iommufd_vfio_detach_hwpt(HIODIOMMUFD *idev, Error **errp)
+{
+    VFIODevice *vbasedev = HIOD_IOMMUFD_VFIO(idev)->vdev;
+
+    return iommufd_cdev_detach_ioas_hwpt(vbasedev, errp);
+}
+
 static void hiod_iommufd_vfio_class_init(ObjectClass *oc, void *data)
 {
+    HIODIOMMUFDClass *idevc = HIOD_IOMMUFD_CLASS(oc);
+
+    idevc->attach_hwpt = hiod_iommufd_vfio_attach_hwpt;
+    idevc->detach_hwpt = hiod_iommufd_vfio_detach_hwpt;
 };
 
 static const TypeInfo types[] = {
