@@ -68,8 +68,19 @@ struct HIODIOMMUFD {
 struct HIODIOMMUFDClass {
     /*< private >*/
     HostIOMMUDeviceClass parent_class;
+
+    /*< public >*/
+    /*
+     * Attach/detach host IOMMU device to/from IOMMUFD hardware page
+     * table, VFIO and VDPA device can have different implementation.
+     */
+    int (*attach_hwpt)(HIODIOMMUFD *idev, uint32_t hwpt_id, Error **errp);
+    int (*detach_hwpt)(HIODIOMMUFD *idev, Error **errp);
 };
 
 void hiod_iommufd_init(HIODIOMMUFD *idev, IOMMUFDBackend *iommufd,
                        uint32_t devid);
+int hiod_iommufd_attach_hwpt(HIODIOMMUFD *idev, uint32_t hwpt_id,
+                             Error **errp);
+int hiod_iommufd_detach_hwpt(HIODIOMMUFD *idev, Error **errp);
 #endif

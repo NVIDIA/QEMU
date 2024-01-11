@@ -300,6 +300,22 @@ void hiod_iommufd_init(HIODIOMMUFD *idev, IOMMUFDBackend *iommufd,
     idev->devid = devid;
 }
 
+int hiod_iommufd_attach_hwpt(HIODIOMMUFD *idev, uint32_t hwpt_id, Error **errp)
+{
+    HIODIOMMUFDClass *idevc = HIOD_IOMMUFD_GET_CLASS(idev);
+
+    g_assert(idevc->attach_hwpt);
+    return idevc->attach_hwpt(idev, hwpt_id, errp);
+}
+
+int hiod_iommufd_detach_hwpt(HIODIOMMUFD *idev, Error **errp)
+{
+    HIODIOMMUFDClass *idevc = HIOD_IOMMUFD_GET_CLASS(idev);
+
+    g_assert(idevc->detach_hwpt);
+    return idevc->detach_hwpt(idev, errp);
+}
+
 static int hiod_iommufd_get_host_iommu_info(HostIOMMUDevice *hiod,
                                             void *data, uint32_t len,
                                             Error **errp)
