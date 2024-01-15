@@ -63,6 +63,7 @@ struct HIODIOMMUFD {
     /*< public >*/
     IOMMUFDBackend *iommufd;
     uint32_t devid;
+    uint32_t ioas_id;
 };
 
 struct HIODIOMMUFDClass {
@@ -79,7 +80,7 @@ struct HIODIOMMUFDClass {
 };
 
 void hiod_iommufd_init(HIODIOMMUFD *idev, IOMMUFDBackend *iommufd,
-                       uint32_t devid);
+                       uint32_t devid, uint32_t ioas_id);
 int hiod_iommufd_attach_hwpt(HIODIOMMUFD *idev, uint32_t hwpt_id,
                              Error **errp);
 int hiod_iommufd_detach_hwpt(HIODIOMMUFD *idev, Error **errp);

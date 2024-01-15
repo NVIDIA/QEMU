@@ -434,7 +434,7 @@ found_container:
 
     hiod_vfio = HIOD_IOMMUFD_VFIO(object_new(TYPE_HIOD_IOMMUFD_VFIO));
     hiod_iommufd_init(HIOD_IOMMUFD(hiod_vfio), vbasedev->iommufd,
-                      vbasedev->devid);
+                      vbasedev->devid, container->ioas_id);
     hiod_vfio->vdev = vbasedev;
     vbasedev->hiod = HOST_IOMMU_DEVICE(hiod_vfio);
 

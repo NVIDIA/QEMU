@@ -294,10 +294,11 @@ int iommufd_backend_get_device_info(IOMMUFDBackend *be, uint32_t devid,
 }
 
 void hiod_iommufd_init(HIODIOMMUFD *idev, IOMMUFDBackend *iommufd,
-                       uint32_t devid)
+                       uint32_t devid, uint32_t ioas_id)
 {
     idev->iommufd = iommufd;
     idev->devid = devid;
+    idev->ioas_id = ioas_id;
 }
 
 int hiod_iommufd_attach_hwpt(HIODIOMMUFD *idev, uint32_t hwpt_id, Error **errp)
