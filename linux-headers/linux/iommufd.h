@@ -51,6 +51,9 @@ enum {
 	IOMMUFD_CMD_HWPT_GET_DIRTY_BITMAP,
 	IOMMUFD_CMD_HWPT_INVALIDATE,
 	IOMMUFD_CMD_DEV_INVALIDATE,
+	IOMMUFD_CMD_VIOMMU_ALLOC,
+	IOMMUFD_CMD_VIOMMU_SET_DEV_ID,
+	IOMMUFD_CMD_VQUEUE_ALLOC,
 };
 
 /**
@@ -820,4 +823,99 @@ struct iommu_dev_invalidate {
 	__u32 __reserved;
 };
 #define IOMMU_DEV_INVALIDATE _IO(IOMMUFD_TYPE, IOMMUFD_CMD_DEV_INVALIDATE)
+
+/**
+ * enum iommu_viommu_type - VIOMMU Type
+ * @IOMMU_VIOMMU_TEGRA241_CMDQV: NVIDIA Tegra241 CMDQV Extension for SMMUv3
+ */
+enum iommu_viommu_type {
+	IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV,
+};
+
+/**
+ * struct iommu_viommu_alloc - ioctl(IOMMU_VIOMMU_ALLOC)
+ * @size: sizeof(struct iommu_viommu_alloc)
+ * @flags: Must be 0
+ * @type: Type of the VIOMMU object. Must be defined in enum iommu_viommu_type
+ * @dev_id: The device to allocate this virtual IOMMU for
+ * @hwpt_id: ID of a nested parent HWPT
+ * @out_viommu_id: Output virtual IOMMU ID for the allocated object
+ *
+ * Allocate an virtual IOMMU object that holds a (shared) nested parent HWPT
+ */
+struct iommu_viommu_alloc {
+	__u32 size;
+	__u32 flags;
+	__u32 type;
+	__u32 dev_id;
+	__u32 hwpt_id;
+	__u32 out_viommu_id;
+};
+#define IOMMU_VIOMMU_ALLOC _IO(IOMMUFD_TYPE, IOMMUFD_CMD_VIOMMU_ALLOC)
+
+/**
+ * struct iommu_viommu_set_dev_id - ioctl(IOMMU_VIOMMU_SET_DEV_ID)
+ * @size: sizeof(struct iommu_viommu_set_dev_id)
+ * @viommu_id: viommu ID to associate with the device to store its virtual ID
+ * @dev_id: device ID to set a device virtual ID
+ * @__reserved: Must be 0
+ * @id: Device virtual ID
+ *
+ * Set a viommu-specific virtual ID of a device
+ */
+struct iommu_viommu_set_dev_id {
+	__u32 size;
+	__u32 viommu_id;
+	__u32 dev_id;
+	__u32 __reserved;
+	__aligned_u64 id;
+};
+#define IOMMU_VIOMMU_SET_DEV_ID _IO(IOMMUFD_TYPE, IOMMUFD_CMD_VIOMMU_SET_DEV_ID)
+
+/**
+ * struct iommu_vqueue_tegra241_cmdqv - NVIDIA Tegra241's Virtual Command Queue
+ *                                      for its CMDQV Extension for ARM SMMUv3
+ *                                      (IOMMU_VQUEUE_DATA_TEGRA241_CMDQV)
+ * @vcmdq_id: logical ID of a virtual command queue in the VIOMMU instance
+ * @vcmdq_log2size: (1 << @vcmdq_log2size) will be the size of the vcmdq
+ * @vcmdq_base: guest physical address (IPA) to the vcmdq base address
+ */
+struct iommu_vqueue_tegra241_cmdqv {
+	__u32 vcmdq_id;
+	__u32 vcmdq_log2size;
+	__aligned_u64 vcmdq_base;
+};
+
+/**
+ * enum iommu_vqueue_data_type - VQUEUE Data Type
+ * @IOMMU_VQUEUE_DATA_TEGRA241_CMDQV: NVIDIA Tegra241 CMDQV Extension for SMMUv3
+ */
+enum iommu_vqueue_data_type {
+	IOMMU_VQUEUE_DATA_TEGRA241_CMDQV,
+};
+
+/**
+ * struct iommu_vqueue_alloc - ioctl(IOMMU_VQUEUE_ALLOC)
+ * @size: sizeof(struct iommu_vqueue_alloc)
+ * @flags: Must be 0
+ * @viommu_id: viommu ID to associate the virtual queue with
+ * @out_vqueue_id: The ID of the new virtual queue
+ * @data_type: One of enum iommu_vqueue_data_type
+ * @data_len: Length of the type specific data
+ * @data_uptr: User pointer to the type specific data
+ *
+ * Allocate an virtual queue object for driver-specific HW-accelerated queue
+ */
+
+struct iommu_vqueue_alloc {
+	__u32 size;
+	__u32 flags;
+	__u32 viommu_id;
+	__u32 out_vqueue_id;
+	__u32 data_type;
+	__u32 data_len;
+	__aligned_u64 data_uptr;
+};
+#define IOMMU_VQUEUE_ALLOC _IO(IOMMUFD_TYPE, IOMMUFD_CMD_VQUEUE_ALLOC)
+
 #endif
