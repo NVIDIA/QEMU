@@ -166,6 +166,7 @@ struct SMMUState {
     MemoryRegion sysmem;
     /* /dev/iommu interface */
     IOMMUFDBackend *iommufd;
+    IOMMUFDViommu *viommu;
     bool nested;
 
     GHashTable *smmu_pcibus_by_busptr;
@@ -243,4 +244,5 @@ int smmu_dev_invalidate_cache(SMMUDevice *sdev, uint32_t type,
                               uint32_t len, uint32_t *num, void *reqs);
 int smmu_hwpt_invalidate_cache(SMMUS1Hwpt *s1_hwpt, uint32_t type, uint32_t len,
                                uint32_t *num, void *reqs);
+int smmu_iommu_dev_set_virtual_id(SMMUDevice *sdev, uint64_t id);
 #endif /* HW_ARM_SMMU_COMMON_H */

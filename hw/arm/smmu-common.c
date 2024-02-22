@@ -914,6 +914,23 @@ int smmu_hwpt_invalidate_cache(SMMUS1Hwpt *s1_hwpt, uint32_t type, uint32_t len,
                                             type, len, num, reqs);
 }
 
+int smmu_iommu_dev_set_virtual_id(SMMUDevice *sdev, uint64_t id)
+{
+    SMMUState *s = sdev->smmu;
+    HIODIOMMUFD *idev;
+
+    if (!s->viommu) {
+        return 0;
+    }
+    if (!sdev || !sdev->idev || !sdev->s2_hwpt) {
+        return -ENOENT;
+    }
+
+    idev = sdev->idev;
+
+    return iommufd_viommu_set_dev_id(s->viommu, idev->devid, id);
+}
+
 /* Unmap all notifiers attached to @mr */
 static void smmu_inv_notifiers_mr(IOMMUMemoryRegion *mr)
 {
