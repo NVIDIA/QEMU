@@ -145,6 +145,7 @@ void cpu_register_map_client(QEMUBH *bh);
 void cpu_unregister_map_client(QEMUBH *bh);
 
 bool cpu_physical_memory_is_io(hwaddr phys_addr);
+bool cpu_physical_memory_is_ram(hwaddr phys_addr);
 
 /* Coalesced MMIO regions are areas where write operations can be reordered.
  * This usually implies that write operations are side-effect free.  This allows

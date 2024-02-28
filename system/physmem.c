@@ -3547,6 +3547,19 @@ bool cpu_physical_memory_is_io(hwaddr phys_addr)
     return !(memory_region_is_ram(mr) || memory_region_is_romd(mr));
 }
 
+bool cpu_physical_memory_is_ram(hwaddr phys_addr)
+{
+    MemoryRegion*mr;
+    hwaddr l = 1;
+
+    RCU_READ_LOCK_GUARD();
+    mr = address_space_translate(&address_space_memory,
+                                 phys_addr, &phys_addr, &l, false,
+                                 MEMTXATTRS_UNSPECIFIED);
+
+    return memory_region_is_ram(mr);
+}
+
 int qemu_ram_foreach_block(RAMBlockIterFunc func, void *opaque)
 {
     RAMBlock *block;
