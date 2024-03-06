@@ -5522,12 +5522,6 @@ static int vtd_check_hdev(IntelIOMMUState *s, VTDHostIOMMUDevice *vtd_hdev,
 {
     HostIOMMUDevice *hiod = vtd_hdev->dev;
 
-    if (s->scalable_modern) {
-        error_setg(errp,
-                   "host device is unsupported in scalable modern mode yet");
-        return -EINVAL;
-    }
-
     if (object_dynamic_cast(OBJECT(hiod), TYPE_HIOD_IOMMUFD)) {
         return vtd_check_iommufd_hdev(s, vtd_hdev, errp);
     }
