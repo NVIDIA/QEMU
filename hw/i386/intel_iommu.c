@@ -738,24 +738,25 @@ static inline bool vtd_is_level_supported(IntelIOMMUState *s, uint32_t level)
 }
 
 /* Return true if check passed, otherwise false */
-static inline bool vtd_pe_type_check(X86IOMMUState *x86_iommu,
+static inline bool vtd_pe_type_check(IntelIOMMUState *s,
                                      VTDPASIDEntry *pe)
 {
+    X86IOMMUState *x86_iommu = X86_IOMMU_DEVICE(s);
+
     switch (VTD_PE_GET_TYPE(pe)) {
     case VTD_SM_PASID_ENTRY_FLT:
+        return s->scalable_modern;
     case VTD_SM_PASID_ENTRY_SLT:
+        return !s->scalable_modern;
     case VTD_SM_PASID_ENTRY_NESTED:
-        break;
+        /* Not support NESTED page table type yet */
+        return false;
     case VTD_SM_PASID_ENTRY_PT:
-        if (!x86_iommu->pt_supported) {
-            return false;
-        }
-        break;
+        return x86_iommu->pt_supported;
     default:
         /* Unknown type */
         return false;
     }
-    return true;
 }
 
 static inline bool vtd_pdire_present(VTDPASIDDirEntry *pdire)
@@ -799,7 +800,6 @@ static int vtd_get_pe_in_pasid_leaf_table(IntelIOMMUState *s,
 {
     uint32_t index;
     dma_addr_t entry_size;
-    X86IOMMUState *x86_iommu = X86_IOMMU_DEVICE(s);
 
     index = VTD_PASID_TABLE_INDEX(pasid);
     entry_size = VTD_PASID_ENTRY_SIZE;
@@ -813,7 +813,7 @@ static int vtd_get_pe_in_pasid_leaf_table(IntelIOMMUState *s,
     }
 
     /* Do translation type check */
-    if (!vtd_pe_type_check(x86_iommu, pe)) {
+    if (!vtd_pe_type_check(s, pe)) {
         return -VTD_FR_PASID_TABLE_INV;
     }
 
