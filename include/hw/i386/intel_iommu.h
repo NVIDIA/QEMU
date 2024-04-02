@@ -309,6 +309,7 @@ struct IntelIOMMUState {
     bool dma_drain;                 /* Whether DMA r/w draining enabled */
     bool dma_translation;           /* Whether DMA translation supported */
     bool pasid;                     /* Whether to support PASID */
+    bool fl1gp;                     /* First Stage 1-GByte Page Support */
 
     /*
      * Protects IOMMU states in general.  Currently it protects the
