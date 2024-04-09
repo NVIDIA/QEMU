@@ -386,6 +386,20 @@ typedef struct PCIIOMMUOps {
      */
     AddressSpace * (*get_address_space)(PCIBus *bus, void *opaque, int devfn);
     /**
+     * @get_msi_address_space: get the MSI address space for a set of devices
+     * on a PCI bus. A device could stay in the system addressspace while its
+     * MSI still requires for a translation via an IOMMU AddressSpace
+     *
+     * Mandatory callback which returns a pointer to an #AddressSpace
+     *
+     * @bus: the #PCIBus being accessed.
+     *
+     * @opaque: the data passed to pci_setup_iommu().
+     *
+     * @devfn: device and function number
+     */
+    AddressSpace * (*get_msi_address_space)(PCIBus *bus, void *opaque, int devfn);
+    /**
      * @set_iommu_device: attach a HostIOMMUDevice to a vIOMMU
      *
      * Optional callback, if not implemented in vIOMMU, then vIOMMU can't
@@ -422,6 +436,7 @@ typedef struct PCIIOMMUOps {
 } PCIIOMMUOps;
 
 AddressSpace *pci_device_iommu_address_space(PCIDevice *dev);
+AddressSpace *pci_device_msi_address_space(PCIDevice *dev);
 int pci_device_set_iommu_device(PCIDevice *dev, HostIOMMUDevice *hiod,
                                 Error **errp);
 void pci_device_unset_iommu_device(PCIDevice *dev);

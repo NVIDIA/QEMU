@@ -2742,6 +2742,20 @@ AddressSpace *pci_device_iommu_address_space(PCIDevice *dev)
     return &address_space_memory;
 }
 
+AddressSpace *pci_device_msi_address_space(PCIDevice *dev)
+{
+    PCIBus *bus;
+    PCIBus *iommu_bus;
+    int devfn;
+
+    pci_device_get_iommu_bus_devfn(dev, &iommu_bus, &bus, &devfn);
+    if (iommu_bus) {
+        return iommu_bus->iommu_ops->get_msi_address_space(bus,
+                                 iommu_bus->iommu_opaque, devfn);
+    }
+    return &address_space_memory;
+}
+
 int pci_device_set_iommu_device(PCIDevice *dev, HostIOMMUDevice *hiod,
                                 Error **errp)
 {
