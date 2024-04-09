@@ -1335,13 +1335,18 @@ smmuv3_invalidate_ste(gpointer key, gpointer value, gpointer user_data)
  * @cmds: Pointer to list of commands
  * @cons: Pointer to list of CONS corresponding to the commands
  * @ncmds: Total ncmds in the batch
- * @s2_hwpt: Current onwer of the batch. NULL means broadcast across.
+ * @owner: Current onwer of the batch. NULL means broadcast across.
+ * @dev_cache: Issue to a device cache
  */
 typedef struct SMMUCommandBatch {
     Cmd *cmds;
     uint32_t *cons;
     uint32_t ncmds;
-    SMMUS2Hwpt *s2_hwpt;
+    union {
+        SMMUS2Hwpt *s2_hwpt;
+        SMMUDevice *sdev;
+    } owner;
+    bool dev_cache;
 } SMMUCommandBatch;
 
 /* Update batch->ncmds to the number of execute cmds */
@@ -1398,10 +1403,26 @@ static int smmuv3_hwpt_invalidate_cache_all(SMMUState *bs,
     return ret;
 }
 
+static int smmuv3_dev_invalidate_cache(SMMUDevice *sdev, SMMUCommandBatch *batch)
+{
+    uint32_t total = batch->ncmds;
+    int ret = 0;
+
+    ret = smmu_dev_invalidate_cache(sdev, IOMMU_DEV_INVALIDATE_DATA_ARM_SMMUV3,
+                                    sizeof(Cmd), &batch->ncmds, batch->cmds);
+    if (total != batch->ncmds) {
+        error_report("%s failed: ret=%d, total=%d, done=%d",
+                      __func__, ret, total, batch->ncmds);
+    }
+    return ret;
+}
+
 static int _smmuv3_issue_cmd_batch(SMMUState *bs, SMMUCommandBatch *batch)
 {
-    if (batch->s2_hwpt) {
-        return smmuv3_hwpt_invalidate_cache(batch->s2_hwpt, batch);
+    if (batch->dev_cache) {
+        return smmuv3_dev_invalidate_cache(batch->owner.sdev, batch);
+    } else if (batch->owner.s2_hwpt) {
+        return smmuv3_hwpt_invalidate_cache(batch->owner.s2_hwpt, batch);
     } else {
         return smmuv3_hwpt_invalidate_cache_all(bs, batch);
     }
@@ -1416,7 +1437,9 @@ static int smmuv3_issue_cmd_batch(SMMUState *bs, SMMUCommandBatch *batch)
         return ret;
     }
     batch->ncmds = 0;
-    batch->s2_hwpt = NULL;
+    batch->dev_cache = false;
+    batch->owner.sdev = NULL;
+    batch->owner.s2_hwpt = NULL;
     return ret;
 }
 
@@ -1474,14 +1497,39 @@ static int smmuv3_hwpt_batch_cmds(SMMUState *bs, SMMUCommandBatch *batch,
         s2_hwpt = s1_hwpt->s2_hwpt;
     }
 
-    if (batch->ncmds && s2_hwpt != batch->s2_hwpt) {
+    if (batch->ncmds && (batch->dev_cache || s2_hwpt != batch->owner.s2_hwpt)) {
         ret = smmuv3_issue_cmd_batch(bs, batch);
         if (ret) {
             *cons = batch->cons[batch->ncmds];
             return ret;
         }
     }
-    batch->s2_hwpt = s2_hwpt;
+    batch->dev_cache = false;
+    batch->owner.s2_hwpt = s2_hwpt;
+    batch->cmds[batch->ncmds] = *cmd;
+    batch->cons[batch->ncmds++] = *cons;
+    return 0;
+}
+
+/**
+ * Add a new device command with the current CONS index to the batch
+ *  - If the new cmd isn't compatible with the batch, consume the batch first
+ *  - If the batch executing fails, rewind the CONS index
+ */
+static int smmuv3_batch_dev_cmds(SMMUDevice *sdev, SMMUCommandBatch *batch,
+                                 Cmd *cmd, uint32_t *cons)
+{
+    int ret;
+
+    if (batch->ncmds && (!batch->dev_cache || sdev != batch->owner.sdev)) {
+        ret = smmuv3_issue_cmd_batch(sdev->smmu, batch);
+        if (ret) {
+            *cons = batch->cons[batch->ncmds];
+            return ret;
+        }
+    }
+    batch->dev_cache = true;
+    batch->owner.sdev = sdev;
     batch->cmds[batch->ncmds] = *cmd;
     batch->cons[batch->ncmds++] = *cons;
     return 0;
@@ -1599,6 +1647,13 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
 
             trace_smmuv3_cmdq_cfgi_cd(sid);
             smmuv3_flush_config(sdev);
+
+            if (sdev->s1_hwpt) {
+                if (smmuv3_batch_dev_cmds(sdev, &batch, &cmd, &q->cons)) {
+                    cmd_error = SMMU_CERROR_ILL;
+                    break;
+                }
+            }
             break;
         }
         case SMMU_CMD_TLBI_NH_ASID:
@@ -1649,6 +1704,18 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
                 break;
             }
             break;
+        case SMMU_CMD_ATC_INV:
+        {
+            SMMUDevice *sdev = smmu_find_sdev(bs, CMD_SID(&cmd));
+
+            if (sdev->s1_hwpt) {
+                if (smmuv3_batch_dev_cmds(sdev, &batch, &cmd, &q->cons)) {
+                    cmd_error = SMMU_CERROR_ILL;
+                    break;
+                }
+            }
+            break;
+        }
         case SMMU_CMD_TLBI_S12_VMALL:
         {
             uint16_t vmid = CMD_VMID(&cmd);
@@ -1680,7 +1747,6 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
         case SMMU_CMD_TLBI_EL2_ASID:
         case SMMU_CMD_TLBI_EL2_VA:
         case SMMU_CMD_TLBI_EL2_VAA:
-        case SMMU_CMD_ATC_INV:
         case SMMU_CMD_PRI_RESP:
         case SMMU_CMD_RESUME:
         case SMMU_CMD_STALL_TERM:
