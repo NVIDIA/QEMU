@@ -1545,7 +1545,7 @@ int kvm_arm_set_irq(int cpu, int irqtype, int irq, int level)
 int kvm_arch_fixup_msi_route(struct kvm_irq_routing_entry *route,
                              uint64_t address, uint32_t data, PCIDevice *dev)
 {
-    AddressSpace *as = pci_device_iommu_address_space(dev);
+    AddressSpace *as = pci_device_msi_address_space(dev);
     hwaddr xlat, len, doorbell_gpa;
     MemoryRegionSection mrs;
     MemoryRegion *mr;
