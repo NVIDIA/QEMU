@@ -618,6 +618,7 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
 
 static const PCIIOMMUOps smmu_ops = {
     .get_address_space = smmu_find_add_as,
+    .get_msi_address_space = smmu_find_add_as,
 };
 
 IOMMUMemoryRegion *smmu_iommu_mr(SMMUState *s, uint32_t sid)
