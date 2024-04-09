@@ -1877,13 +1877,11 @@ static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,
         return -EINVAL;
     }
 
-    if (new & IOMMU_NOTIFIER_MAP) {
-        error_setg(errp,
-                   "device %02x.%02x.%x requires iommu MAP notifier which is "
-                   "not currently supported", pci_bus_num(sdev->bus),
-                   PCI_SLOT(sdev->devfn), PCI_FUNC(sdev->devfn));
-        return -EINVAL;
-    }
+    /*
+     * SMMUv3 does not support IOMMU_NOTIFIER_MAP, while the vfio core asks for
+     * the flag from an iommu mr. Ignore it.
+     */
+    new &= ~IOMMU_NOTIFIER_MAP;
 
     if (old == IOMMU_NOTIFIER_NONE) {
         trace_smmuv3_notify_flag_add(iommu->parent_obj.name);
