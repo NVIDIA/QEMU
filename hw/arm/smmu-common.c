@@ -582,12 +582,9 @@ SMMUPciBus *smmu_find_smmu_pcibus(SMMUState *s, uint8_t bus_num)
     return NULL;
 }
 
-static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
+static SMMUPciBus *smmu_get_sbus(SMMUState *s, PCIBus *bus)
 {
-    SMMUState *s = opaque;
     SMMUPciBus *sbus = g_hash_table_lookup(s->smmu_pcibus_by_busptr, bus);
-    SMMUDevice *sdev;
-    static unsigned int index;
 
     if (!sbus) {
         sbus = g_malloc0(sizeof(SMMUPciBus) +
@@ -596,7 +593,15 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
         g_hash_table_insert(s->smmu_pcibus_by_busptr, bus, sbus);
     }
 
-    sdev = sbus->pbdev[devfn];
+    return sbus;
+}
+
+static SMMUDevice *smmu_get_sdev(SMMUState *s, SMMUPciBus *sbus,
+                                 PCIBus *bus, int devfn)
+{
+    SMMUDevice *sdev = sbus->pbdev[devfn];
+    static unsigned int index;
+
     if (!sdev) {
         char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn, index++);
 
@@ -614,6 +619,15 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
         trace_smmu_add_mr(name);
         g_free(name);
     }
+
+    return sdev;
+}
+
+static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
+{
+    SMMUState *s = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(s, bus);
+    SMMUDevice *sdev = smmu_get_sdev(s, sbus, bus, devfn);
 
     return &sdev->as;
 }
