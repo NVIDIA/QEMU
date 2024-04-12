@@ -45,6 +45,9 @@ int iommufd_backend_alloc_hwpt(IOMMUFDBackend *be, uint32_t dev_id,
 int iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t hwpt_id,
                                      uint32_t data_type, uint32_t entry_len,
                                      uint32_t *entry_num, void *data_ptr);
+int iommufd_backend_invalidate_dev_cache(IOMMUFDBackend *be, uint32_t dev_id,
+                                         uint32_t data_type, uint32_t entry_len,
+                                         uint32_t *entry_num, void *data_ptr);
 
 typedef struct HIOD_IOMMUFD_INFO {
     enum iommu_hw_info_type type;

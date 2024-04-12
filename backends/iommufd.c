@@ -271,6 +271,37 @@ int iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t hwpt_id,
     return ret;
 }
 
+int iommufd_backend_invalidate_dev_cache(IOMMUFDBackend *be, uint32_t dev_id,
+                                         uint32_t data_type, uint32_t entry_len,
+                                         uint32_t *entry_num, void *data_ptr)
+{
+    int ret, fd = be->fd;
+    struct iommu_dev_invalidate cache = {
+        .size = sizeof(cache),
+        .dev_id = dev_id,
+        .data_type = data_type,
+        .entry_len = entry_len,
+        .entry_num = *entry_num,
+        .data_uptr = (uint64_t)data_ptr,
+    };
+
+    ret = ioctl(fd, IOMMU_DEV_INVALIDATE, &cache);
+
+    trace_iommufd_backend_invalidate_dev_cache(fd, dev_id, data_type,
+                                               entry_len, *entry_num,
+                                               cache.entry_num,
+					       (uint64_t)data_ptr, ret);
+    if (ret) {
+        *entry_num = cache.entry_num;
+        error_report("IOMMU_DEV_INVALIDATE failed: %s", strerror(errno));
+        ret = -errno;
+    } else {
+        g_assert(*entry_num == cache.entry_num);
+    }
+
+    return ret;
+}
+
 int iommufd_backend_get_device_info(IOMMUFDBackend *be, uint32_t devid,
                                     enum iommu_hw_info_type *type,
                                     void *data, uint32_t len, Error **errp)
