@@ -111,6 +111,8 @@ struct IOMMUFDVeventq *iommufd_viommu_alloc_eventq(IOMMUFDViommu *viommu,
 struct IOMMUFDHWqueue *
 iommufd_viommu_alloc_hw_queue(IOMMUFDViommu *viommu, uint32_t data_type,
                               uint32_t index, uint64_t addr, uint64_t length);
+bool iommufd_viommu_mmap(IOMMUFDViommu *viommu, uint64_t size, off_t offset,
+                         void **ptr);
 
 #define TYPE_HOST_IOMMU_DEVICE_IOMMUFD TYPE_HOST_IOMMU_DEVICE "-iommufd"
 OBJECT_DECLARE_TYPE(HostIOMMUDeviceIOMMUFD, HostIOMMUDeviceIOMMUFDClass,

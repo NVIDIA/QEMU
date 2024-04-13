@@ -580,6 +580,32 @@ iommufd_viommu_alloc_hw_queue(IOMMUFDViommu *viommu, uint32_t data_type,
     return hw_queue;
 }
 
+/* Caller is responsible for doing munmap() */
+bool iommufd_viommu_mmap(IOMMUFDViommu *viommu, uint64_t size, off_t offset,
+                         void **ptr)
+{
+    uint32_t viommu_id = viommu->viommu_id;
+    int fd = viommu->iommufd->fd;
+
+    if (!viommu_id) {
+        error_report("failed to get shared page with a NULL viommu_id");
+        return false;
+    }
+
+    g_assert(ptr);
+    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+
+    trace_iommufd_viommu_mmap(fd, viommu_id, size, offset);
+
+    if (*ptr == MAP_FAILED) {
+        error_report("failed to mmap (size=0x%" PRIx64 ") for viommu (id=%d)",
+                     size, viommu_id);
+        return false;
+    }
+
+    return true;
+}
+
 bool host_iommu_device_iommufd_attach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
                                            uint32_t hwpt_id, Error **errp)
 {
