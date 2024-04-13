@@ -1,4 +1,10 @@
 ===========
+DISCLAIM
+===========
+
+This code is solely intended for evaluation purposes and not for production.
+
+===========
 QEMU README
 ===========
 
