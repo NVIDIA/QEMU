@@ -480,6 +480,42 @@ struct IOMMUFDVeventq *iommufd_viommu_alloc_eventq(IOMMUFDViommu *viommu,
     return veventq;
 }
 
+struct IOMMUFDVcmdq *iommufd_viommu_alloc_cmdq(IOMMUFDViommu *viommu,
+                                               uint32_t data_type,
+                                               uint32_t len, void *data_ptr)
+{
+    int ret, fd = viommu->iommufd->fd;
+    struct IOMMUFDVcmdq *vcmdq = g_malloc(sizeof(*vcmdq));
+    struct iommu_vcmdq_alloc alloc_vcmdq = {
+        .size = sizeof(alloc_vcmdq),
+        .flags = 0,
+        .viommu_id = viommu->viommu_id,
+        .type = data_type,
+        .data_len = len,
+        .data_uptr = (uint64_t)data_ptr,
+    };
+
+    if (!vcmdq) {
+        error_report("failed to allocate vcmdq object");
+        return NULL;
+    }
+
+    ret = ioctl(fd, IOMMU_VCMDQ_ALLOC, &alloc_vcmdq);
+
+    trace_iommufd_viommu_alloc_cmdq(fd, viommu->viommu_id, data_type,
+                                    len, (uint64_t)data_ptr,
+                                    alloc_vcmdq.out_vcmdq_id, ret);
+    if (ret) {
+        error_report("IOMMU_VQUEUE_ALLOC failed: %s", strerror(errno));
+        g_free(vcmdq);
+        return NULL;
+    }
+
+    vcmdq->vcmdq_id = alloc_vcmdq.out_vcmdq_id;
+    vcmdq->viommu = viommu;
+    return vcmdq;
+}
+
 bool host_iommu_device_iommufd_attach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
                                            uint32_t hwpt_id, Error **errp)
 {

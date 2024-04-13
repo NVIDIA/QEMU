@@ -49,7 +49,13 @@ typedef struct IOMMUFDVeventq {
     uint32_t veventq_fd;
 } IOMMUFDVeventq;
 
+typedef struct IOMMUFDVcmdq {
+    IOMMUFDViommu *viommu;
+    uint32_t vcmdq_id;
+} IOMMUFDVcmdq;
+
 bool iommufd_backend_connect(IOMMUFDBackend *be, Error **errp);
+
 void iommufd_backend_disconnect(IOMMUFDBackend *be);
 
 bool iommufd_backend_alloc_ioas(IOMMUFDBackend *be, uint32_t *ioas_id,
@@ -87,6 +93,9 @@ int iommufd_viommu_invalidate_cache(IOMMUFDBackend *be, uint32_t viommu_id,
 struct IOMMUFDVeventq *iommufd_viommu_alloc_eventq(IOMMUFDViommu *viommu,
                                                    uint32_t type,
                                                    uint32_t depth);
+struct IOMMUFDVcmdq *iommufd_viommu_alloc_cmdq(IOMMUFDViommu *viommu,
+                                               uint32_t data_type,
+                                               uint32_t len, void *data_ptr);
 
 #define TYPE_HOST_IOMMU_DEVICE_IOMMUFD TYPE_HOST_IOMMU_DEVICE "-iommufd"
 OBJECT_DECLARE_TYPE(HostIOMMUDeviceIOMMUFD, HostIOMMUDeviceIOMMUFDClass,
