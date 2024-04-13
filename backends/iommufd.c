@@ -337,6 +337,42 @@ struct IOMMUFDViommu *iommufd_backend_alloc_viommu(IOMMUFDBackend *be,
     return viommu;
 }
 
+struct IOMMUFDVqueue *iommufd_viommu_alloc_queue(IOMMUFDViommu *viommu,
+                                                 uint32_t data_type,
+                                                 uint32_t len, void *data_ptr)
+{
+    int ret, fd = viommu->iommufd->fd;
+    struct IOMMUFDVqueue *vqueue = g_malloc(sizeof(*vqueue));
+    struct iommu_vqueue_alloc alloc_vqueue = {
+        .size = sizeof(alloc_vqueue),
+        .flags = 0,
+        .viommu_id = viommu->viommu_id,
+        .data_type = data_type,
+        .data_len = len,
+        .data_uptr = (uint64_t)data_ptr,
+    };
+
+    if (!vqueue) {
+        error_report("failed to allocate vqueue object");
+        return NULL;
+    }
+
+    ret = ioctl(fd, IOMMU_VQUEUE_ALLOC, &alloc_vqueue);
+
+    trace_iommufd_viommu_alloc_queue(fd, viommu->viommu_id, data_type,
+                                     len, (uint64_t)data_ptr,
+                                     alloc_vqueue.out_vqueue_id, ret);
+    if (ret) {
+        error_report("IOMMU_VIOMMU_SET_DATA failed: %s", strerror(errno));
+        g_free(vqueue);
+        return NULL;
+    }
+
+    vqueue->vqueue_id = alloc_vqueue.out_vqueue_id;
+    vqueue->viommu = viommu;
+    return vqueue;
+}
+
 int iommufd_backend_get_device_info(IOMMUFDBackend *be, uint32_t devid,
                                     enum iommu_hw_info_type *type,
                                     void *data, uint32_t len, Error **errp)

@@ -31,6 +31,11 @@ typedef struct IOMMUFDViommu {
     uint32_t viommu_id;
 } IOMMUFDViommu;
 
+typedef struct IOMMUFDVqueue {
+    IOMMUFDViommu *viommu;
+    uint32_t vqueue_id;
+} IOMMUFDVqueue;
+
 int iommufd_backend_connect(IOMMUFDBackend *be, Error **errp);
 void iommufd_backend_disconnect(IOMMUFDBackend *be);
 
@@ -58,6 +63,9 @@ struct IOMMUFDViommu *iommufd_backend_alloc_viommu(IOMMUFDBackend *be,
                                                    uint32_t dev_id,
                                                    uint32_t viommu_type,
                                                    uint32_t hwpt_id);
+struct IOMMUFDVqueue *iommufd_viommu_alloc_queue(IOMMUFDViommu *viommu,
+                                                 uint32_t data_type,
+                                                 uint32_t len, void *data_ptr);
 
 typedef struct HIOD_IOMMUFD_INFO {
     enum iommu_hw_info_type type;
