@@ -575,6 +575,26 @@ bool iommufd_backend_alloc_hw_queue(IOMMUFDBackend *be, uint32_t viommu_id,
     return true;
 }
 
+/* Caller is responsible for doing munmap() */
+bool iommufd_backend_viommu_mmap(IOMMUFDBackend *be, uint32_t viommu_id,
+                                 uint64_t size, off_t offset, void **ptr)
+{
+    g_assert(viommu_id);
+    g_assert(ptr);
+
+    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, be->fd, offset);
+
+    trace_iommufd_backend_viommu_mmap(be->fd, viommu_id, size, offset);
+
+    if (*ptr == MAP_FAILED) {
+        error_report("failed to mmap (size=0x%" PRIx64 ") for viommu (id=%d)",
+                     size, viommu_id);
+        return false;
+    }
+
+    return true;
+}
+
 bool host_iommu_device_iommufd_attach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
                                            uint32_t hwpt_id, Error **errp)
 {
