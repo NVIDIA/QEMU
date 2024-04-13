@@ -516,6 +516,42 @@ struct IOMMUFDVcmdq *iommufd_viommu_alloc_cmdq(IOMMUFDViommu *viommu,
     return vcmdq;
 }
 
+void *iommufd_viommu_get_shared_page(IOMMUFDViommu *viommu,
+                                     uint32_t size, bool readonly)
+{
+    uintptr_t pgsize = qemu_real_host_page_size();
+    off_t offset = viommu->viommu_id * pgsize;
+    uint32_t viommu_id = viommu->viommu_id;
+    int fd = viommu->iommufd->fd;
+    int prot = PROT_READ;
+    void *page;
+
+    if (!viommu_id) {
+        error_report("failed to get shared page with a NULL viommu_id");
+        return NULL;
+    }
+    if (!readonly) {
+        prot |= PROT_WRITE;
+    }
+
+    page = mmap(NULL, size, prot, MAP_SHARED, fd, offset);
+    if (page == MAP_FAILED) {
+        error_report("failed to get shared page (size=0x%x) for viommu (id=%d)",
+                     size, viommu_id);
+        return NULL;
+    }
+
+    trace_iommufd_viommu_get_shared_page(fd, viommu_id, size, readonly);
+
+    return page;
+}
+
+void iommufd_viommu_put_shared_page(IOMMUFDViommu *viommu,
+                                    void *page, uint32_t size)
+{
+    munmap(page, size);
+}
+
 bool host_iommu_device_iommufd_attach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
                                            uint32_t hwpt_id, Error **errp)
 {
