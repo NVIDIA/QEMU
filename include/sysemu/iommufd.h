@@ -66,6 +66,8 @@ struct IOMMUFDViommu *iommufd_backend_alloc_viommu(IOMMUFDBackend *be,
 struct IOMMUFDVqueue *iommufd_viommu_alloc_queue(IOMMUFDViommu *viommu,
                                                  uint32_t data_type,
                                                  uint32_t len, void *data_ptr);
+int iommufd_viommu_set_dev_id(IOMMUFDViommu *viommu, uint32_t dev_id,
+                              uint64_t id);
 
 typedef struct HIOD_IOMMUFD_INFO {
     enum iommu_hw_info_type type;
