@@ -543,6 +543,43 @@ struct IOMMUFDVeventq *iommufd_viommu_alloc_eventq(IOMMUFDViommu *viommu,
     return veventq;
 }
 
+struct IOMMUFDHWqueue *
+iommufd_viommu_alloc_hw_queue(IOMMUFDViommu *viommu, uint32_t data_type,
+                              uint32_t index, uint64_t addr, uint64_t length)
+{
+    int ret, fd = viommu->iommufd->fd;
+    struct IOMMUFDHWqueue *hw_queue = g_malloc(sizeof(*hw_queue));
+    struct iommu_hw_queue_alloc alloc_hw_queue = {
+        .size = sizeof(alloc_hw_queue),
+        .flags = 0,
+        .viommu_id = viommu->viommu_id,
+        .type = data_type,
+        .index = index,
+        .nesting_parent_iova = addr,
+        .length = length,
+    };
+
+    if (!hw_queue) {
+        error_report("failed to allocate hw_queue object");
+        return NULL;
+    }
+
+    ret = ioctl(fd, IOMMU_HW_QUEUE_ALLOC, &alloc_hw_queue);
+
+    trace_iommufd_viommu_alloc_hw_queue(fd, viommu->viommu_id, data_type, index,
+                                        addr, length,
+                                        alloc_hw_queue.out_hw_queue_id, ret);
+    if (ret) {
+        error_report("IOMMU_HW_QUEUE_ALLOC failed: %s", strerror(errno));
+        g_free(hw_queue);
+        return NULL;
+    }
+
+    hw_queue->hw_queue_id = alloc_hw_queue.out_hw_queue_id;
+    hw_queue->viommu = viommu;
+    return hw_queue;
+}
+
 bool host_iommu_device_iommufd_attach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
                                            uint32_t hwpt_id, Error **errp)
 {
