@@ -68,6 +68,10 @@ struct IOMMUFDVqueue *iommufd_viommu_alloc_queue(IOMMUFDViommu *viommu,
                                                  uint32_t len, void *data_ptr);
 int iommufd_viommu_set_dev_id(IOMMUFDViommu *viommu, uint32_t dev_id,
                               uint64_t id);
+void *iommufd_viommu_get_shared_page(IOMMUFDViommu *viommu,
+                                     uint32_t size, bool readonly);
+void iommufd_viommu_put_shared_page(IOMMUFDViommu *viommu,
+                                    void *page, uint32_t size);
 
 typedef struct HIOD_IOMMUFD_INFO {
     enum iommu_hw_info_type type;
