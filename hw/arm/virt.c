@@ -217,7 +217,7 @@ static MemMapEntry extended_memmap[] = {
     [VIRT_HIGH_GIC_REDIST2] =   { 0x0, 64 * MiB },
     [VIRT_HIGH_PCIE_ECAM] =     { 0x0, 256 * MiB },
     /* Second PCIe window */
-    [VIRT_HIGH_PCIE_MMIO] =     { 0x0, 512 * GiB },
+    [VIRT_HIGH_PCIE_MMIO] =     { 0x0, 8192 * GiB },
 };
 
 static const int a15irqmap[] = {
