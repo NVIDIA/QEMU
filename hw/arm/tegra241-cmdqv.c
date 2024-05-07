@@ -242,6 +242,10 @@ static uint64_t tegra241_cmdqv_read(void *opaque, hwaddr offset, unsigned size)
 
     case A_VINTF0_CONFIG ... A_VINTF0_LVCMDQ_ERR_MAP_3:
         return tegra241_cmdqv_read_vintf(s, offset);
+
+    case A_VI_VCMDQ0_CONS_INDX ... A_VI_VCMDQ127_GERRORN:
+        offset -= 0x20000;
+        QEMU_FALLTHROUGH;
     case A_VCMDQ0_CONS_INDX ... A_VCMDQ127_GERRORN:
         /*
          * Align offset down to 0x10000 while extracting the index:
@@ -253,6 +257,10 @@ static uint64_t tegra241_cmdqv_read(void *opaque, hwaddr offset, unsigned size)
          */
         index = (offset - 0x10000) / 0x80;
         return tegra241_cmdqv_read_vcmdq(s, offset - 0x80 * index, index);
+
+    case A_VI_VCMDQ0_BASE_L ... A_VI_VCMDQ127_CONS_INDX_BASE_DRAM_H:
+        offset -= 0x20000;
+        QEMU_FALLTHROUGH;
     case A_VCMDQ0_BASE_L ... A_VCMDQ127_CONS_INDX_BASE_DRAM_H:
         /*
          * Align offset down to 0x20000 while extracting the index:
