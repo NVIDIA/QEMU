@@ -182,6 +182,7 @@ struct VirtMachineState {
     CXLState cxl_devices_state;
     bool legacy_smmuv3_present;
     bool pci_preserve_config;
+    bool grace_pcie_mmio_identity;
 };
 
 #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
