@@ -45,6 +45,8 @@
 #include "hw/acpi/hmat.h"
 #include "hw/pci/pcie_host.h"
 #include "hw/pci/pci.h"
+#include "hw/vfio/pci.h"
+#include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/arm/virt.h"
@@ -120,8 +122,551 @@ static void acpi_dsdt_add_flash(Aml *scope, const MemMapEntry *flash_memmap)
     aml_append(scope, dev);
 }
 
+typedef struct {
+    uint64_t addr;
+    uint64_t end;
+    uint64_t flags;
+} PhysBAR;
+
+typedef struct {
+    uint64_t wbase;
+    uint64_t wlimit;
+    uint64_t wbase64;
+    uint64_t wlimit64;
+    uint64_t rbase;
+    uint64_t rlimit;
+    uint64_t rsize;
+    uint64_t piobase;
+    bool     available;
+    bool     search_mmio64;
+    PCIDevice *dev;
+    PCIBus *bus;
+    struct GPEXConfig *cfg;
+    bool debug;
+} NVIDIACfg;
+
+#define IORESOURCE_PREFETCH     0x00002000    /* No side effects */
+#define IORESOURCE_MEM_64       0x00100000
+
+static void nvidia_get_bridge_window(PCIBus *bus, void *opaque)
+{
+    PCIDevice *bridge = pci_bridge_get_device(bus);
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    struct GPEXConfig *cfg = ncfg->cfg;
+
+    if (!bridge) {
+        ncfg->wbase = cfg->mmio32.base;
+        ncfg->wlimit = cfg->mmio32.base + cfg->mmio32.size - 1;
+        ncfg->wbase64 = cfg->mmio64.base;
+        ncfg->wlimit64 = cfg->mmio64.base + cfg->mmio64.size - 1;
+    } else {
+        ncfg->wbase = pci_bridge_get_base(bridge, PCI_BASE_ADDRESS_MEM_TYPE_32);
+        ncfg->wlimit = pci_bridge_get_limit(bridge, PCI_BASE_ADDRESS_MEM_TYPE_32);
+        ncfg->wbase64 = pci_bridge_get_base(bridge, PCI_BASE_ADDRESS_MEM_PREFETCH);
+        ncfg->wlimit64 = pci_bridge_get_limit(bridge, PCI_BASE_ADDRESS_MEM_PREFETCH);
+    }
+}
+
+static void nvidia_update_bridge_window(PCIBus *bus, uint64_t base, uint64_t limit)
+{
+    PCIDevice *bridge = pci_bridge_get_device(bus);
+    uint32_t value0, value1;
+
+    assert(bridge);
+
+    value0 = (uint32_t)(extract64(base, 20, 12) << 4);
+    value1 = (uint32_t)(extract64(limit, 20, 12) << 4);
+    pci_host_config_write_common(bridge,
+                                 PCI_PREF_MEMORY_BASE,
+                                 pci_config_size(bridge),
+                                 value0 | PCI_PREF_RANGE_TYPE_64,
+                                 2);
+    pci_host_config_write_common(bridge,
+                                 PCI_PREF_BASE_UPPER32,
+                                 pci_config_size(bridge),
+                                 (uint32_t)(base >> 32),
+                                 4);
+    pci_host_config_write_common(bridge,
+                                 PCI_PREF_MEMORY_LIMIT,
+                                 pci_config_size(bridge),
+                                 value1 | PCI_PREF_RANGE_TYPE_64,
+                                 2);
+    pci_host_config_write_common(bridge,
+                                 PCI_PREF_LIMIT_UPPER32,
+                                 pci_config_size(bridge),
+                                 (uint32_t)(limit >> 32),
+                                 4);
+}
+
+static void nvidia_dev_vfio(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    struct GPEXConfig *cfg = (struct GPEXConfig *)opaque;
+    PhysBAR *pbar, pbars[PCI_ROM_SLOT];
+    char *tmp, *resources, line[128];
+    VFIOPCIDevice *vdev;
+    uint32_t laddr;
+    FILE *fp;
+    int idx;
+
+    if (!object_dynamic_cast(OBJECT(dev), TYPE_VFIO_PCI)) {
+        return;
+    }
+
+    vdev = VFIO_PCI(dev);
+
+    tmp = g_strdup_printf("%s/resource", vdev->vbasedev.sysfsdev);
+    resources = realpath(tmp, NULL);
+    g_free(tmp);
+
+    idx = 0;
+    pbar = pbars;
+    memset(pbar, 0, sizeof(pbars));
+
+    fp = fopen(resources, "r");
+    g_free(resources);
+    if (!fp) {
+        return;
+    }
+
+    do {
+        if (!fgets(line, sizeof(line), fp)) {
+            fclose(fp);
+            return;
+        }
+        sscanf(line, "0x%lx 0x%lx 0x%lx\n", &pbar->addr,
+               &pbar->end, &pbar->flags);
+        idx++;
+        pbar++;
+    } while (*line && idx < PCI_ROM_SLOT);
+
+    fclose(fp);
+
+    for (idx = 0, pbar = pbars; idx < PCI_ROM_SLOT; idx++, pbar++) {
+        if (!(pbar->flags & IORESOURCE_PREFETCH)) {
+            continue;
+        }
+        laddr = pbar->addr & PCI_BASE_ADDRESS_MEM_MASK ;
+        laddr |= PCI_BASE_ADDRESS_MEM_PREFETCH | PCI_BASE_ADDRESS_MEM_TYPE_64;
+        vfio_pci_write_config(dev,
+                              PCI_BASE_ADDRESS_0 + (idx * 4),
+                              laddr,
+                              4);
+        vfio_pci_write_config(dev,
+                              PCI_BASE_ADDRESS_0 + (idx * 4) + 4,
+                              (uint32_t)(pbar->addr >> 32),
+                              4);
+        cfg->preserve_config = true;
+    }
+}
+
+static void nvidia_bus_vfio(PCIBus *bus, void *opaque)
+{
+    pci_for_each_device_under_bus(bus, nvidia_dev_vfio, opaque);
+}
+
+static void nvidia_mmio64_window(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint64_t rbase, rlimit;
+    uint32_t idx;
+
+    for (idx = 0; idx < PCI_ROM_SLOT; idx++) {
+        PCIIORegion *res = &dev->io_regions[idx];
+
+        if ((!res->size) ||
+            ((res->addr < ncfg->wbase64) || (res->addr > ncfg->wlimit64))) {
+            continue;
+        }
+        rbase = res->addr;
+        rlimit = res->addr + res->size - 1;
+        ncfg->rbase = MIN(ncfg->rbase, rbase);
+        ncfg->rlimit = MAX(ncfg->rlimit, rlimit);
+    }
+
+    if (IS_PCI_BRIDGE(dev)) {
+        rbase = pci_bridge_get_base(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+        rlimit = pci_bridge_get_limit(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+
+        if ((rbase < ncfg->wbase64) ||
+            (rbase > ncfg->wlimit64) ||
+            (rlimit < ncfg->wbase64) ||
+            (rlimit > ncfg->wlimit64)) {
+            return;
+        }
+
+        ncfg->rbase = MIN(ncfg->rbase, rbase);
+        ncfg->rlimit = MAX(ncfg->rlimit, rlimit);
+    }
+}
+
+static void nvidia_bus_update_bridge_window(PCIBus *bus, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    ncfg->rbase = ~0;
+    ncfg->rlimit = 0;
+
+    assert(pci_bridge_get_device(bus));
+    pci_for_each_device_under_bus(bus, nvidia_mmio64_window, ncfg);
+
+    if (ncfg->rlimit > ncfg->rbase) {
+        nvidia_update_bridge_window(bus, ncfg->rbase, ncfg->rlimit);
+    }
+}
+
+static void nvidia_dev_rom_max_size(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint64_t base, size, rsize = 0;
+
+    size = dev->io_regions[PCI_ROM_SLOT].size;
+    if (!size) {
+        return;
+    }
+
+    base = pci_host_config_read_common(dev,
+                                       PCI_ROM_ADDRESS,
+                                       pci_config_size(dev),
+                                       4);
+    base &= ~(size - 1);
+    if ((base >= ncfg->wbase) &&
+        ((base + size - 1) <= ncfg->wlimit)) {
+        return;
+    }
+
+    if (size > rsize) {
+        ncfg->rsize = size;
+        ncfg->dev = dev;
+    }
+}
+
+static void nvidia_find_mmio_helper(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint64_t base, limit, wbase, wlimit;
+    uint32_t idx;
+    PCIIORegion *res;
+
+    if (ncfg->search_mmio64) {
+        wbase = ncfg->wbase64;
+        wlimit = ncfg->wlimit64;
+    } else {
+        wbase = ncfg->wbase;
+        wlimit = ncfg->wlimit;
+    }
+
+    for (idx = 0; idx < PCI_NUM_REGIONS; idx++) {
+        res = &dev->io_regions[idx];
+        if ((!res->size) || (res->type & PCI_BASE_ADDRESS_SPACE_IO)) {
+            continue;
+        }
+
+        if (ncfg->search_mmio64) {
+            if ((!(res->type & PCI_BASE_ADDRESS_MEM_TYPE_64)) ||
+                (!(res->type & PCI_BASE_ADDRESS_MEM_PREFETCH))) {
+                continue;
+            }
+        }
+
+        if (idx == PCI_ROM_SLOT) {
+            base = pci_host_config_read_common(dev,
+                                               PCI_ROM_ADDRESS,
+                                               pci_config_size(dev),
+                                               4);
+        } else {
+            base = res->addr;
+        }
+
+        base &= ~(res->size - 1);
+        if ((base < wbase) || ((base + res->size - 1) > wlimit)) {
+            continue;
+        }
+
+        if (ranges_overlap(ncfg->rbase, ncfg->rsize, base, res->size)) {
+            ncfg->rbase = QEMU_ALIGN_UP(base + res->size, ncfg->rsize);
+            ncfg->rlimit = ncfg->rbase + ncfg->rsize - 1;
+            ncfg->available = false;
+        }
+    }
+
+    if (IS_PCI_BRIDGE(dev)) {
+
+        if (ncfg->search_mmio64) {
+            base = pci_bridge_get_base(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+            limit = pci_bridge_get_limit(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+        } else {
+            base = pci_bridge_get_base(dev, PCI_BASE_ADDRESS_MEM_TYPE_32);
+            limit = pci_bridge_get_limit(dev, PCI_BASE_ADDRESS_MEM_TYPE_32);
+        }
+
+        if ((base < wbase) || (limit > wlimit)) {
+            return;
+        }
+
+        if (ranges_overlap(ncfg->rbase, ncfg->rsize, base, limit - base + 1)) {
+            ncfg->rbase = QEMU_ALIGN_UP(limit + 1, ncfg->rsize);
+            ncfg->rlimit = ncfg->rbase + ncfg->rsize - 1;
+            ncfg->available = false;
+        }
+    }
+}
+
+static bool nvidia_find_mmio(PCIBus *bus, NVIDIACfg *ncfg)
+{
+    uint64_t wlimit;
+
+    if (ncfg->search_mmio64) {
+        ncfg->rbase = ncfg->wbase64;
+        wlimit = ncfg->wlimit64;
+    } else {
+        ncfg->rbase = ncfg->wbase;
+        wlimit = ncfg->wlimit;
+    }
+    ncfg->rlimit = ncfg->rbase + ncfg->rsize - 1;
+
+    while (ncfg->rlimit <= wlimit) {
+        ncfg->available = true;
+        pci_for_each_device_under_bus(bus, nvidia_find_mmio_helper, ncfg);
+        if (ncfg->available) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void nvidia_bus_adjust_mmio32_rom(PCIBus *bus, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+
+    ncfg->search_mmio64 = false;
+    nvidia_get_bridge_window(bus, ncfg);
+
+    do {
+        ncfg->rsize = 0;
+        pci_for_each_device_under_bus(bus, nvidia_dev_rom_max_size, ncfg);
+        if (!ncfg->rsize)
+            break;
+        if (nvidia_find_mmio(bus, ncfg)) {
+            pci_host_config_write_common(ncfg->dev,
+                                         PCI_ROM_ADDRESS,
+                                         pci_config_size(ncfg->dev),
+                                         ncfg->rbase,
+                                         4);
+        }
+    } while (true);
+}
+
+
+static void nvidia_dev_shift_mmio64(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint64_t addr;
+    uint32_t idx;
+
+    for (idx = 0; idx < PCI_ROM_SLOT; idx++) {
+        PCIIORegion *res = &dev->io_regions[idx];
+
+        if ((!res->size) ||
+            (!(res->type & PCI_BASE_ADDRESS_MEM_TYPE_64)) ||
+            (!(res->type & PCI_BASE_ADDRESS_MEM_PREFETCH))) {
+            continue;
+        }
+
+        addr = res->addr & PCI_BASE_ADDRESS_MEM_MASK;
+        if ((addr >= ncfg->wbase64) && (addr <= ncfg->wlimit64)) {
+            continue;
+        }
+
+        addr += ncfg->rbase;
+        addr |= PCI_BASE_ADDRESS_MEM_PREFETCH | PCI_BASE_ADDRESS_MEM_TYPE_64;
+
+        pci_host_config_write_common(dev,
+                                     PCI_BASE_ADDRESS_0 + (idx * 4),
+                                     pci_config_size(dev),
+                                     (uint32_t)(addr & 0xffffffff),
+                                     4);
+        pci_host_config_write_common(dev,
+                                     PCI_BASE_ADDRESS_0 + (idx * 4) + 4,
+                                     pci_config_size(dev),
+                                     (uint32_t)(addr >> 32),
+                                     4);
+    }
+}
+
+static void nvidia_dev_unassigned_mmio64(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg0 = (NVIDIACfg *)opaque;
+    struct GPEXConfig *cfg = ncfg0->cfg;
+    NVIDIACfg ncfg1, *ncfg = &ncfg1;
+    uint64_t base, limit;
+    PCIBus *sbus;
+
+    if (!IS_PCI_BRIDGE(dev)) {
+        return;
+    }
+
+    sbus = &PCI_BRIDGE(dev)->sec_bus;
+    memcpy(ncfg, ncfg0, sizeof(NVIDIACfg));
+    base = pci_bridge_get_base(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+    limit = pci_bridge_get_limit(dev, PCI_BASE_ADDRESS_MEM_PREFETCH);
+
+    if ((base >= ncfg->wbase64) &&
+        (base <= ncfg->wlimit64) &&
+        (limit >= ncfg->wbase64) &&
+        (limit <= ncfg->wlimit64)) {
+        return;
+    }
+
+    ncfg->rsize = base >= limit ? 0x100000 : limit - base + 1;
+    ncfg->search_mmio64 = true;
+    nvidia_get_bridge_window(bus, ncfg);
+
+    /* Check if the required space is free in the parent bus */
+    if (!nvidia_find_mmio(bus, ncfg)) {
+
+        /* Try with the extended parent window */
+        ncfg->rbase = QEMU_ALIGN_UP(ncfg->wlimit64 + 1, ncfg->rsize);
+        ncfg->wlimit64 = ncfg->rbase + ncfg->rsize - 1;
+        /* TODO: check conflicts with the extended window */
+    }
+
+    if (base >= limit) {
+        nvidia_update_bridge_window(sbus, ncfg->rbase, ncfg->rlimit);
+    } else {
+        ncfg->rbase -= base;
+        pci_for_each_device_under_bus(sbus, nvidia_dev_shift_mmio64, ncfg);
+    }
+
+    ncfg->wbase64 = cfg->mmio64.base + cfg->mmio64.size / 2;
+    ncfg->wlimit64 = ncfg->wbase64 + (cfg->mmio64.size / 2) - 1;
+    pci_for_each_bus(ncfg->bus, nvidia_bus_update_bridge_window, ncfg);
+}
+
+static void nvidia_bus_unassigned_mmio64(PCIBus *bus, void *opaque)
+{
+    pci_for_each_device_under_bus(bus, nvidia_dev_unassigned_mmio64, opaque);
+}
+
+static void nvidia_dev_assign_pio(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    struct GPEXConfig *cfg = ncfg->cfg;
+    PCIIORegion *res;
+    uint32_t idx;
+
+    for (idx = 0; idx < PCI_NUM_REGIONS; idx++) {
+        res = &dev->io_regions[idx];
+
+        if ((!res->size) || (!(res->type & PCI_BASE_ADDRESS_SPACE_IO))) {
+            continue;
+        }
+        ncfg->piobase = QEMU_ALIGN_UP(ncfg->piobase, res->size);
+        pci_host_config_write_common(dev,
+                                 PCI_BASE_ADDRESS_0 + (idx * 4),
+                                 pci_config_size(dev),
+                                 (uint32_t)(ncfg->piobase - cfg->pio.base),
+                                 4);
+        ncfg->piobase += res->size;
+    }
+}
+
+static void nvidia_pio_window(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint64_t rbase, rlimit;
+    uint32_t idx;
+
+    for (idx = 0; idx < PCI_ROM_SLOT; idx++) {
+        PCIIORegion *res = &dev->io_regions[idx];
+
+        if ((!res->size) || (!(res->type & PCI_BASE_ADDRESS_SPACE_IO))) {
+            continue;
+        }
+
+        rbase = res->addr;
+        rlimit = res->addr + res->size - 1;
+        ncfg->rbase = MIN(ncfg->rbase, rbase);
+        ncfg->rlimit = MAX(ncfg->rlimit, rlimit);
+    }
+
+    if (IS_PCI_BRIDGE(dev)) {
+        rbase = pci_bridge_get_base(dev, PCI_BASE_ADDRESS_SPACE_IO);
+        rlimit = pci_bridge_get_limit(dev, PCI_BASE_ADDRESS_SPACE_IO);
+
+        ncfg->rbase = MIN(ncfg->rbase, rbase);
+        ncfg->rlimit = MAX(ncfg->rlimit, rlimit);
+    }
+}
+
+static void nvidia_bus_assign_pio(PCIBus *bus, void *opaque)
+{
+    PCIDevice *bridge = pci_bridge_get_device(bus);
+    NVIDIACfg *ncfg = (NVIDIACfg *)opaque;
+    uint32_t value0, value1;
+
+    ncfg->piobase = QEMU_ALIGN_UP(ncfg->piobase, 0x1000);
+    pci_for_each_device_under_bus(bus, nvidia_dev_assign_pio, ncfg);
+    if (!bridge) {
+        return;
+    }
+
+    ncfg->rbase = ~0;
+    ncfg->rlimit = 0;
+    pci_for_each_device_under_bus(bus, nvidia_pio_window, ncfg);
+
+    if (ncfg->rbase > ncfg->rlimit) {
+        ncfg->rbase = QEMU_ALIGN_UP(ncfg->piobase, 0x1000);
+        ncfg->piobase += 0x1000;
+        ncfg->rlimit = ncfg->piobase - 1;
+    }
+
+    value0 = (uint32_t)(extract64(ncfg->rbase, 12, 4) << 4);
+    value1 = (uint32_t)(extract64(ncfg->rlimit, 12, 4) << 4);
+
+    pci_host_config_write_common(bridge,
+                                 PCI_IO_BASE,
+                                 pci_config_size(bridge),
+                                 value0 | PCI_IO_RANGE_TYPE_16,
+                                 1);
+    pci_host_config_write_common(bridge,
+                                 PCI_IO_LIMIT,
+                                 pci_config_size(bridge),
+                                 value1 | PCI_IO_RANGE_TYPE_16,
+                                 1);
+}
+
+static void nvidia_prepare_mmio64_identity(struct GPEXConfig *cfg)
+{
+    NVIDIACfg ncfg1, *ncfg = &ncfg1;
+    PCIBus *bus = cfg->bus;
+
+    pci_for_each_bus(bus, nvidia_bus_vfio, cfg);
+    if (!cfg->preserve_config) {
+        return;
+    }
+
+    memset(ncfg, 0, sizeof(NVIDIACfg));
+    ncfg->cfg = cfg;
+
+    nvidia_get_bridge_window(bus, ncfg);
+    pci_for_each_bus(bus, nvidia_bus_adjust_mmio32_rom, ncfg);
+
+    ncfg->piobase = cfg->pio.base;
+    pci_for_each_bus(bus, nvidia_bus_assign_pio, ncfg);
+
+    nvidia_get_bridge_window(bus, ncfg);
+
+    QLIST_FOREACH(bus, &bus->child, sibling) {
+        ncfg->bus = bus;
+        ncfg->wbase64 = cfg->mmio64.base + cfg->mmio64.size / 2;
+        ncfg->wlimit64 = ncfg->wbase64 + (cfg->mmio64.size / 2) - 1;
+
+        pci_for_each_bus(bus, nvidia_bus_update_bridge_window, ncfg);
+        pci_for_each_bus(bus, nvidia_bus_unassigned_mmio64, ncfg);
+    }
+}
+
 static void acpi_dsdt_add_pci(Aml *scope, const MemMapEntry *memmap,
-                              uint32_t irq, VirtMachineState *vms)
+                              uint32_t irq, VirtMachineState *vms, bool update)
 {
     int ecam_id = VIRT_ECAM_ID(vms->highmem_ecam);
     struct GPEXConfig cfg = {
@@ -142,6 +687,10 @@ static void acpi_dsdt_add_pci(Aml *scope, const MemMapEntry *memmap,
 
     if (vms->highmem_mmio) {
         cfg.mmio64 = memmap[VIRT_HIGH_PCIE_MMIO];
+
+        if (vms->grace_pcie_mmio_identity && update) {
+            nvidia_prepare_mmio64_identity(&cfg);
+        }
     }
 
     acpi_dsdt_add_gpex(scope, &cfg);
@@ -925,7 +1474,7 @@ static void build_fadt_rev6(GArray *table_data, BIOSLinker *linker,
 
 /* DSDT */
 static void
-build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms, bool update)
 {
     VirtMachineClass *vmc = VIRT_MACHINE_GET_CLASS(vms);
     Aml *scope, *dsdt;
@@ -958,7 +1507,7 @@ build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
     virtio_acpi_dsdt_add(scope, memmap[VIRT_MMIO].base, memmap[VIRT_MMIO].size,
                          (irqmap[VIRT_MMIO] + ARM_SPI_BASE),
                          0, NUM_VIRTIO_TRANSPORTS);
-    acpi_dsdt_add_pci(scope, memmap, irqmap[VIRT_PCIE] + ARM_SPI_BASE, vms);
+    acpi_dsdt_add_pci(scope, memmap, irqmap[VIRT_PCIE] + ARM_SPI_BASE, vms, update);
     if (vms->acpi_dev) {
         build_ged_aml(scope, "\\_SB."GED_DEVICE,
                       HOTPLUG_HANDLER(vms->acpi_dev),
@@ -1027,7 +1576,7 @@ static void acpi_align_size(GArray *blob, unsigned align)
 }
 
 static
-void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
+void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables, bool update)
 {
     VirtMachineClass *vmc = VIRT_MACHINE_GET_CLASS(vms);
     GArray *table_offsets;
@@ -1044,7 +1593,7 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
 
     /* DSDT is pointed to by FADT */
     dsdt = tables_blob->len;
-    build_dsdt(tables_blob, tables->linker, vms);
+    build_dsdt(tables_blob, tables->linker, vms, update);
 
     /* FADT MADT PPTT GTDT MCFG SPCR DBG2 pointed to by RSDT */
     acpi_add_table(table_offsets, tables_blob);
@@ -1185,7 +1734,7 @@ static void virt_acpi_build_update(void *build_opaque)
 
     acpi_build_tables_init(&tables);
 
-    virt_acpi_build(VIRT_MACHINE(qdev_get_machine()), &tables);
+    virt_acpi_build(VIRT_MACHINE(qdev_get_machine()), &tables, true);
 
     acpi_ram_update(build_state->table_mr, tables.table_data);
     acpi_ram_update(build_state->rsdp_mr, tables.rsdp);
@@ -1229,7 +1778,7 @@ void virt_acpi_setup(VirtMachineState *vms)
     build_state = g_malloc0(sizeof *build_state);
 
     acpi_build_tables_init(&tables);
-    virt_acpi_build(vms, &tables);
+    virt_acpi_build(vms, &tables, false);
 
     /* Now expose it all to Guest */
     build_state->table_mr = acpi_add_rom_blob(virt_acpi_build_update,

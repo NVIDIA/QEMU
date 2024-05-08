@@ -1793,6 +1793,9 @@ static void create_pcie(VirtMachineState *vms)
                                  2, base_ecam, 2, size_ecam);
 
     if (vms->highmem_mmio) {
+        if (vms->grace_pcie_mmio_identity && virt_is_acpi_enabled(vms)) {
+            size_mmio_high = size_mmio_high >> 1;
+        }
         qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "ranges",
                                      1, FDT_PCI_RANGE_IOPORT, 2, 0,
                                      2, base_pio, 2, size_pio,
@@ -2065,6 +2068,12 @@ static void virt_set_high_memmap(VirtMachineState *vms,
         if (fits) {
             vms->highest_gpa = base - 1;
         }
+    }
+
+    if (vms->grace_pcie_mmio_identity) {
+        vms->highest_gpa = BIT_ULL(pa_bits) - 1;
+        vms->memmap[VIRT_HIGH_PCIE_MMIO].base = 0x400000000000;
+        vms->memmap[VIRT_HIGH_PCIE_MMIO].size = 0x400000000000;
     }
 }
 
@@ -2844,6 +2853,20 @@ static void virt_set_oem_table_id(Object *obj, const char *value,
     strncpy(vms->oem_table_id, value, 8);
 }
 
+static bool virt_get_grace_pcie_mmio_identity(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->grace_pcie_mmio_identity;
+}
+
+static void virt_set_grace_pcie_mmio_identity(Object *obj, bool value,
+                                              Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->grace_pcie_mmio_identity = value;
+}
 
 bool virt_is_acpi_enabled(VirtMachineState *vms)
 {
@@ -3516,6 +3539,14 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
                                           "Override the default value of field OEM Table ID "
                                           "in ACPI table header."
                                           "The string may be up to 8 bytes in size");
+
+    object_class_property_add_bool(oc, "grace-pcie-mmio-identity",
+                                   virt_get_grace_pcie_mmio_identity,
+                                   virt_set_grace_pcie_mmio_identity);
+    object_class_property_set_description(oc, "grace-pcie-mmio-identity",
+                                          "Set on/off to enable/disable "
+                                          "mapping PCIe 64bit BARs with "
+                                          "HPA = IPA for pass-through devices");
 
 }
 
