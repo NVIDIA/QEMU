@@ -152,6 +152,7 @@ static void arm_virt_compat_set(MachineClass *mc)
 
 /* MMIO region size for SMMUv3 */
 #define SMMU_IO_LEN 0x20000
+#define SMMU_CMDQV_IO_LEN 0x50000
 
 /* Addresses and sizes of our components.
  * 0..128MB is space for a flash device so we can run bootrom code such as UEFI.
@@ -1428,6 +1429,36 @@ static void create_pcie_irq_map(const MachineState *ms,
                            0x7           /* PCI irq */);
 }
 
+static void create_cmdqv(const VirtMachineState *vms, hwaddr smmu_base,
+                         DeviceState *smmu_dev)
+{
+    PlatformBusDevice *pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
+    SysBusDevice *sbdev = SYS_BUS_DEVICE(smmu_dev);
+    int irq = platform_bus_get_irqn(pbus, sbdev, NUM_SMMU_IRQS);
+    hwaddr base = platform_bus_get_mmio_addr(pbus, sbdev, 1);
+    const char compat[] = "tegra241,cmdqv";
+    MachineState *ms = MACHINE(vms);
+    char *node, *smmu_node;
+
+    base += vms->memmap[VIRT_PLATFORM_BUS].base;
+    irq += vms->irqmap[VIRT_PLATFORM_BUS];
+
+    node = g_strdup_printf("/cmdqv@%" PRIx64, base);
+    qemu_fdt_add_subnode(ms->fdt, node);
+    qemu_fdt_setprop(ms->fdt, node, "compatible", compat, sizeof(compat));
+    qemu_fdt_setprop_sized_cells(ms->fdt, node, "reg", 2, base, 2,
+                                 SMMU_CMDQV_IO_LEN);
+
+    qemu_fdt_setprop_cells(ms->fdt, node, "interrupts", GIC_FDT_IRQ_TYPE_SPI,
+                           irq, GIC_FDT_IRQ_FLAGS_EDGE_LO_HI);
+
+    smmu_node = g_strdup_printf("/smmuv3@%" PRIx64, smmu_base);
+    qemu_fdt_setprop_phandle(ms->fdt, node, "smmu", smmu_node);
+    g_free(smmu_node);
+
+    g_free(node);
+}
+
 static void create_smmuv3_dt_bindings(const VirtMachineState *vms, hwaddr base,
                                       hwaddr size, int irq)
 {
@@ -1459,6 +1490,7 @@ static void create_smmuv3_dt_bindings(const VirtMachineState *vms, hwaddr base,
 static void create_smmuv3_dev_dtb(VirtMachineState *vms,
                                   DeviceState *dev, PCIBus *bus)
 {
+    bool has_cmdqv = object_property_get_bool(OBJECT(dev), "cmdqv", NULL);
     PlatformBusDevice *pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
     SysBusDevice *sbdev = SYS_BUS_DEVICE(dev);
     int irq = platform_bus_get_irqn(pbus, sbdev, 0);
@@ -1477,6 +1509,10 @@ static void create_smmuv3_dev_dtb(VirtMachineState *vms,
     create_smmuv3_dt_bindings(vms, base, SMMU_IO_LEN, irq);
     qemu_fdt_setprop_cells(ms->fdt, vms->pciehb_nodename, "iommu-map",
                            0x0, vms->iommu_phandle, 0x0, 0x10000);
+
+    if (has_cmdqv) {
+        create_cmdqv(vms, base, dev);
+    }
 }
 
 static void create_smmu(const VirtMachineState *vms,

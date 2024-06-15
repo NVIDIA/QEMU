@@ -583,6 +583,7 @@ build_iort(GArray *table_data, AcpiBuildTables *tables, VirtMachineState *vms)
             offset_to_id_array = 0; /* No ID mappings array */
         }
         sdev->offset = table_data->len - table.table_offset;
+        trace_virt_acpi_iort_smmuv3(id, sdev->base, irq, irq + 3);
         /* Table 9 SMMUv3 Format */
         build_append_int_noprefix(table_data, 4 /* SMMUv3 */, 1); /* Type */
         node_size =  SMMU_V3_ENTRY_SIZE +
@@ -1066,11 +1067,68 @@ static void build_fadt_rev6(GArray *table_data, BIOSLinker *linker,
     build_fadt(table_data, linker, &fadt, vms->oem_id, vms->oem_table_id);
 }
 
+#define SMMU_CMDQV_IO_LEN 0x50000
+
+static int acpi_dsdt_add_cmdqv(Aml *scope, GArray *smmuv3_devs)
+{
+    VirtMachineState *vms = VIRT_MACHINE(qdev_get_machine());
+    int i;
+
+    for (i = 0; i < smmuv3_devs->len; i++) {
+        uint32_t identifier = i;
+        AcpiIortSMMUv3Dev *sdev;
+        PlatformBusDevice *pbus;
+        Aml *dev, *crs, *addr;
+        SysBusDevice *sbdev;
+        uint32_t irq;
+        hwaddr base;
+
+        sdev = &g_array_index(smmuv3_devs, AcpiIortSMMUv3Dev, i);
+        if (!object_property_get_bool(sdev->obj, "cmdqv", &error_abort)) {
+            continue;
+        }
+
+        sbdev = SYS_BUS_DEVICE(sdev->obj);
+        pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
+        base = platform_bus_get_mmio_addr(pbus, sbdev, 1);
+        base += vms->memmap[VIRT_PLATFORM_BUS].base;
+        irq = platform_bus_get_irqn(pbus, sbdev, NUM_SMMU_IRQS);
+        irq += vms->irqmap[VIRT_PLATFORM_BUS];
+        irq += ARM_SPI_BASE;
+
+        dev = aml_device("CV%.02u", identifier);
+        aml_append(dev, aml_name_decl("_HID", aml_string("NVDA200C")));
+        if (vms->its) {
+            identifier++;
+        }
+        aml_append(dev, aml_name_decl("_UID", aml_int(identifier)));
+        aml_append(dev, aml_name_decl("_CCA", aml_int(1)));
+
+        crs = aml_resource_template();
+        addr = aml_qword_memory(AML_POS_DECODE, AML_MIN_FIXED, AML_MAX_FIXED,
+                                AML_CACHEABLE, AML_READ_WRITE, 0x0, base,
+                                base + SMMU_CMDQV_IO_LEN - 0x1, 0x0,
+                                SMMU_CMDQV_IO_LEN);
+        aml_append(crs, addr);
+        aml_append(crs, aml_interrupt(AML_CONSUMER, AML_EDGE, AML_ACTIVE_HIGH,
+                                      AML_EXCLUSIVE, &irq, 1));
+        aml_append(dev, aml_name_decl("_CRS", crs));
+
+        aml_append(scope, dev);
+
+        trace_virt_acpi_dsdt_cmdqv(identifier, base, irq);
+    }
+
+    return 0;
+}
+
 /* DSDT */
 static void
-build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+build_dsdt(GArray *table_data, AcpiBuildTables *tables, VirtMachineState *vms)
 {
     VirtMachineClass *vmc = VIRT_MACHINE_GET_CLASS(vms);
+    GArray *smmuv3_devs = tables->smmuv3_devs;
+    BIOSLinker *linker = tables->linker;
     Aml *scope, *dsdt;
     MachineState *ms = MACHINE(vms);
     const MemMapEntry *memmap = vms->memmap;
@@ -1127,6 +1185,8 @@ build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
 #ifdef CONFIG_TPM
     acpi_dsdt_add_tpm(scope, vms);
 #endif
+
+    acpi_dsdt_add_cmdqv(scope, smmuv3_devs);
 
     aml_append(dsdt, scope);
 
@@ -1185,7 +1245,7 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
 
     /* DSDT is pointed to by FADT */
     dsdt = tables_blob->len;
-    build_dsdt(tables_blob, tables->linker, vms);
+    build_dsdt(tables_blob, tables, vms);
 
     /* FADT MADT PPTT GTDT MCFG SPCR DBG2 pointed to by RSDT */
     acpi_add_table(table_offsets, tables_blob);

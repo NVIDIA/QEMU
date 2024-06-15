@@ -9,6 +9,8 @@ omap1_lpg_led(const char *onoff) "omap1 LPG: LED is %s"
 
 # virt-acpi-build.c
 virt_acpi_setup(void) "No fw cfg or ACPI disabled. Bailing out."
+virt_acpi_dsdt_cmdqv(int smmu_id, uint64_t base, uint32_t irq) "DSDT: add cmdqv node for (id=%d), base=%" PRIx64 ", irq=%d"
+virt_acpi_iort_smmuv3(int smmu_id, uint64_t base, uint32_t irq_min, uint32_t irq_max) "IORT: add smmuv3 node (id=%d), base=%" PRIx64 ", irq=%d-%d"
 
 # smmu-common.c
 smmu_add_mr(const char *name) "%s"
