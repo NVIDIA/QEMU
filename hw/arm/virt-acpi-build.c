@@ -216,6 +216,28 @@ static void acpi_dsdt_add_tpm(Aml *scope, VirtMachineState *vms)
 #define ROOT_COMPLEX_ENTRY_SIZE 36
 #define IORT_NODE_OFFSET 48
 
+static void acpi_dsdt_add_cmdqv(Aml *scope, uint32_t cmdqv_irq,
+                                hwaddr base, hwaddr size, int idx)
+{
+    fprintf(stderr, "%s: adding cmdqv %d, cmdqv_irq %d\n", __func__, idx, cmdqv_irq);
+
+    Aml *dev = aml_device("CV%.02u", idx);
+    aml_append(dev, aml_name_decl("_HID", aml_string("NVDA200C")));
+    aml_append(dev, aml_name_decl("_UID", aml_int(idx + 1)));
+    aml_append(dev, aml_name_decl("_CCA", aml_int(1)));
+
+    Aml *crs = aml_resource_template();
+    Aml *addr = aml_qword_memory(AML_POS_DECODE, AML_MIN_FIXED, AML_MAX_FIXED,
+                                 AML_CACHEABLE,AML_READ_WRITE, 0x0,
+                                 base, base + size - 0x1, 0x0, size);
+    aml_append(crs, addr);
+    aml_append(crs, aml_interrupt(AML_CONSUMER, AML_EDGE, AML_ACTIVE_HIGH,
+                                 AML_EXCLUSIVE, &cmdqv_irq, 1));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+
+    aml_append(scope, dev);
+}
+
 /*
  * Append an ID mapping entry as described by "Table 4 ID mapping format" in
  * "IO Remapping Table System Software on ARM Platforms", Chapter 3.
@@ -363,6 +385,10 @@ build_iort(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
     if (vms->num_nested_smmus) {
         irq = vms->irqmap[VIRT_NESTED_SMMU] + ARM_SPI_BASE;
         base = vms->memmap[VIRT_NESTED_SMMU].base;
+        if (vms->smmu_has_cmdqv) {
+            irq_offset += NUM_SMMU_CMDQV_IRQS;
+            offset += SMMU_CMDQV_IO_LEN;;
+        }
         num_smmus = vms->num_nested_smmus;
     } else if (virt_has_smmuv3(vms)) {
         irq = vms->irqmap[VIRT_SMMU] + ARM_SPI_BASE;
@@ -961,6 +987,19 @@ build_dsdt(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
 #ifdef CONFIG_TPM
     acpi_dsdt_add_tpm(scope, vms);
 #endif
+
+    if (vms->smmu_has_cmdqv) {
+        int irq_base = irqmap[VIRT_NESTED_SMMU] + ARM_SPI_BASE + NUM_SMMU_IRQS;
+        hwaddr base = memmap[VIRT_NESTED_SMMU].base + SMMU_IO_LEN;
+        uint32_t size = SMMU_IO_LEN + SMMU_CMDQV_IO_LEN;
+        int irqs = NUM_SMMU_IRQS + NUM_SMMU_CMDQV_IRQS;
+        int i;
+
+        for (i = 0; i < vms->num_nested_smmus; i++) {
+            acpi_dsdt_add_cmdqv(scope, irq_base + i * irqs,
+                                base + i * size, size, i);
+        }
+    }
 
     aml_append(dsdt, scope);
 

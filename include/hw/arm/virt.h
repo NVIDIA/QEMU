@@ -43,6 +43,7 @@
 #define NUM_GICV2M_SPIS       64
 #define NUM_VIRTIO_TRANSPORTS 32
 #define NUM_SMMU_IRQS          4
+#define NUM_SMMU_CMDQV_IRQS    1
 
 /* See Linux kernel arch/arm64/include/asm/pvclock-abi.h */
 #define PVTIME_SIZE_PER_CPU 64
@@ -50,8 +51,9 @@
 /* GPIO pins */
 #define GPIO_PIN_POWER_BUTTON  3
 
-/* MMIO region size for SMMUv3 */
+/* MMIO region size for SMMUv3 and CMDQV */
 #define SMMU_IO_LEN         (0x20000)
+#define SMMU_CMDQV_IO_LEN   (0x50000)
 
 enum {
     VIRT_FLASH,
@@ -169,6 +171,7 @@ struct VirtMachineState {
     bool mte;
     bool dtb_randomness;
     bool second_ns_uart_present;
+    bool smmu_has_cmdqv;
     int num_nested_smmus;
     OnOffAuto acpi;
     VirtGICType gic_version;
