@@ -31,25 +31,21 @@ REG32(PARAM, 0x4)
 
 REG32(STATUS, 0x8)
     FIELD(STATUS, CMDQV_ENABLED,  0, 1)
-    FIELD(STATUS, CMDQV_STATUS,   1, 2)
 
-#define V_STATUS_CMDQV_STATUS_ERROR_SHADOW    (1 << 1)
-#define V_STATUS_CMDQV_STATUS_ERROR_VIRT_INTF (2 << 1)
-
-#define A_VI_ERR_MAP 0xc
-#define A_VI_ERR_MAP_1 0x10
+#define A_VI_ERR_MAP 0x14
+#define A_VI_ERR_MAP_1 0x18
 #define V_VI_ERR_MAP_NO_ERROR (0)
 #define V_VI_ERR_MAP_ERROR    (1)
 
-#define A_VI_INT_MASK 0x14
-#define A_VI_INT_MASK_1 0x18
+#define A_VI_INT_MASK 0x1c
+#define A_VI_INT_MASK_1 0x20
 #define V_VI_INT_MASK_NOT_MASKED (0)
 #define V_VI_INT_MASK_MASKED     (1)
 
-#define A_CMDQ_ERR_MAP 0x1c
-#define A_CMDQ_ERR_MAP_1 0x20
-#define A_CMDQ_ERR_MAP_2 0x24
-#define A_CMDQ_ERR_MAP_3 0x28
+#define A_CMDQ_ERR_MAP 0x24
+#define A_CMDQ_ERR_MAP_1 0x28
+#define A_CMDQ_ERR_MAP_2 0x2c
+#define A_CMDQ_ERR_MAP_3 0x30
 
 /* i = [0, 127] */
 #define A_CMDQ_ALLOC_MAP_(i)                               \
@@ -79,18 +75,17 @@ A_VINTFi_CONFIG(0)
 
 A_VINTFi_STATUS(0)
 
-#define V_VINTF_STATUS_NO_ERROR                (0 << 1)
+#define V_VINTF_STATUS_NO_ERROR          (0 << 1)
 #define V_VINTF_STATUS_VCMDQ_EROR        (1 << 1)
-#define V_VINTF_STATUS_INIT_ERROR        (2 << 1)
 
-/* j = [0, 3] */
-#define A_VINTFi_CMDQ_ERR_MAP_(i, j)                                     \
-    REG32(VINTF ## i ## _CMDQ_ERR_MAP_ ## j, 0x10c0 + j * 4 + i * 0x100) \
-        FIELD(VINTF ## i ## _CMDQ_ERR_MAP_ ## j, CMDQ_ERR_MAP, 0, 32)
+/* i = [0, 0], j = [0, 3] */
+#define A_VINTFi_LVCMDQ_ERR_MAP_(i, j)                                     \
+    REG32(VINTF ## i ## _LVCMDQ_ERR_MAP_ ## j, 0x10c0 + j * 4 + i * 0x100) \
+        FIELD(VINTF ## i ## _LVCMDQ_ERR_MAP_ ## j, LVCMDQ_ERR_MAP, 0, 32)
 
-A_VINTFi_CMDQ_ERR_MAP_(0, 0)
+A_VINTFi_LVCMDQ_ERR_MAP_(0, 0)
 /* Omitting [0][1~2] as not being directly called */
-A_VINTFi_CMDQ_ERR_MAP_(0, 3)
+A_VINTFi_LVCMDQ_ERR_MAP_(0, 3)
 
 /* VCMDQ registers -- starting from 0x10000 with size 64KB * 2 (0x20000) */
 #define VCMDQ_REG_OFFSET 0x10000
@@ -99,7 +94,7 @@ A_VINTFi_CMDQ_ERR_MAP_(0, 3)
 #define A_VCMDQi_CONS_INDX(i)                          \
     REG32(VCMDQ ## i ##_CONS_INDX, 0x10000 + i * 0x80) \
         FIELD(VCMDQ ## i ##_CONS_INDX, RD,   0, 20)    \
-        FIELD(VCMDQ ## i ##_CONS_INDX, ERR, 24, 30)
+        FIELD(VCMDQ ## i ##_CONS_INDX, ERR, 24, 7)
 
 A_VCMDQi_CONS_INDX(0)
 /* Omitting [1~126] as not being directly called */
@@ -110,7 +105,6 @@ A_VCMDQi_CONS_INDX(127)
 #define V_VCMDQ_CONS_INDX_ERR_CERROR_ABT          2
 #define V_VCMDQ_CONS_INDX_ERR_CERROR_ATC_INV_SYNC 3
 #define V_VCMDQ_CONS_INDX_ERR_CERROR_ILL_ACCESS   4
-#define V_VCMDQ_CONS_INDX_ERR_CERROR_CMDQ_INIT    5
 
 #define A_VCMDQi_PROD_INDX(i)                                \
     REG32(VCMDQ ## i ##_PROD_INDX, 0x10000 + 0x4 + i * 0x80) \
@@ -193,7 +187,7 @@ A_VCMDQi_CONS_INDX_BASE_DRAM_H(127)
 #define A_VI_VCMDQi_CONS_INDX(i)                          \
     REG32(VI_VCMDQ ## i ##_CONS_INDX, 0x30000 + i * 0x80) \
         FIELD(VI_VCMDQ ## i ##_CONS_INDX, RD,   0, 20)    \
-        FIELD(VI_VCMDQ ## i ##_CONS_INDX, ERR, 24, 30)
+        FIELD(VI_VCMDQ ## i ##_CONS_INDX, ERR, 24, 7)
 
 A_VI_VCMDQi_CONS_INDX(0)
 /* Omitting [1~126] as not being directly called */

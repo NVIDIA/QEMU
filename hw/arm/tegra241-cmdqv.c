@@ -106,8 +106,8 @@ static uint64_t tegra241_cmdqv_read_vintf(Tegra241CMDQV *s, hwaddr offset)
     case A_VINTF0_STATUS:
         return s->vintf_status;
 
-    case A_VINTF0_CMDQ_ERR_MAP_0 ... A_VINTF0_CMDQ_ERR_MAP_3:
-        i = (offset - A_VINTF0_CMDQ_ERR_MAP_0) / 4;
+    case A_VINTF0_LVCMDQ_ERR_MAP_0 ... A_VINTF0_LVCMDQ_ERR_MAP_3:
+        i = (offset - A_VINTF0_LVCMDQ_ERR_MAP_0) / 4;
         return s->vintf_cmdq_err_map[i];
     }
 
@@ -240,7 +240,7 @@ static uint64_t tegra241_cmdqv_read(void *opaque, hwaddr offset, unsigned size)
     case A_CMDQ_ALLOC_MAP_0 ... A_CMDQ_ALLOC_MAP_127:
         return s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 4];
 
-    case A_VINTF0_CONFIG ... A_VINTF0_CMDQ_ERR_MAP_3:
+    case A_VINTF0_CONFIG ... A_VINTF0_LVCMDQ_ERR_MAP_3:
         return tegra241_cmdqv_read_vintf(s, offset);
     case A_VCMDQ0_CONS_INDX ... A_VCMDQ127_GERRORN:
         /*
@@ -429,7 +429,7 @@ static void tegra241_cmdqv_write(void *opaque, hwaddr offset,
         s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 4] = value;
         break;
 
-    case A_VINTF0_CONFIG ... A_VINTF0_CMDQ_ERR_MAP_3:
+    case A_VINTF0_CONFIG ... A_VINTF0_LVCMDQ_ERR_MAP_3:
         tegra241_cmdqv_write_vintf(s, offset, value, size);
         break;
 
