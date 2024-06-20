@@ -229,16 +229,16 @@ static uint64_t tegra241_cmdqv_read(void *opaque, hwaddr offset, unsigned size)
         return s->status;
 
     case A_VI_ERR_MAP ... A_VI_ERR_MAP_1:
-        return s->vi_err_map[(offset - A_VI_ERR_MAP) / 2];
+        return s->vi_err_map[(offset - A_VI_ERR_MAP) / 4];
 
     case A_VI_INT_MASK ... A_VI_INT_MASK_1:
-        return s->vi_int_mask[(offset - A_VI_INT_MASK) / 2];
+        return s->vi_int_mask[(offset - A_VI_INT_MASK) / 4];
 
     case A_CMDQ_ERR_MAP ... A_CMDQ_ERR_MAP_3:
         return s->cmdq_err_map[(offset - A_CMDQ_ERR_MAP) / 4];
 
     case A_CMDQ_ALLOC_MAP_0 ... A_CMDQ_ALLOC_MAP_127:
-        return s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 128];
+        return s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 4];
 
     case A_VINTF0_CONFIG ... A_VINTF0_CMDQ_ERR_MAP_3:
         return tegra241_cmdqv_read_vintf(s, offset);
@@ -422,11 +422,11 @@ static void tegra241_cmdqv_write(void *opaque, hwaddr offset,
         break;
 
     case A_VI_INT_MASK ... A_VI_INT_MASK_1:
-        s->vi_int_mask[(offset - A_VI_INT_MASK) / 2] = value;
+        s->vi_int_mask[(offset - A_VI_INT_MASK) / 4] = value;
         break;
 
     case A_CMDQ_ALLOC_MAP_0 ... A_CMDQ_ALLOC_MAP_127:
-        s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 128] = value;
+        s->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 4] = value;
         break;
 
     case A_VINTF0_CONFIG ... A_VINTF0_CMDQ_ERR_MAP_3:
