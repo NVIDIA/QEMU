@@ -133,6 +133,7 @@ typedef struct SMMUViommu {
     IOMMUFDBackend *iommufd;
     IOMMUFDViommu *core;
     SMMUS2Hwpt *s2_hwpt;
+    IOMMUFDVeventq *veventq;
     uint32_t bypass_hwpt_id;
     uint32_t abort_hwpt_id;
     QLIST_HEAD(, SMMUDevice) device_list;
@@ -195,6 +196,9 @@ struct SMMUState {
     /* Nested SMMU */
     bool nested;
     SMMUViommu *viommu;
+    QemuThread event_thread_id;
+    bool event_thread_stop;
+    QemuMutex event_thread_mutex;
 
     GHashTable *smmu_pcibus_by_busptr;
     GHashTable *configs; /* cache for configuration data */

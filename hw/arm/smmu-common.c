@@ -941,6 +941,7 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
     }
 
     viommu = g_new0(SMMUViommu, 1);
+    viommu->smmu = s;
 
     viommu->core = iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
                                                 IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
@@ -1078,6 +1079,7 @@ static void smmu_dev_unset_iommu_device(PCIBus *bus, void *opaque, int devfn)
     }
 
     if (QLIST_EMPTY(&viommu->device_list)) {
+        qemu_thread_join(&s->event_thread_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->bypass_hwpt_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->abort_hwpt_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->core->viommu_id);
@@ -1260,6 +1262,7 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
                                  "smmu-sysmem", get_system_memory(), 0,
                                  memory_region_size(get_system_memory()));
         memory_region_add_subregion(&s->root, 0, &s->sysmem);
+        qemu_mutex_init(&s->event_thread_mutex);
     }
 
     if (s->primary_bus) {
