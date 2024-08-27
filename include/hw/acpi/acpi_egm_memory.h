@@ -19,4 +19,6 @@ typedef struct AcpiEgmMemory {
     uint16_t node;
 } AcpiEgmMemory;
 
+void build_acpi_egm_memory_dsdt(Aml *dev, int bus);
+
 #endif

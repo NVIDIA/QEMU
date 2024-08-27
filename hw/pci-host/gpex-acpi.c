@@ -7,6 +7,7 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pcie_host.h"
 #include "hw/acpi/cxl.h"
+#include "hw/acpi/acpi_egm_memory.h"
 
 static void acpi_dsdt_add_pci_route_table(Aml *dev, uint32_t irq,
                                           Aml *scope, uint8_t bus_num)
@@ -171,6 +172,8 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
                                                   cfg->preserve_config);
             }
 
+            build_acpi_egm_memory_dsdt(dev, bus_num);
+
             aml_append(scope, dev);
         }
     }
@@ -245,6 +248,8 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
 
     acpi_dsdt_add_host_bridge_methods(dev, cfg->pci_native_hotplug,
                                       cfg->preserve_config);
+
+    build_acpi_egm_memory_dsdt(dev, 0);
 
     Aml *dev_res0 = aml_device("%s", "RES0");
     aml_append(dev_res0, aml_name_decl("_HID", aml_string("PNP0C02")));
