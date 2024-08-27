@@ -830,6 +830,21 @@
   'data': { '*fd': 'str' } }
 
 ##
+# @AcpiEgmMemoryProperties:
+#
+# Properties for acpi-egm-memory objects.
+#
+# @pci-dev: PCI device ID to be associated with the node
+#
+# @node: NUMA node associated with the PCI device
+#
+# Since: 9.0
+##
+{ 'struct': 'AcpiEgmMemoryProperties',
+  'data': { 'pci-dev': 'str',
+            'node': 'uint32' } }
+
+##
 # @AcpiGenericInitiatorProperties:
 #
 # Properties for acpi-generic-initiator objects.
@@ -1081,6 +1096,7 @@
 ##
 { 'enum': 'ObjectType',
   'data': [
+    'acpi-egm-memory',
     'acpi-generic-initiator',
     'acpi-generic-port',
     'authz-list',
@@ -1157,6 +1173,7 @@
             'id': 'str' },
   'discriminator': 'qom-type',
   'data': {
+      'acpi-egm-memory':            'AcpiEgmMemoryProperties',
       'acpi-generic-initiator':     'AcpiGenericInitiatorProperties',
       'acpi-generic-port':          'AcpiGenericPortProperties',
       'authz-list':                 'AuthZListProperties',
