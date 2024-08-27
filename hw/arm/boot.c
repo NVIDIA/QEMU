@@ -27,6 +27,15 @@
 #include "qemu/option.h"
 #include "qemu/units.h"
 
+#include <sys/ioctl.h>
+#include "hw/vfio/vfio-common.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
+
+#ifdef CONFIG_LINUX
+#include <linux/egm.h>
+#endif
+
 /* Kernel boot protocol is specified in the kernel docs
  * Documentation/arm/Booting and Documentation/arm64/booting.txt
  * They have different preferred image load offsets from system RAM base.
@@ -511,6 +520,102 @@ static void fdt_add_psci_node(void *fdt)
     qemu_fdt_setprop_cell(fdt, "/psci", "migrate", migrate_fn);
 }
 
+static int fdt_add_memory_node_wrapper(void *fdt, uint32_t acells,
+                                       hwaddr mem_base, uint32_t scells,
+                                       hwaddr mem_len, int numa_node_id)
+{
+    int rc;
+
+    if (!mem_len) {
+        return 0;
+    }
+
+    rc = fdt_add_memory_node(fdt, acells, mem_base, scells,
+                             mem_len, numa_node_id);
+    if (rc < 0) {
+        fprintf(stderr, "couldn't add /memory@%"PRIx64" node\n",
+                mem_base);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int offset_compare(const void *a, const void *b)
+{
+    struct egm_bad_pages_info *page1 = (struct egm_bad_pages_info *) a;
+    struct egm_bad_pages_info *page2 = (struct egm_bad_pages_info *) b;
+
+    if (page1->offset > page2->offset) {
+        return 1;
+    } else if (page1->offset < page2->offset) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+static int add_memory_regions(struct egm_bad_pages_list *info, void *fdt,
+                              uint32_t acells, hwaddr mem_base, uint32_t scells,
+                              hwaddr mem_len, int numa_node_id)
+{
+    int index;
+    hwaddr mem_base_curr, mem_last_curr = mem_len;
+
+    if (!info) {
+        goto no_retired_pages;
+    }
+
+    qsort(info->bad_pages, info->count,
+          sizeof(struct egm_bad_pages_info), &offset_compare);
+    mem_last_curr = mem_len;
+    for (index = info->count - 1; index >= 0; index--) {
+        mem_base_curr = info->bad_pages[index].offset +
+                        info->bad_pages[index].size;
+        if (fdt_add_memory_node_wrapper(fdt, acells, mem_base_curr + mem_base,
+                                        scells, mem_last_curr - mem_base_curr,
+                                        numa_node_id)) {
+            return -1;
+        }
+
+        mem_last_curr = info->bad_pages[index].offset;
+    }
+
+no_retired_pages:
+    if (fdt_add_memory_node_wrapper(fdt, acells, mem_base, scells,
+                                    mem_last_curr, numa_node_id)) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void fetch_retired_pages(MemoryRegion *mr,
+                                struct egm_bad_pages_list **info)
+{
+    size_t argsz = sizeof(struct egm_bad_pages_list);
+    int fd;
+
+    *info = g_malloc0(argsz);
+
+    fd = memory_region_get_fd(mr);
+
+retry:
+    (*info)->argsz = argsz;
+
+    if (ioctl(fd, EGM_BAD_PAGES_LIST, *info)) {
+        g_free(*info);
+        *info = NULL;
+        return;
+    }
+
+    if ((*info)->argsz > argsz) {
+        argsz = (*info)->argsz;
+        *info = g_realloc(*info, argsz);
+        goto retry;
+    }
+}
+
 int arm_load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
                  hwaddr addr_limit, AddressSpace *as, MachineState *ms)
 {
@@ -599,16 +704,22 @@ int arm_load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
         mem_base = binfo->loader_start;
         for (i = 0; i < ms->numa_state->num_nodes; i++) {
             mem_len = ms->numa_state->nodes[i].node_mem;
-            if (!mem_len) {
-                continue;
-            }
 
-            rc = fdt_add_memory_node(fdt, acells, mem_base,
-                                     scells, mem_len, i);
-            if (rc < 0) {
-                fprintf(stderr, "couldn't add /memory@%"PRIx64" node\n",
-                        mem_base);
-                goto fail;
+            if (ms->numa_state->nodes[i].node_memdev) {
+                struct egm_bad_pages_list *info = NULL;
+                fetch_retired_pages(&(ms->numa_state->nodes[i].node_memdev->mr),
+                                    &info);
+                rc = add_memory_regions(info, fdt, acells, mem_base, scells,
+                                        mem_len, i);
+                g_free(info);
+
+                if (rc) {
+                    goto fail;
+                }
+            } else {
+                if (fdt_add_memory_node_wrapper(fdt, acells, mem_base,
+                                                scells, mem_len, i))
+                    goto fail;
             }
 
             mem_base += mem_len;
