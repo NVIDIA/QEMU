@@ -1210,11 +1210,18 @@
 # @measurement-algorithm: Realm measurement algorithm
 #     (default: sha512)
 #
+# @measurement-log: Enable a measurement log for the Realm. All events
+#     that contribute to the Realm Initial Measurement (RIM) are added
+#     to a log in TCG TPM2 format, which is itself loaded into Realm
+#     memory (unmeasured) and can then be read by a verifier to
+#     reconstruct the RIM.
+#
 # Since: 10.0
 ##
 { 'struct': 'RmeGuestProperties',
   'data': { '*personalization-value': 'str',
-            '*measurement-algorithm': 'RmeGuestMeasurementAlgorithm' } }
+            '*measurement-algorithm': 'RmeGuestMeasurementAlgorithm',
+            '*measurement-log': 'bool'} }
 
 ##
 # @ObjectType:

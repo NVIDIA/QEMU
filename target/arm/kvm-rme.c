@@ -10,11 +10,13 @@
 #include "hw/core/cpu.h"
 #include "hw/loader.h"
 #include "hw/pci/pci.h"
+#include "hw/tpm/tpm_log.h"
 #include "kvm_arm.h"
 #include "migration/blocker.h"
 #include "qapi/error.h"
 #include "qemu/base64.h"
 #include "qemu/error-report.h"
+#include "qemu/units.h"
 #include "qom/object_interfaces.h"
 #include "system/confidential-guest-support.h"
 #include "system/kvm.h"
@@ -24,6 +26,14 @@
 OBJECT_DECLARE_SIMPLE_TYPE(RmeGuest, RME_GUEST)
 
 #define RME_PAGE_SIZE qemu_real_host_page_size()
+
+#define RME_MEASUREMENT_LOG_SIZE    (64 * KiB)
+
+typedef struct RmeLogFiletype {
+    uint32_t event_type;
+    /* Description copied into the log event */
+    const char *desc;
+} RmeLogFiletype;
 
 /*
  * Realms have a split guest-physical address space: the bottom half is private
@@ -57,6 +67,8 @@ typedef struct RealmRamDiscardListener {
 typedef struct {
     hwaddr base;
     hwaddr size;
+    uint8_t *blob_ptr;
+    RmeLogFiletype *filetype;
 } RmeRamRegion;
 
 struct RmeGuest {
@@ -67,21 +79,334 @@ struct RmeGuest {
     char *personalization_value_str;
     uint8_t personalization_value[ARM_RME_CONFIG_RPV_SIZE];
     RmeGuestMeasurementAlgorithm measurement_algo;
+    bool use_measurement_log;
 
     RmeRamRegion init_ram;
     uint8_t ipa_bits;
+    size_t num_cpus;
 
     RealmDmaRegion *dma_region;
     QLIST_HEAD(, RealmRamDiscardListener) ram_discard_list;
     MemoryListener memory_listener;
     AddressSpace dma_as;
+
+    TpmLog *log;
+    GHashTable *images;
 };
 
 OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(RmeGuest, rme_guest, RME_GUEST,
                                           CONFIDENTIAL_GUEST_SUPPORT,
                                           { TYPE_USER_CREATABLE }, { })
 
+typedef struct {
+    char        signature[16];
+    char        name[32];
+    char        version[40];
+    uint64_t    ram_size;
+    uint32_t    num_cpus;
+    uint64_t    flags;
+} EventLogVmmVersion;
+
+typedef struct {
+    uint32_t    id;
+    uint32_t    data_size;
+    uint8_t     data[];
+} EventLogTagged;
+
+#define EVENT_LOG_TAG_REALM_CREATE  1
+#define EVENT_LOG_TAG_INIT_RIPAS    2
+#define EVENT_LOG_TAG_REC_CREATE    3
+
+#define REALM_PARAMS_FLAG_SVE       (1 << 1)
+#define REALM_PARAMS_FLAG_PMU       (1 << 2)
+
+#define REC_CREATE_FLAG_RUNNABLE    (1 << 0)
+
 static RmeGuest *rme_guest;
+
+static int rme_init_measurement_log(MachineState *ms)
+{
+    Object *log;
+    gpointer filename;
+    TpmLogDigestAlgo algo;
+    RmeLogFiletype *filetype;
+
+    if (!rme_guest->use_measurement_log) {
+        return 0;
+    }
+
+    switch (rme_guest->measurement_algo) {
+    case RME_GUEST_MEASUREMENT_ALGORITHM_SHA256:
+        algo = TPM_LOG_DIGEST_ALGO_SHA256;
+        break;
+    case RME_GUEST_MEASUREMENT_ALGORITHM_SHA512:
+        algo = TPM_LOG_DIGEST_ALGO_SHA512;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    log = object_new_with_props(TYPE_TPM_LOG, OBJECT(rme_guest),
+                                "log", &error_fatal,
+                                "digest-algo", TpmLogDigestAlgo_str(algo),
+                                NULL);
+
+    tpm_log_create(TPM_LOG(log), RME_MEASUREMENT_LOG_SIZE, &error_fatal);
+    rme_guest->log = TPM_LOG(log);
+
+    /*
+     * Write down the image names we're expecting to encounter when handling the
+     * ROM load notifications, so we can record the type of image being loaded
+     * to help the verifier.
+     */
+    rme_guest->images = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                              g_free);
+
+    filename = g_strdup(ms->kernel_filename);
+    if (filename) {
+        filetype = g_new0(RmeLogFiletype, 1);
+        filetype->event_type = TCG_EV_POST_CODE2;
+        filetype->desc = "KERNEL";
+        g_hash_table_insert(rme_guest->images, filename, (gpointer)filetype);
+    }
+
+    filename = g_strdup(ms->initrd_filename);
+    if (filename) {
+        filetype = g_new0(RmeLogFiletype, 1);
+        filetype->event_type = TCG_EV_POST_CODE2;
+        filetype->desc = "INITRD";
+        g_hash_table_insert(rme_guest->images, filename, (gpointer)filetype);
+    }
+
+    filename = g_strdup(ms->firmware);
+    if (filename) {
+        filetype = g_new0(RmeLogFiletype, 1);
+        filetype->event_type = TCG_EV_EFI_PLATFORM_FIRMWARE_BLOB2;
+        filetype->desc = "FIRMWARE";
+        g_hash_table_insert(rme_guest->images, filename, filetype);
+    }
+
+    filename = g_strdup(ms->dtb);
+    if (!filename) {
+        filename = g_strdup("dtb");
+    }
+    filetype = g_new0(RmeLogFiletype, 1);
+    filetype->event_type = TCG_EV_POST_CODE2;
+    filetype->desc = "DTB";
+    g_hash_table_insert(rme_guest->images, filename, filetype);
+
+    return 0;
+}
+
+static int rme_log_event_tag(uint32_t id, uint8_t *data, size_t size,
+                             Error **errp)
+{
+    int ret;
+    EventLogTagged event = {
+        .id = id,
+        .data_size = size,
+    };
+    GByteArray *bytes = g_byte_array_new();
+
+    if (!rme_guest->log) {
+        return 0;
+    }
+
+    g_byte_array_append(bytes, (uint8_t *)&event, sizeof(event));
+    g_byte_array_append(bytes, data, size);
+    ret = tpm_log_add_event(rme_guest->log, TCG_EV_EVENT_TAG, bytes->data,
+                             bytes->len, NULL, 0, errp);
+    g_byte_array_free(bytes, true);
+    return ret;
+}
+
+/* Log VM type and Realm Descriptor create */
+static int rme_log_realm_create(Error **errp)
+{
+    int ret;
+    ARMCPU *cpu;
+    EventLogVmmVersion vmm_version = {
+        .signature = "VM VERSION",
+        .name = "QEMU",
+        .version = QEMU_VERSION,
+        .ram_size = cpu_to_le64(rme_guest->init_ram.size),
+        .num_cpus = cpu_to_le32(rme_guest->num_cpus),
+        .flags = 0,
+    };
+    struct {
+        uint64_t    flags;
+        uint8_t     s2sz;
+        uint8_t     sve_vl;
+        uint8_t     num_bps;
+        uint8_t     num_wps;
+        uint8_t     pmu_num_ctrs;
+        uint8_t     hash_algo;
+    } params = {
+        .s2sz = rme_guest->ipa_bits,
+    };
+
+    if (!rme_guest->log) {
+        return 0;
+    }
+
+    ret = tpm_log_add_event(rme_guest->log, TCG_EV_NO_ACTION,
+                            (uint8_t *)&vmm_version, sizeof(vmm_version),
+                            NULL, 0, errp);
+    if (ret) {
+        return ret;
+    }
+
+    /* With KVM all CPUs have the same capability */
+    cpu = ARM_CPU(first_cpu);
+    if (cpu->has_pmu) {
+        params.flags |= REALM_PARAMS_FLAG_PMU;
+        params.pmu_num_ctrs = FIELD_EX64(cpu->isar.reset_pmcr_el0, PMCR, N);
+    }
+
+    if (cpu->sve_max_vq) {
+        params.flags |= REALM_PARAMS_FLAG_SVE;
+        params.sve_vl = cpu->sve_max_vq - 1;
+    }
+    params.num_bps = FIELD_EX64_IDREG(&cpu->isar, ID_AA64DFR0, BRPS);
+    params.num_wps = FIELD_EX64_IDREG(&cpu->isar, ID_AA64DFR0, WRPS);
+
+    switch (rme_guest->measurement_algo) {
+    case RME_GUEST_MEASUREMENT_ALGORITHM_SHA256:
+        params.hash_algo = ARM_RME_CONFIG_HASH_ALGO_SHA256;
+        break;
+    case RME_GUEST_MEASUREMENT_ALGORITHM_SHA512:
+        params.hash_algo = ARM_RME_CONFIG_HASH_ALGO_SHA512;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    return rme_log_event_tag(EVENT_LOG_TAG_REALM_CREATE, (uint8_t *)&params,
+                             sizeof(params), errp);
+}
+
+/* unmeasured images are logged with @data == NULL */
+static int rme_log_image(RmeLogFiletype *filetype, uint8_t *data, hwaddr base,
+                          size_t size, Error **errp)
+{
+    int ret;
+    size_t desc_size;
+    GByteArray *event = g_byte_array_new();
+    struct UefiPlatformFirmwareBlob2Head head = {0};
+    struct UefiPlatformFirmwareBlob2Tail tail = {0};
+
+    if (!rme_guest->log) {
+        return 0;
+    }
+
+    if (!filetype) {
+        error_setg(errp, "cannot log image without a filetype");
+        return -1;
+    }
+
+    /* EV_POST_CODE2 strings are not NUL-terminated */
+    desc_size = strlen(filetype->desc);
+    head.blob_description_size = desc_size;
+    tail.blob_base = cpu_to_le64(base);
+    tail.blob_size = cpu_to_le64(size);
+
+    g_byte_array_append(event, (guint8 *)&head, sizeof(head));
+    g_byte_array_append(event, (guint8 *)filetype->desc, desc_size);
+    g_byte_array_append(event, (guint8 *)&tail, sizeof(tail));
+
+    ret = tpm_log_add_event(rme_guest->log, filetype->event_type, event->data,
+                            event->len, data, size, errp);
+    g_byte_array_free(event, true);
+    return ret;
+}
+
+static int rme_log_ripas(hwaddr base, size_t size, Error **errp)
+{
+    struct {
+        uint64_t base;
+        uint64_t size;
+    } init_ripas = {
+        .base = cpu_to_le64(base),
+        .size = cpu_to_le64(size),
+    };
+
+    return rme_log_event_tag(EVENT_LOG_TAG_INIT_RIPAS, (uint8_t *)&init_ripas,
+                             sizeof(init_ripas), errp);
+}
+
+static int rme_log_rec(uint64_t flags, uint64_t pc, uint64_t gprs[8], Error **errp)
+{
+    struct {
+        uint64_t flags;
+        uint64_t pc;
+        uint64_t gprs[8];
+    } rec_create = {
+        .flags = cpu_to_le64(flags),
+        .pc = cpu_to_le64(pc),
+        .gprs[0] = cpu_to_le64(gprs[0]),
+        .gprs[1] = cpu_to_le64(gprs[1]),
+        .gprs[2] = cpu_to_le64(gprs[2]),
+        .gprs[3] = cpu_to_le64(gprs[3]),
+        .gprs[4] = cpu_to_le64(gprs[4]),
+        .gprs[5] = cpu_to_le64(gprs[5]),
+        .gprs[6] = cpu_to_le64(gprs[6]),
+        .gprs[7] = cpu_to_le64(gprs[7]),
+    };
+
+    return rme_log_event_tag(EVENT_LOG_TAG_REC_CREATE, (uint8_t *)&rec_create,
+                             sizeof(rec_create), errp);
+}
+
+static int rme_populate_range(hwaddr base, size_t size, bool measure,
+                              Error **errp);
+
+static int rme_close_measurement_log(Error **errp)
+{
+    int ret;
+    hwaddr base;
+    size_t size;
+    RmeLogFiletype filetype = {
+        .event_type = TCG_EV_POST_CODE2,
+        .desc = "LOG",
+    };
+
+    if (!rme_guest->log) {
+        return 0;
+    }
+
+    base = object_property_get_uint(OBJECT(rme_guest->log), "load-addr", errp);
+    if (*errp) {
+        return -1;
+    }
+
+    size = object_property_get_uint(OBJECT(rme_guest->log), "max-size", errp);
+    if (*errp) {
+        return -1;
+    }
+
+    /* Log the log itself */
+    ret = rme_log_image(&filetype, NULL, base, size, errp);
+    if (ret) {
+        return ret;
+    }
+
+    ret = tpm_log_write_and_close(rme_guest->log, errp);
+    if (ret) {
+        return ret;
+    }
+
+    ret = rme_populate_range(base, size, /* measure */ false, errp);
+    if (ret) {
+        return ret;
+    }
+
+    g_hash_table_destroy(rme_guest->images);
+
+    /* The log is now in the guest. Free this object */
+    object_unparent(OBJECT(rme_guest->log));
+    rme_guest->log = NULL;
+    return 0;
+}
 
 static int rme_configure_one(RmeGuest *guest, uint32_t cfg, Error **errp)
 {
@@ -156,9 +481,10 @@ static int rme_init_ram(RmeRamRegion *ram, Error **errp)
         error_setg_errno(errp, -ret,
                          "failed to init RAM [0x%"HWADDR_PRIx", 0x%"HWADDR_PRIx")",
                          start, end);
+        return ret;
     }
 
-    return ret;
+    return rme_log_ripas(ram->base, ram->size, errp);
 }
 
 static int rme_populate_range(hwaddr base, size_t size, bool measure,
@@ -194,22 +520,41 @@ static void rme_populate_ram_region(gpointer data, gpointer err)
     }
 
     rme_populate_range(region->base, region->size, /* measure */ true, errp);
+    if (*errp) {
+        return;
+    }
+
+    rme_log_image(region->filetype, region->blob_ptr, region->base,
+                  region->size, errp);
 }
 
 static int rme_init_cpus(Error **errp)
 {
     int ret;
     CPUState *cs;
+    bool logged_primary_cpu = false;
 
     /*
      * Now that do_cpu_reset() initialized the boot PC and
      * kvm_cpu_synchronize_post_reset() registered it, we can finalize the REC.
      */
     CPU_FOREACH(cs) {
-        ret = kvm_arm_vcpu_finalize(ARM_CPU(cs), KVM_ARM_VCPU_REC);
+        ARMCPU *cpu = ARM_CPU(cs);
+
+        ret = kvm_arm_vcpu_finalize(cpu, KVM_ARM_VCPU_REC);
         if (ret) {
             error_setg_errno(errp, -ret, "failed to finalize vCPU");
             return ret;
+        }
+
+        if (!logged_primary_cpu) {
+            ret = rme_log_rec(REC_CREATE_FLAG_RUNNABLE, cpu->env.pc,
+                              cpu->env.xregs, errp);
+            if (ret) {
+                return ret;
+            }
+
+            logged_primary_cpu = true;
         }
     }
     return 0;
@@ -230,6 +575,10 @@ static int rme_create_realm(Error **errp)
         return -1;
     }
 
+    if (rme_log_realm_create(errp)) {
+        return -1;
+    }
+
     if (rme_init_ram(&rme_guest->init_ram, errp)) {
         return -1;
     }
@@ -241,6 +590,10 @@ static int rme_create_realm(Error **errp)
     }
 
     if (rme_init_cpus(errp)) {
+        return -1;
+    }
+
+    if (rme_close_measurement_log(errp)) {
         return -1;
     }
 
@@ -313,6 +666,20 @@ static void rme_set_measurement_algo(Object *obj, int algo, Error **errp)
     guest->measurement_algo = algo;
 }
 
+static bool rme_get_measurement_log(Object *obj, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    return guest->use_measurement_log;
+}
+
+static void rme_set_measurement_log(Object *obj, bool value, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    guest->use_measurement_log = value;
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     object_class_property_add_str(oc, "personalization-value", rme_get_rpv,
@@ -327,6 +694,12 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
                                    rme_set_measurement_algo);
     object_class_property_set_description(oc, "measurement-algorithm",
             "Realm measurement algorithm ('sha256', 'sha512')");
+
+    object_class_property_add_bool(oc, "measurement-log",
+                                   rme_get_measurement_log,
+                                   rme_set_measurement_log);
+    object_class_property_set_description(oc, "measurement-log",
+            "Enable/disable Realm measurement log");
 }
 
 static void rme_guest_init(Object *obj)
@@ -370,6 +743,20 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
     region = g_new0(RmeRamRegion, 1);
     region->base = rom->addr;
     region->size = rom->len;
+    /*
+     * TODO: double-check lifetime. Is data is still available when we measure
+     * it, while writing the log. Should be fine since data is kept for the next
+     * reset.
+     */
+    region->blob_ptr = rom->blob_ptr;
+
+    /*
+     * rme_guest->images is destroyed after ram_regions, so we can store
+     * filetype even if we don't own the struct.
+     */
+    if (rme_guest->images) {
+        region->filetype = g_hash_table_lookup(rme_guest->images, rom->name);
+    }
 
     /*
      * The Realm Initial Measurement (RIM) depends on the order in which we
@@ -398,6 +785,12 @@ int kvm_arm_rme_init(MachineState *ms)
     if (!kvm_check_extension(kvm_state, KVM_CAP_ARM_RME)) {
         return -ENODEV;
     }
+
+    if (rme_init_measurement_log(ms)) {
+        return -ENODEV;
+    }
+
+    rme_guest->num_cpus = ms->smp.max_cpus;
 
     error_setg(&rme_mig_blocker, "RME: migration is not implemented");
     migrate_add_blocker(&rme_mig_blocker, &error_fatal);
@@ -631,4 +1024,12 @@ static void realm_dma_region_class_init(ObjectClass *oc, const void *data)
 
     imrc->translate = realm_dma_region_translate;
     imrc->replay = realm_dma_region_replay;
+}
+
+Object *kvm_arm_rme_get_measurement_log(void)
+{
+    if (rme_guest && rme_guest->log) {
+        return OBJECT(rme_guest->log);
+    }
+    return NULL;
 }

@@ -61,6 +61,11 @@ void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa,
 {
 }
 
+Object *kvm_arm_rme_get_measurement_log(void)
+{
+    return NULL;
+}
+
 /*
  * These functions should never actually be called without KVM support.
  */
