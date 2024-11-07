@@ -780,6 +780,24 @@ int arm_load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
 
     fdt_add_psci_node(fdt, cpu);
 
+    /* Add a reserved-memory node for the event log */
+    if (binfo->log_size) {
+        char *nodename;
+
+        qemu_fdt_add_subnode(fdt, "/reserved-memory");
+        qemu_fdt_setprop_cell(fdt, "/reserved-memory", "#address-cells", 0x2);
+        qemu_fdt_setprop_cell(fdt, "/reserved-memory", "#size-cells", 0x2);
+        qemu_fdt_setprop(fdt, "/reserved-memory", "ranges", NULL, 0);
+
+        nodename = g_strdup_printf("/reserved-memory/event-log@%" PRIx64,
+                                   binfo->log_paddr);
+        qemu_fdt_add_subnode(fdt, nodename);
+        qemu_fdt_setprop_string(fdt, nodename, "compatible", "cc-event-log");
+        qemu_fdt_setprop_sized_cells(fdt, nodename, "reg", 2, binfo->log_paddr,
+                                           2, binfo->log_size);
+        g_free(nodename);
+    }
+
     if (binfo->modify_dtb) {
         binfo->modify_dtb(binfo, fdt);
     }
@@ -1056,6 +1074,30 @@ static uint64_t load_aarch64_image(const char *filename, hwaddr mem_base,
     return kernel_size;
 }
 
+static void add_event_log(struct arm_boot_info *info)
+{
+    if (!info->log_size) {
+        return;
+    }
+
+    if (!info->dtb_limit) {
+        int dtb_size = 0;
+
+        if (!info->get_dtb(info, &dtb_size) || dtb_size == 0) {
+            error_report("Board does not have a DTB");
+            exit(1);
+        }
+        info->dtb_limit = info->dtb_start + dtb_size;
+    }
+
+    info->log_paddr = info->dtb_limit;
+    if (info->log_paddr + info->log_size >
+        info->loader_start + info->ram_size) {
+        error_report("Not enough space for measurement log and DTB");
+        exit(1);
+    }
+}
+
 static void arm_setup_direct_kernel_boot(ARMCPU *cpu,
                                          struct arm_boot_info *info)
 {
@@ -1103,6 +1145,7 @@ static void arm_setup_direct_kernel_boot(ARMCPU *cpu,
             }
             info->dtb_start = info->loader_start;
             info->dtb_limit = image_low_addr;
+            add_event_log(info);
         }
     }
     entry = elf_entry;
@@ -1241,6 +1284,8 @@ static void arm_setup_direct_kernel_boot(ARMCPU *cpu,
                 error_report("Not enough space for DTB after kernel/initrd");
                 exit(1);
             }
+            add_event_log(info);
+
             fixupcontext[FIXUP_ARGPTR_LO] = info->dtb_start;
             fixupcontext[FIXUP_ARGPTR_HI] = info->dtb_start >> 32;
         } else {
@@ -1302,6 +1347,8 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
         error_report("could not load firmware '%s'", firmware_filename);
         exit(1);
     }
+
+    add_event_log(info);
 }
 
 static void arm_setup_firmware_boot(ARMCPU *cpu, struct arm_boot_info *info,
