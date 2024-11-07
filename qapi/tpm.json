@@ -186,3 +186,17 @@
 ##
 { 'command': 'query-tpm', 'returns': ['TPMInfo'],
   'if': 'CONFIG_TPM' }
+
+##
+# @TpmLogDigestAlgo:
+#
+# @sha256: Use the SHA256 algorithm
+#
+# @sha512: Use the SHA512 algorithm
+#
+# Algorithm to use for event log digests
+#
+# Since: 9.3
+##
+{ 'enum': 'TpmLogDigestAlgo',
+  'data': ['sha256', 'sha512'] }
