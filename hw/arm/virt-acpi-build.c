@@ -197,15 +197,51 @@ static void nvidia_update_bridge_window(PCIBus *bus, uint64_t base, uint64_t lim
                                  4);
 }
 
+static void fix_pci_bar_GB200_nvidia(PCIDevice *dev, PhysBAR *pbars)
+{
+    PhysBAR *pbar = pbars;
+    bool overlap;
+    int idx;
+
+    for (idx = PCI_ROM_SLOT - 1 ; idx >= 0; idx--) {
+        if (!(pbar[idx].flags & IORESOURCE_PREFETCH))
+            continue;
+
+        pbar[idx].addr = pbars[idx].addr;
+        pbar[idx].end = pbar[idx].addr + dev->io_regions[idx].size - 1;
+    }
+
+    /* Make sure BAR1 gets GPA=HPA, adjust other two BARs accordingly to avoind region conflict */
+    overlap = true;
+    while (overlap) {
+        overlap = false;
+
+        for (idx = 0; idx <=  PCI_ROM_SLOT - 1; idx++) {
+            if (!(pbar[idx].flags & IORESOURCE_PREFETCH))
+                continue;
+
+            for (int j = 0; j < PCI_ROM_SLOT; j++) {
+                if (!(pbar[j].flags & IORESOURCE_PREFETCH) || idx == j)
+                    continue;
+
+                if(ranges_overlap(pbar[idx].addr,  dev->io_regions[idx].size, pbar[j].addr, dev->io_regions[j].size)) {
+                    pbar[j].addr = QEMU_ALIGN_UP(pbar[idx].addr +  dev->io_regions[idx].size, dev->io_regions[j].size);
+                    overlap = true;
+               }
+            }
+        }
+    }
+}
+
 static void nvidia_dev_vfio(PCIBus *bus, PCIDevice *dev, void *opaque)
 {
     struct GPEXConfig *cfg = (struct GPEXConfig *)opaque;
     PhysBAR *pbar, pbars[PCI_ROM_SLOT];
     char *tmp, *resources, line[128];
+    int idx, vendor_id, device_id;
     VFIOPCIDevice *vdev;
     uint32_t laddr;
     FILE *fp;
-    int idx;
 
     if (!object_dynamic_cast(OBJECT(dev), TYPE_VFIO_PCI)) {
         return;
@@ -239,6 +275,14 @@ static void nvidia_dev_vfio(PCIBus *bus, PCIDevice *dev, void *opaque)
     } while (*line && idx < PCI_ROM_SLOT);
 
     fclose(fp);
+
+    vendor_id = pci_get_word(dev->config + PCI_VENDOR_ID);
+    device_id = pci_get_word(dev->config + PCI_DEVICE_ID);
+
+    /* Nvidia GB200 workaround */
+    if (vendor_id == 0x10de && device_id == 0x2941) {
+        fix_pci_bar_GB200_nvidia(dev, pbars);
+    }
 
     for (idx = 0, pbar = pbars; idx < PCI_ROM_SLOT; idx++, pbar++) {
         if (!(pbar->flags & IORESOURCE_PREFETCH)) {
