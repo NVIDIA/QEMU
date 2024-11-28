@@ -16,6 +16,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
 #include <poll.h>
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
@@ -30,6 +31,7 @@
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qemu/units.h"
 
 #include "hw/arm/smmuv3.h"
 #include "smmuv3-internal.h"
@@ -375,6 +377,15 @@ out:
     s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SIDSIZE, val);
     val = FIELD_EX32(sdev->info.idr[1], IDR1, SSIDSIZE);
     s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SSIDSIZE, val);
+    if (bs->has_cmdqv) {
+        MemoryRegionSection section = memory_region_find(get_system_memory(),
+                                                         GiB, MiB);
+        size_t pgsize = qemu_ram_pagesize(section.mr->ram_block);
+
+        val = FIELD_EX32(sdev->info.idr[1], IDR1, CMDQS);
+        /* FIXME It needs to check the full RAM space */
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, CMDQS, MIN(log2(pgsize) - 4, val));
+    }
 
     val = FIELD_EX32(sdev->info.idr[3], IDR3, HAD);
     s->idr[3] = FIELD_DP32(s->idr[3], IDR3, HAD, val);
