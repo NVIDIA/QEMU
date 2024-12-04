@@ -2479,7 +2479,7 @@ static int kvm_max_vcpus(KVMState *s)
 
 static int kvm_max_vcpu_id(KVMState *s)
 {
-    int ret = kvm_check_extension(s, KVM_CAP_MAX_VCPU_ID);
+    int ret = kvm_vm_check_extension(s, KVM_CAP_MAX_VCPU_ID);
     return (ret) ? ret : kvm_max_vcpus(s);
 }
 
@@ -2750,7 +2750,7 @@ static int kvm_init(AccelState *as, MachineState *ms)
 
 #ifdef TARGET_KVM_HAVE_GUEST_DEBUG
     kvm_has_guest_debug =
-        (kvm_check_extension(s, KVM_CAP_SET_GUEST_DEBUG) > 0);
+        (kvm_vm_check_extension(s, KVM_CAP_SET_GUEST_DEBUG) > 0);
 #endif
 
     kvm_sstep_flags = 0;
