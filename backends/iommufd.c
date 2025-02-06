@@ -347,7 +347,8 @@ int iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t hwpt_id,
 struct IOMMUFDViommu *iommufd_backend_alloc_viommu(IOMMUFDBackend *be,
                                                    uint32_t dev_id,
                                                    uint32_t viommu_type,
-                                                   uint32_t hwpt_id)
+                                                   uint32_t hwpt_id,
+                                                   uint32_t len, void *data_ptr)
 {
     int ret, fd = be->fd;
     struct IOMMUFDViommu *viommu = g_malloc(sizeof(*viommu));
@@ -356,6 +357,8 @@ struct IOMMUFDViommu *iommufd_backend_alloc_viommu(IOMMUFDBackend *be,
         .type = viommu_type,
         .dev_id = dev_id,
         .hwpt_id = hwpt_id,
+        .data_len = len,
+        .data_uptr = (uintptr_t)data_ptr,
     };
 
     if (!viommu) {

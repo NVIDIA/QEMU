@@ -944,7 +944,7 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
 
     viommu->core = iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
                                                 IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
-                                                s2_hwpt_id);
+                                                s2_hwpt_id, 0, NULL);
     if (!viommu->core) {
         error_report("failed to allocate a viommu");
         goto free_viommu;
