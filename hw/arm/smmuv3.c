@@ -1447,7 +1447,7 @@ static void smmuv3_install_nested_ste(SMMUDevice *sdev, int sid)
         return;
     }
 
-    if (!sdev->vdev && sdev->idev && sdev->viommu) {
+    if (!sdev->vdev) {
         SMMUVdev *vdev = g_new0(SMMUVdev, 1);
         vdev->core = iommufd_backend_alloc_vdev(sdev->idev, sdev->viommu->core,
                                                 sid);
@@ -1457,6 +1457,12 @@ static void smmuv3_install_nested_ste(SMMUDevice *sdev, int sid)
             return;
         }
         sdev->vdev = vdev;
+
+        if (!host_iommu_device_iommufd_attach_hwpt(
+                    sdev->idev, sdev->viommu->bypass_hwpt_id, NULL)) {
+            error_report("failed to attach the bypass pagetable");
+            return;
+        }
     }
 
     ret = smmu_find_ste(sdev->smmu, sid, &ste, &event);

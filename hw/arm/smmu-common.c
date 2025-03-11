@@ -911,7 +911,7 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
                                    HostIOMMUDeviceIOMMUFD *idev, Error **errp)
 {
     struct iommu_hwpt_arm_smmuv3 bypass_data = {
-        .ste = { 0x8ULL, 0x0ULL }, //0x1ULL << (108 - 64) },
+        .ste = { 0x9ULL, 0x0ULL }, //0x1ULL << (108 - 64) },
     };
     struct iommu_hwpt_arm_smmuv3 abort_data = {
         .ste = { 0x1ULL, 0x0ULL },
@@ -922,8 +922,7 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
     uint32_t s2_hwpt_id;
 
     if (s->viommu) {
-        return host_iommu_device_iommufd_attach_hwpt(
-                       idev, s->viommu->s2_hwpt->hwpt_id, errp);
+        return true;
     }
 
     if (!iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid, idev->ioas_id,
@@ -969,12 +968,6 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
         goto free_abort_hwpt;
     }
 
-    if (!host_iommu_device_iommufd_attach_hwpt(
-                idev, viommu->bypass_hwpt_id, errp)) {
-        error_report("failed to attach the bypass pagetable");
-        goto free_bypass_hwpt;
-    }
-
     s2_hwpt = g_new0(SMMUS2Hwpt, 1);
     s2_hwpt->iommufd = idev->iommufd;
     s2_hwpt->hwpt_id = s2_hwpt_id;
@@ -986,8 +979,6 @@ static bool smmu_dev_attach_viommu(SMMUDevice *sdev,
     s->viommu = viommu;
     return true;
 
-free_bypass_hwpt:
-    iommufd_backend_free_id(idev->iommufd, viommu->bypass_hwpt_id);
 free_abort_hwpt:
     iommufd_backend_free_id(idev->iommufd, viommu->abort_hwpt_id);
 free_viommu_core:
