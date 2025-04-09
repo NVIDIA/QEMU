@@ -118,6 +118,8 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
             uint8_t numa_node = pci_bus_numa_node(bus);
             uint32_t uid;
             bool is_cxl = pci_bus_is_cxl(bus);
+            int devfn;
+            Aml *brg;
 
             if (!pci_bus_is_root(bus)) {
                 continue;
@@ -172,7 +174,20 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
                                                   cfg->preserve_config);
             }
 
-            build_acpi_egm_memory_dsdt(dev, bus_num);
+            for (devfn = 0; devfn < ARRAY_SIZE(bus->devices); devfn++) {
+                /* ACPI spec: 1.0b: Table 6-2 _ADR Object Bus Types, PCI type */
+                int adr = PCI_SLOT(devfn) << 16 | PCI_FUNC(devfn);
+                PCIDevice *pdev = bus->devices[devfn];
+
+                if (!pdev) {
+                    continue;
+                }
+
+                brg = aml_device("RP%.02X", devfn);
+                aml_append(brg, aml_name_decl("_ADR", aml_int(adr)));
+                build_acpi_egm_memory_dsdt(brg, bus_num + 1);
+                aml_append(dev, brg);
+            }
 
             aml_append(scope, dev);
         }
