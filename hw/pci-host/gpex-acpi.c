@@ -193,12 +193,6 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
                 aml_append(dev, aml_name_decl("_PXM", aml_int(numa_node)));
             }
 
-            if (cfg->preserve_config) {
-                method = aml_method("_DSM", 5, AML_SERIALIZED);
-                aml_append(method, aml_return(aml_int(0)));
-                aml_append(dev, method);
-            }
-
             acpi_dsdt_add_pci_route_table(dev, cfg->irq, scope, bus_num);
 
             /*
@@ -229,12 +223,6 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
     aml_append(dev, aml_name_decl("_UID", aml_int(0)));
     aml_append(dev, aml_name_decl("_STR", aml_unicode("PCIe 0 Device")));
     aml_append(dev, aml_name_decl("_CCA", aml_int(1)));
-
-    if (cfg->preserve_config) {
-        method = aml_method("_DSM", 5, AML_SERIALIZED);
-        aml_append(method, aml_return(aml_int(0)));
-        aml_append(dev, method);
-    }
 
     acpi_dsdt_add_pci_route_table(dev, cfg->irq, scope, 0);
 
