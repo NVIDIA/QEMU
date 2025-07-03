@@ -45,3 +45,49 @@
 #                     { "version": 3, "emulated": false, "kernel": true } ] }
 ##
 { 'command': 'query-gic-capabilities', 'returns': ['GICCapability'] }
+
+##
+# @CcaMeasurementAlgo:
+#
+# The struct describes measurement-algo.
+#
+# @measurement-algo: measurement algorithm
+#
+# Since: 10.1 - Provisional
+#               This version is subject to change.
+##
+{ 'struct': 'CcaMeasurementAlgo',
+  'data': { 'measurement-algo': 'str' } }
+
+##
+# @CcaCapability:
+#
+# The struct describes capability for a ARM CCA.
+#
+# @sections: Supported to measurement algorithm list
+#
+# Since: 10.1 - Provisional
+#               This version is subject to change.
+##
+{ 'struct': 'CcaCapability',
+  'data': { 'sections': ['CcaMeasurementAlgo'] } }
+
+##
+# @query-cca-capabilities:
+#
+# This command is used to get the CCA capabilities, and is supported
+# on ARM64 platforms only.
+#
+# Returns: CcaCapability objects.
+#
+# Since: 10.1 - Provisional
+#               This version is subject to change.
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-cca-capabilities" }
+#     <- { "return": { "sections": [{"measurement-algo": "sha256"},
+#                      {"measurement-algo": "sha512"}]} }
+##
+{ 'command': 'query-cca-capabilities', 'returns': 'CcaCapability' }
+
