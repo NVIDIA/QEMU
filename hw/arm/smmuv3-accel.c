@@ -104,22 +104,39 @@ void smmuv3_accel_init_regs(SMMUv3State *s)
         goto out_err;
     }
 
+    val = FIELD_EX32(s_accel->info.idr[0], IDR0, STALL_MODEL);
+    s->idr[0] = FIELD_DP32(s->idr[0], IDR0, STALL_MODEL, val);
+
+    val = FIELD_EX32(s_accel->info.idr[0], IDR0, ATS);
+    s->idr[0] = FIELD_DP32(s->idr[0], IDR0, ATS, val);
+
+    val = FIELD_EX32(s_accel->info.idr[1], IDR1, SIDSIZE);
+    s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SIDSIZE, val);
+
+    val = FIELD_EX32(s_accel->info.idr[1], IDR1, SSIDSIZE);
+    s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SSIDSIZE, val);
+
+    val = FIELD_EX32(s_accel->info.idr[3], IDR3, HAD);
+    s->idr[3] = FIELD_DP32(s->idr[3], IDR3, HAD, val);
+
+    val = FIELD_EX32(s_accel->info.idr[3], IDR3, RIL);
+    s->idr[3] = FIELD_DP32(s->idr[3], IDR3, RIL, val);
+
+    val = FIELD_EX32(s_accel->info.idr[3], IDR3, BBML);
+    s->idr[3] = FIELD_DP32(s->idr[3], IDR3, BBML, val);
+
     /*
      * QEMU SMMUv3 supports 4K/16K/64K translation granules. If host SMMUv3
      * does't support any of these, report the supported ones only to Guest.
      */
     val = FIELD_EX32(s_accel->info.idr[5], IDR5, GRAN4K);
-    if (val < FIELD_EX32(s->idr[5], IDR5, GRAN4K)) {
-        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN4K, val);
-    }
+    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN4K, val);
     val = FIELD_EX32(s_accel->info.idr[5], IDR5, GRAN16K);
-    if (val < FIELD_EX32(s->idr[5], IDR5, GRAN16K)) {
-        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, val);
-    }
+    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, val);
     val = FIELD_EX32(s_accel->info.idr[5], IDR5, GRAN64K);
-    if (val < FIELD_EX32(s->idr[5], IDR5, GRAN64K)) {
-        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, val);
-    }
+    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, val);
+    val = FIELD_EX32(s_accel->info.idr[5], IDR5, OAS);
+    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, val);
     return;
 
 out_err:
