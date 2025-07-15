@@ -48,8 +48,7 @@
  * @irq: irq type
  * @gerror_mask: mask of gerrors to toggle (relevant if @irq is GERROR)
  */
-static void smmuv3_trigger_irq(SMMUv3State *s, SMMUIrq irq,
-                               uint32_t gerror_mask)
+void smmuv3_trigger_irq(SMMUv3State *s, SMMUIrq irq, uint32_t gerror_mask)
 {
 
     bool pulse = false;
@@ -143,7 +142,7 @@ static MemTxResult queue_write(SMMUQueue *q, Evt *evt_in)
     return MEMTX_OK;
 }
 
-static MemTxResult smmuv3_write_eventq(SMMUv3State *s, Evt *evt)
+MemTxResult smmuv3_write_eventq(SMMUv3State *s, Evt *evt)
 {
     SMMUQueue *q = &s->eventq;
     MemTxResult r;
@@ -1574,6 +1573,7 @@ static MemTxResult smmu_writell(SMMUv3State *s, hwaddr offset,
         if (s->eventq.log2size > SMMU_EVENTQS) {
             s->eventq.log2size = SMMU_EVENTQS;
         }
+        smmu_realloc_veventq(ARM_SMMU(s), s->eventq.log2size);
         return MEMTX_OK;
     case A_EVENTQ_IRQ_CFG0:
         s->eventq_irq_cfg0 = data;
@@ -1671,6 +1671,7 @@ static MemTxResult smmu_writel(SMMUv3State *s, hwaddr offset,
         if (s->eventq.log2size > SMMU_EVENTQS) {
             s->eventq.log2size = SMMU_EVENTQS;
         }
+        smmu_realloc_veventq(ARM_SMMU(s), s->eventq.log2size);
         return MEMTX_OK;
     case A_EVENTQ_BASE + 4:
         s->eventq.base = deposit64(s->eventq.base, 32, 32, data);

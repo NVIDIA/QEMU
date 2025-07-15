@@ -25,6 +25,8 @@ typedef struct SMMUViommu {
     IOMMUFDBackend *iommufd;
     IOMMUFDViommu core;
     SMMUS2Hwpt *s2_hwpt;
+    IOMMUFDVeventq *veventq;
+    SMMUState *smmu;
     uint32_t bypass_hwpt_id;
     uint32_t abort_hwpt_id;
     QLIST_HEAD(, SMMUv3AccelDevice) device_list;
@@ -49,6 +51,10 @@ typedef struct SMMUv3AccelState {
     MemoryRegion root;
     MemoryRegion sysmem;
     SMMUViommu *viommu;
+    QemuThread event_thread_id;
+    bool event_thread_stop;
+    QemuMutex event_thread_mutex;
+
     struct iommu_hw_info_arm_smmuv3 info;
 } SMMUv3AccelState;
 
@@ -62,6 +68,7 @@ void smmuv3_accel_batch_cmd(SMMUState *bs, SMMUDevice *sdev,
                            SMMUCommandBatch *batch, struct Cmd *cmd,
                            uint32_t *cons);
 void smmuv3_accel_init_regs(SMMUv3State *s);
+void smmu_realloc_veventq(SMMUState *bs, uint32_t log2size);
 #else
 static inline void smmuv3_accel_init(SMMUv3State *d)
 {
@@ -86,6 +93,9 @@ static inline void smmuv3_accel_batch_cmd(SMMUState *bs, SMMUDevice *sdev,
     return;
 }
 static inline void smmuv3_accel_init_regs(SMMUv3State *s)
+{
+}
+static void smmu_realloc_veventq(SMMUState *bs, uint32_t log2size)
 {
 }
 #endif

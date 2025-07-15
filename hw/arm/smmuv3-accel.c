@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "trace.h"
 #include "qemu/error-report.h"
+#include <poll.h>
 
 #include "hw/arm/smmuv3.h"
 #include "hw/iommu.h"
@@ -360,6 +361,103 @@ void smmuv3_accel_batch_cmd(SMMUState *bs, SMMUDevice *sdev,
     return;
 }
 
+static void *smmuv3_nested_event_thread(void *arg)
+{
+    struct iommu_vevent_arm_smmuv3 *vevent;
+    struct iommufd_vevent_header *hdr;
+    ssize_t readsz = sizeof(*hdr) + sizeof(*vevent);
+    struct pollfd pollfd = {};
+    SMMUViommu *viommu = arg;
+    SMMUState *bs = viommu->smmu;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUv3AccelState *s_accel = s->s_accel;
+    MemTxResult r;
+    ssize_t bytes;
+    Evt evt = {};
+    void *buf;
+    int ret;
+
+    if (!viommu->veventq) {
+        return NULL;
+    }
+    buf = g_malloc0(readsz);
+    pollfd.events = POLLIN;
+    pollfd.fd = viommu->veventq->veventq_fd;
+
+    while (1) {
+        qemu_mutex_lock(&s_accel->event_thread_mutex);
+        if (s_accel->event_thread_stop) {
+            qemu_mutex_unlock(&s_accel->event_thread_mutex);
+            break;
+        }
+        qemu_mutex_unlock(&s_accel->event_thread_mutex);
+
+        ret = poll(&pollfd, 1, 100);
+        if (ret < 0) {
+            error_report("%s: poll failed: %d", __func__, ret);
+            goto out_free;
+        }
+
+        bytes = read(pollfd.fd, buf, readsz);
+        if (bytes == 0) {
+            continue;
+        }
+        if (bytes < 0) {
+            error_report("%s: read failed: %d", __func__, ret);
+            goto out_free;
+        }
+        hdr = buf;
+        vevent = buf + sizeof(*hdr);
+        if (hdr->flags & IOMMU_VEVENTQ_FLAG_LOST_EVENTS) {
+            error_report("%s: vEVENTQ has lost events", __func__);
+            goto out_free;
+        }
+
+        memcpy(&evt, vevent, sizeof(evt));
+        r = smmuv3_write_eventq(s, &evt);
+        if (r != MEMTX_OK) {
+            smmuv3_trigger_irq(s, SMMU_IRQ_GERROR,
+                               R_GERROR_EVENTQ_ABT_ERR_MASK);
+        }
+    }
+out_free:
+    g_free(buf);
+    close(pollfd.fd);
+    return NULL;
+}
+
+void smmu_realloc_veventq(SMMUState *bs, uint32_t log2size)
+{
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUv3AccelState *s_accel = s->s_accel;
+    SMMUViommu *viommu = s_accel->viommu;
+
+    if (!viommu)
+        return;
+    if (viommu->veventq) {
+        qemu_mutex_lock(&s_accel->event_thread_mutex);
+        s_accel->event_thread_stop = true;
+        qemu_mutex_unlock(&s_accel->event_thread_mutex);
+        qemu_thread_join(&s_accel->event_thread_id);
+        iommufd_backend_free_id(viommu->iommufd, viommu->veventq->veventq_id);
+        g_free(viommu->veventq);
+    }
+    viommu->veventq = iommufd_viommu_alloc_eventq(
+        &viommu->core, IOMMU_VEVENTQ_TYPE_ARM_SMMUV3, 1 << log2size);
+    if (!viommu->veventq) {
+        error_report(
+            "failed to allocate SMMUV3 veventq, errors will be ignored");
+        return;
+    }
+
+    qemu_mutex_lock(&s_accel->event_thread_mutex);
+    s_accel->event_thread_stop = false;
+    qemu_mutex_unlock(&s_accel->event_thread_mutex);
+    qemu_thread_create(&s_accel->event_thread_id, "irq/event",
+                       smmuv3_nested_event_thread, viommu,
+                       QEMU_THREAD_JOINABLE);
+}
+
 static SMMUv3AccelDevice *smmuv3_accel_get_dev(SMMUState *bs, SMMUPciBus *sbus,
                                                 PCIBus *bus, int devfn)
 {
@@ -416,6 +514,7 @@ smmuv3_accel_dev_alloc_viommu(SMMUv3AccelDevice *accel_dev,
     viommu->core.viommu_id = viommu_id;
     viommu->core.s2_hwpt_id = s2_hwpt_id;
     viommu->core.iommufd = idev->iommufd;
+    viommu->smmu = bs;
 
     if (!iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid,
                                     viommu->core.viommu_id, 0,
@@ -528,6 +627,7 @@ static void smmuv3_accel_unset_iommu_device(PCIBus *bus, void *opaque,
     }
 
     if (QLIST_EMPTY(&viommu->device_list)) {
+        qemu_thread_join(&s->s_accel->event_thread_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->bypass_hwpt_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->abort_hwpt_id);
         iommufd_backend_free_id(viommu->iommufd, viommu->core.viommu_id);
@@ -636,6 +736,7 @@ void smmuv3_accel_init(SMMUv3State *s)
                              "smmuv3-accel-sysmem", get_system_memory(), 0,
                              memory_region_size(get_system_memory()));
     memory_region_add_subregion(&s_accel->root, 0, &s_accel->sysmem);
+    qemu_mutex_init(&s_accel->event_thread_mutex);
 }
 
 static void smmuv3_accel_class_init(ObjectClass *oc, const void *data)

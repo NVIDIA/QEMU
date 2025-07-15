@@ -534,6 +534,8 @@ typedef struct SMMUEventInfo {
             (x)->word[6] = (uint32_t)(addr & 0xffffffff); \
     } while (0)
 
+void smmuv3_trigger_irq(SMMUv3State *s, SMMUIrq irq, uint32_t gerror_mask);
+MemTxResult smmuv3_write_eventq(SMMUv3State *s, Evt *evt);
 void smmuv3_record_event(SMMUv3State *s, SMMUEventInfo *event);
 
 /* Configuration Data */
