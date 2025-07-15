@@ -455,6 +455,7 @@ bool iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t id,
 
 bool iommufd_backend_alloc_viommu(IOMMUFDBackend *be, uint32_t dev_id,
                                   uint32_t viommu_type, uint32_t hwpt_id,
+                                  void *data_ptr, uint32_t len,
                                   uint32_t *out_viommu_id, Error **errp)
 {
     int ret, fd = be->fd;
@@ -463,6 +464,8 @@ bool iommufd_backend_alloc_viommu(IOMMUFDBackend *be, uint32_t dev_id,
         .type = viommu_type,
         .dev_id = dev_id,
         .hwpt_id = hwpt_id,
+        .data_len = len,
+        .data_uptr = (uintptr_t)data_ptr,
     };
 
     ret = ioctl(fd, IOMMU_VIOMMU_ALLOC, &alloc_viommu);
