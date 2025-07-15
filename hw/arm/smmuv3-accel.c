@@ -264,11 +264,9 @@ void smmuv3_accel_install_nested_ste(SMMUState *bs, SMMUDevice *sdev, int sid)
 }
 
 static void
-smmuv3_accel_ste_range(gpointer key, gpointer value, gpointer user_data)
+smmuv3_accel_ste_range(SMMUDevice *sdev, SMMUSIDRange *sid_range)
 {
-    SMMUDevice *sdev = (SMMUDevice *)key;
     uint32_t sid = smmu_get_sid(sdev);
-    SMMUSIDRange *sid_range = (SMMUSIDRange *)user_data;
 
     if (sid >= sid_range->start && sid <= sid_range->end) {
         SMMUv3State *s = sdev->smmu;
@@ -279,13 +277,21 @@ smmuv3_accel_ste_range(gpointer key, gpointer value, gpointer user_data)
 }
 
 void
-smmuv3_accel_install_nested_ste_range(SMMUState *bs, SMMUSIDRange *range)
+smmuv3_accel_install_nested_ste_range(SMMUState *bs, SMMUSIDRange *sid_range)
 {
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUv3AccelState *s_accel = s->s_accel;
+    SMMUv3AccelDevice *accel_dev;
+
     if (!bs->accel) {
         return;
     }
 
-    g_hash_table_foreach(bs->configs, smmuv3_accel_ste_range, range);
+    QLIST_FOREACH(accel_dev, &s_accel->viommu->device_list, next) {
+        if (smmu_get_sid(&accel_dev->sdev)) {
+            smmuv3_accel_ste_range(&accel_dev->sdev, sid_range);
+        }
+    }
 }
 
 /* Update batch->ncmds to the number of execute cmds */
