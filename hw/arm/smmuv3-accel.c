@@ -8,6 +8,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include <poll.h>
 #include "trace.h"
 
 #include "hw/arm/smmuv3.h"
@@ -363,6 +364,114 @@ bool smmuv3_accel_issue_inv_cmd(SMMUv3State *bs, void *cmd, SMMUDevice *sdev,
                    viommu_core->iommufd, viommu_core->viommu_id,
                    IOMMU_VIOMMU_INVALIDATE_DATA_ARM_SMMUV3,
                    sizeof(Cmd), &entry_num, cmd, errp);
+}
+
+static void *smmuv3_accel_nested_event_thread(void *arg)
+{
+    struct iommu_vevent_arm_smmuv3 *vevent;
+    struct iommufd_vevent_header *hdr;
+    ssize_t readsz = sizeof(*hdr) + sizeof(*vevent);
+    struct pollfd pollfd = {};
+    SMMUv3State *s = arg;
+    SMMUv3AccelState *s_accel = s->s_accel;
+    SMMUViommu *viommu = s_accel->viommu;
+    MemTxResult r;
+    ssize_t bytes;
+    Evt evt = {};
+    void *buf;
+    int ret;
+
+    if (!viommu->veventq) {
+        return NULL;
+    }
+
+    buf = g_malloc0(readsz);
+    pollfd.events = POLLIN;
+    pollfd.fd = viommu->veventq->veventq_fd;
+
+    while (1) {
+        qemu_mutex_lock(&s_accel->event_thread_mutex);
+        if (s_accel->event_thread_stop) {
+            qemu_mutex_unlock(&s_accel->event_thread_mutex);
+            break;
+        }
+        qemu_mutex_unlock(&s_accel->event_thread_mutex);
+
+        ret = poll(&pollfd, 1, 100);
+        if (ret < 0) {
+            error_report("%s: poll failed: %d", __func__, ret);
+            goto out_free;
+        }
+
+        bytes = read(pollfd.fd, buf, readsz);
+        if (bytes == 0) {
+            continue;
+        }
+        if (bytes < 0) {
+            error_report("%s: read failed: %d", __func__, ret);
+            goto out_free;
+        }
+        hdr = buf;
+        vevent = buf + sizeof(*hdr);
+        if (hdr->flags & IOMMU_VEVENTQ_FLAG_LOST_EVENTS) {
+            error_report("%s: vEVENTQ has lost events", __func__);
+            goto out_free;
+        }
+
+        memcpy(&evt, vevent, sizeof(evt));
+        r = smmuv3_write_eventq(s, &evt);
+        if (r != MEMTX_OK) {
+            smmuv3_trigger_irq(s, SMMU_IRQ_GERROR,
+                               R_GERROR_EVENTQ_ABT_ERR_MASK);
+        }
+    }
+out_free:
+    g_free(buf);
+    close(pollfd.fd);
+    return NULL;
+}
+
+bool smmuv3_accel_realloc_veventq(SMMUv3State *s, uint32_t log2size,
+                                  Error **errp)
+{
+    SMMUv3AccelState *s_accel = s->s_accel;
+    IOMMUFDVeventq *veventq;
+    SMMUViommu *viommu;
+    uint32_t veventq_id;
+    uint32_t veventq_fd;
+
+    if (!s_accel || !s_accel->viommu) {
+        return true;
+    }
+
+    viommu = s_accel->viommu;
+    if (viommu->veventq) {
+        qemu_mutex_lock(&s_accel->event_thread_mutex);
+        s_accel->event_thread_stop = true;
+        qemu_mutex_unlock(&s_accel->event_thread_mutex);
+        qemu_thread_join(&s_accel->event_thread_id);
+        iommufd_backend_free_id(viommu->iommufd, viommu->veventq->veventq_id);
+        g_free(viommu->veventq);
+    }
+
+    if (!iommufd_backend_alloc_veventq(viommu->iommufd, viommu->core.viommu_id,
+                                       IOMMU_VEVENTQ_TYPE_ARM_SMMUV3,
+                                       1 << log2size, &veventq_id, &veventq_fd,
+                                       errp)) {
+        return false;
+    }
+
+    veventq = g_new(IOMMUFDVeventq, 1);
+    veventq->veventq_id = veventq_id;
+    veventq->veventq_fd = veventq_fd;
+    veventq->viommu = &viommu->core;
+    viommu->veventq = veventq;
+
+    s_accel->event_thread_stop = false;
+    qemu_thread_create(&s_accel->event_thread_id, "irq/event",
+                       smmuv3_accel_nested_event_thread, s,
+                       QEMU_THREAD_JOINABLE);
+    return true;
 }
 
 static SMMUv3AccelDevice *smmuv3_accel_get_dev(SMMUState *bs, SMMUPciBus *sbus,
@@ -723,4 +832,5 @@ void smmuv3_accel_init(SMMUv3State *s)
 
     bs->iommu_ops = &smmuv3_accel_ops;
     s->s_accel = g_new0(SMMUv3AccelState, 1);
+    qemu_mutex_init(&s->s_accel->event_thread_mutex);
 }

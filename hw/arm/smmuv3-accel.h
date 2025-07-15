@@ -17,6 +17,7 @@
 typedef struct SMMUViommu {
     IOMMUFDBackend *iommufd;
     IOMMUFDViommu core;
+    IOMMUFDVeventq *veventq;
     uint32_t bypass_hwpt_id;
     uint32_t abort_hwpt_id;
     QLIST_HEAD(, SMMUv3AccelDevice) device_list;
@@ -38,6 +39,9 @@ typedef struct SMMUv3AccelDevice {
 
 typedef struct SMMUv3AccelState {
     SMMUViommu *viommu;
+    QemuThread event_thread_id;
+    QemuMutex event_thread_mutex;
+    bool event_thread_stop;
 } SMMUv3AccelState;
 
 #ifdef CONFIG_ARM_SMMUV3_ACCEL
@@ -50,6 +54,8 @@ bool smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
                                 Error **errp);
 void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s);
 void smmuv3_accel_idr_override(SMMUv3State *s);
+bool smmuv3_accel_realloc_veventq(SMMUv3State *s, uint32_t log2size,
+                                  Error **errp);
 #else
 static inline void smmuv3_accel_init(SMMUv3State *s)
 {
@@ -77,6 +83,11 @@ static inline void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s)
 }
 static inline void smmuv3_accel_idr_override(SMMUv3State *s)
 {
+}
+bool smmuv3_accel_realloc_veventq(SMMUv3State *s, uint32_t log2size,
+                                  Error **errp)
+{
+    return true;
 }
 #endif
 

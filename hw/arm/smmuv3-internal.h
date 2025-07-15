@@ -551,6 +551,8 @@ typedef struct CD {
 
 int smmu_find_ste(SMMUv3State *s, uint32_t sid, STE *ste, SMMUEventInfo *event);
 void smmuv3_flush_config(SMMUDevice *sdev);
+void smmuv3_trigger_irq(SMMUv3State *s, SMMUIrq irq, uint32_t gerror_mask);
+MemTxResult smmuv3_write_eventq(SMMUv3State *s, Evt *evt);
 
 /* STE fields */
 
