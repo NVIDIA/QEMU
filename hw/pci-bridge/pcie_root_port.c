@@ -46,6 +46,7 @@ static void rp_write_config(PCIDevice *d, uint32_t address,
 static void rp_reset_hold(Object *obj, ResetType type)
 {
     PCIDevice *d = PCI_DEVICE(obj);
+    PCIEPort *p = PCIE_PORT(d);
     DeviceState *qdev = DEVICE(obj);
 
     rp_aer_vector_update(d);
@@ -53,7 +54,7 @@ static void rp_reset_hold(Object *obj, ResetType type)
     pcie_cap_deverr_reset(d);
     pcie_cap_slot_reset(d);
     pcie_cap_arifwd_reset(d);
-    pcie_acs_reset(d);
+    pcie_acs_reset(d, p->acs_caps);
     pcie_aer_root_reset(d);
     pci_bridge_reset(qdev);
     pci_bridge_disable_base_limit(d);
@@ -118,7 +119,10 @@ static void rp_realize(PCIDevice *d, Error **errp)
     rp_aer_vector_update(d);
 
     if (rpc->acs_offset && !s->disable_acs) {
-        pcie_acs_init(d, rpc->acs_offset);
+        rc = pcie_acs_init(d, rpc->acs_offset, p->acs_caps, errp);
+        if (rc < 0) {
+            goto err;
+        }
     }
     return;
 
@@ -152,6 +156,8 @@ static const Property rp_props[] = {
     DEFINE_PROP_BIT(COMPAT_PROP_PCP, PCIDevice, cap_present,
                     QEMU_PCIE_SLTCAP_PCP_BITNR, true),
     DEFINE_PROP_BOOL("disable-acs", PCIESlot, disable_acs, false),
+    DEFINE_PROP_UINT16("acs-caps", PCIEPort,
+                       acs_caps, 0),
 };
 
 static void rp_instance_post_init(Object *obj)
