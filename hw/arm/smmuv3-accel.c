@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "trace.h"
 #include "qemu/error-report.h"
+#include <math.h>
 #include <poll.h>
 
 #include "hw/arm/smmuv3.h"
@@ -16,6 +17,7 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/vfio/pci.h"
+#include "qemu/units.h"
 
 #include "smmuv3-accel.h"
 
@@ -156,6 +158,16 @@ init_regs:
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, val);
     val = FIELD_EX32(s_accel->info.idr[5], IDR5, OAS);
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, val);
+
+    if (s_accel->cmdqv) {
+        MemoryRegionSection section = memory_region_find(get_system_memory(),
+                                                         GiB, MiB);
+        size_t pgsize = qemu_ram_pagesize(section.mr->ram_block);
+
+        val = FIELD_EX32(s_accel->info.idr[1], IDR1, CMDQS);
+        /* FIXME It needs to check the full RAM space */
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, CMDQS, MIN(log2(pgsize) - 4, val));
+    }
     return;
 
 out_err:
