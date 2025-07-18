@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include <poll.h>
+#include <math.h>
 #include "trace.h"
 
 #include "hw/arm/smmuv3.h"
@@ -16,6 +17,7 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/vfio/pci.h"
+#include "qemu/units.h"
 
 #include "smmuv3-accel.h"
 #include "smmuv3-internal.h"
@@ -813,6 +815,18 @@ void smmuv3_accel_idr_override(SMMUv3State *s)
      */
     if (s->pasid) {
         s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SSIDSIZE, SMMU_IDR1_SSIDSIZE);
+    }
+
+    if (s->cmdqv) {
+        uint32_t val;
+        MemoryRegionSection section = memory_region_find(get_system_memory(),
+                                                         GiB, MiB);
+        size_t pgsize = qemu_ram_pagesize(section.mr->ram_block);
+
+        val = FIELD_EX32(s->idr[1], IDR1, CMDQS);
+        /* FIXME It needs to check the full RAM space */
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, CMDQS, MIN(log2(pgsize) - 4,
+                               val));
     }
 }
 
