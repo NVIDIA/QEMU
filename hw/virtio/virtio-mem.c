@@ -1050,8 +1050,13 @@ static void virtio_mem_device_realize(DeviceState *dev, Error **errp)
     /*
      * Set ourselves as RamDiscardManager before the plug handler maps the
      * memory region and exposes it via an address space.
+     *
+     * Guest memfd takes precedence over our ram discard manager, because it
+     * notifies listeners of guest switching memory between shared and private,
+     * which also happens to hotplugged memory.
      */
-    if (memory_region_set_ram_discard_manager(&vmem->memdev->mr,
+    if (!memory_region_has_guest_memfd(&vmem->memdev->mr) &&
+        memory_region_set_ram_discard_manager(&vmem->memdev->mr,
                                               RAM_DISCARD_MANAGER(vmem))) {
         error_setg(errp, "Failed to set RamDiscardManager");
         ram_block_coordinated_discard_require(false);
@@ -1072,7 +1077,9 @@ static void virtio_mem_device_realize(DeviceState *dev, Error **errp)
         ret = ram_block_discard_range(rb, 0, qemu_ram_get_used_length(rb));
         if (ret) {
             error_setg_errno(errp, -ret, "Unexpected error discarding RAM");
-            memory_region_set_ram_discard_manager(&vmem->memdev->mr, NULL);
+            if (!memory_region_has_guest_memfd(&vmem->memdev->mr)) {
+                memory_region_set_ram_discard_manager(&vmem->memdev->mr, NULL);
+            }
             ram_block_coordinated_discard_require(false);
             return;
         }
@@ -1157,7 +1164,9 @@ static void virtio_mem_device_unrealize(DeviceState *dev)
      * The unplug handler unmapped the memory region, it cannot be
      * found via an address space anymore. Unset ourselves.
      */
-    memory_region_set_ram_discard_manager(&vmem->memdev->mr, NULL);
+    if (!memory_region_has_guest_memfd(&vmem->memdev->mr)) {
+        memory_region_set_ram_discard_manager(&vmem->memdev->mr, NULL);
+    }
     ram_block_coordinated_discard_require(false);
 }
 
