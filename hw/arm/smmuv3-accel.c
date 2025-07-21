@@ -44,7 +44,7 @@ void smmuv3_accel_init_regs(SMMUv3State *s)
 {
     SMMUv3AccelState *s_accel = s->s_accel;
     SMMUv3AccelDevice *accel_dev;
-    uint32_t data_type;
+    uint32_t data_type = 0;
     uint32_t val;
     int ret;
 
