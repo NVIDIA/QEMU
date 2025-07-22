@@ -49,7 +49,7 @@ void smmuv3_accel_init_regs(SMMUv3State *s)
 
     if (s_accel->info.idr[0]) {
         /* We already got this */
-        return;
+        goto init_regs;
     }
 
     if (!s_accel->viommu || QLIST_EMPTY(&s_accel->viommu->device_list)) {
@@ -72,6 +72,7 @@ void smmuv3_accel_init_regs(SMMUv3State *s)
         goto out_err;
     }
 
+init_regs:
     trace_smmuv3_accel_host_hw_info(s_accel->info.idr[0], s_accel->info.idr[1],
                                     s_accel->info.idr[3], s_accel->info.idr[5]);
     /*
