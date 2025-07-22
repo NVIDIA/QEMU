@@ -306,6 +306,7 @@ static int iort_idmap_compare(gconstpointer a, gconstpointer b)
 }
 
 typedef struct AcpiIortSMMUv3Dev {
+    Object *obj;
     int irq;
     hwaddr base;
     GArray *rc_smmu_idmaps;
@@ -374,6 +375,7 @@ static int iort_smmuv3_devices(Object *obj, void *opaque)
     sdev.irq = platform_bus_get_irqn(pbus, sbdev, 0);
     sdev.irq += vms->irqmap[VIRT_PLATFORM_BUS];
     sdev.irq += ARM_SPI_BASE;
+    sdev.obj = obj;
 
     pci_bus_range(bus, &min_bus, &max_bus);
     sdev.rc_smmu_idmaps = g_array_new(false, true, sizeof(AcpiIortIdMapping));
@@ -493,15 +495,16 @@ build_iort_rmr_nodes(GArray *table_data, GArray *smmuv3_devices, uint32_t *id)
  * Document number: ARM DEN 0049E.b, Feb 2021
  */
 static void
-build_iort(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+build_iort(GArray *table_data, AcpiBuildTables *tables, VirtMachineState *vms)
 {
+    GArray *smmuv3_devs = tables->smmuv3_devs;
+    BIOSLinker *linker = tables->linker;
     int i, nb_nodes, rc_mapping_count;
     AcpiIortSMMUv3Dev *sdev;
     size_t node_size;
     int num_smmus = 0;
     uint32_t id = 0;
     int rc_smmu_idmaps_len = 0;
-    GArray *smmuv3_devs = g_array_new(false, true, sizeof(AcpiIortSMMUv3Dev));
     GArray *rc_its_idmaps = g_array_new(false, true, sizeof(AcpiIortIdMapping));
 
     AcpiTable table = { .sig = "IORT", .rev = 5, .oem_id = vms->oem_id,
@@ -512,7 +515,7 @@ build_iort(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
     if (vms->legacy_smmuv3_present) {
         rc_smmu_idmaps_len = populate_smmuv3_legacy_dev(smmuv3_devs);
     } else {
-        rc_smmu_idmaps_len = populate_smmuv3_dev(smmuv3_devs);
+        rc_smmu_idmaps_len = smmuv3_devs->len;
     }
 
     num_smmus = smmuv3_devs->len;
@@ -1153,6 +1156,16 @@ static void acpi_align_size(GArray *blob, unsigned align)
     g_array_set_size(blob, ROUND_UP(acpi_data_len(blob), align));
 }
 
+/* Prepare structures that will be shared between ACPI tables */
+static void virt_acpi_prebuild(VirtMachineState *vms, AcpiBuildTables *tables)
+{
+    if (!vms->legacy_smmuv3_present) {
+        tables->smmuv3_devs = g_array_new(false, true,
+                                          sizeof(AcpiIortSMMUv3Dev));
+        populate_smmuv3_dev(tables->smmuv3_devs);
+    }
+}
+
 static
 void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
 {
@@ -1162,6 +1175,7 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
     GArray *tables_blob = tables->table_data;
     MachineState *ms = MACHINE(vms);
 
+    virt_acpi_prebuild(vms, tables);
     table_offsets = g_array_new(false, true /* clear */,
                                         sizeof(uint32_t));
 
@@ -1239,7 +1253,7 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
     }
 
     acpi_add_table(table_offsets, tables_blob);
-    build_iort(tables_blob, tables->linker, vms);
+    build_iort(tables_blob, tables, vms);
 
 #ifdef CONFIG_TPM
     if (tpm_get_version(tpm_find()) == TPM_VERSION_2_0) {
