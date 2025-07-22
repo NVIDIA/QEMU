@@ -218,6 +218,7 @@ struct AcpiBuildTables {
     GArray *tcpalog;
     GArray *vmgenid;
     GArray *hardware_errors;
+    GArray *smmuv3_devs;
     BIOSLinker *linker;
 } AcpiBuildTables;
 
