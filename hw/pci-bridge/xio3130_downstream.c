@@ -40,6 +40,8 @@
 #define XIO3130_SSVID_SSID              0
 #define XIO3130_EXP_OFFSET              0x90
 #define XIO3130_AER_OFFSET              0x100
+#define XIO3130_ACS_OFFSET \
+	(XIO3130_AER_OFFSET + PCI_ERR_SIZEOF)
 
 static void xio3130_downstream_write_config(PCIDevice *d, uint32_t address,
                                          uint32_t val, int len)
@@ -60,6 +62,7 @@ static void xio3130_downstream_reset(DeviceState *qdev)
     pcie_cap_deverr_reset(d);
     pcie_cap_slot_reset(d);
     pcie_cap_arifwd_reset(d);
+    pcie_acs_reset(d);
     pci_bridge_reset(qdev);
 }
 
@@ -110,6 +113,8 @@ static void xio3130_downstream_realize(PCIDevice *d, Error **errp)
     if (rc < 0) {
         goto err;
     }
+
+    pcie_acs_init(d, XIO3130_ACS_OFFSET);
 
     return;
 
