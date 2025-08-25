@@ -324,8 +324,9 @@ static void nvidia_dev_vfio(PCIBus *bus, PCIDevice *dev, void *opaque)
     vendor_id = pci_get_word(dev->config + PCI_VENDOR_ID);
     device_id = pci_get_word(dev->config + PCI_DEVICE_ID);
 
-    /* Nvidia GB200 workaround */
-    if (vendor_id == 0x10de && device_id == 0x2941) {
+    /* Nvidia GB200/GB300 workaround */
+    if (vendor_id == 0x10de &&
+        (device_id == 0x2941 || device_id == 0x31c2)) {
         fix_pci_bar_GB200_nvidia(dev, pbars);
     }
 
