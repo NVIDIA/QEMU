@@ -37,6 +37,7 @@ struct PCIEPort {
     /* pci express switch port */
     uint8_t     port;
     uint16_t    acs_caps;
+    bool        acs_caps_configured;
 };
 
 void pcie_port_init_reg(PCIDevice *d);
