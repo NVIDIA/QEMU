@@ -1607,7 +1607,8 @@ static void create_smmuv3_dev_dtb(VirtMachineState *vms, DeviceState *dev,
     MachineState *ms = MACHINE(vms);
 
     if (!(vms->bootinfo.firmware_loaded && virt_is_acpi_enabled(vms))) {
-        if (object_property_get_bool(OBJECT(dev), "accel", &error_abort)) {
+        if (object_property_get_bool(OBJECT(dev), "accel", &error_abort) ||
+            object_property_get_bool(OBJECT(dev), "realm", &error_abort)) {
             error_setg(errp, "SMMUv3 with accel=on not supported for DT");
             return;
         }
@@ -1616,6 +1617,10 @@ static void create_smmuv3_dev_dtb(VirtMachineState *vms, DeviceState *dev,
             return;
         }
     }
+    object_property_set_uint(OBJECT(dev), "mmio_base",
+                             base + vms->memmap[VIRT_PLATFORM_BUS].base,
+                             &error_fatal);
+
     base += vms->memmap[VIRT_PLATFORM_BUS].base;
     irq += vms->irqmap[VIRT_PLATFORM_BUS];
 
@@ -3343,7 +3348,8 @@ static void virt_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
 
     if (virt_machine_is_confidential(vms) &&
         (object_dynamic_cast(OBJECT(dev), TYPE_VIRTIO_IOMMU_PCI) ||
-         object_dynamic_cast(OBJECT(dev), TYPE_ARM_SMMUV3))) {
+         (object_dynamic_cast(OBJECT(dev), TYPE_ARM_SMMUV3) &&
+          !object_property_get_bool(OBJECT(dev), "realm", &error_abort)))) {
         error_setg(errp, "guest IOMMUs are not supported for Realm VMs");
         return;
     }
@@ -3411,7 +3417,8 @@ static void virt_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
             object_property_set_uint(OBJECT(dev), "identifier",
                                      its_offset + smmuv3_dev_id++, NULL);
         }
-        if (object_property_get_bool(OBJECT(dev), "accel", &error_abort)) {
+        if (object_property_get_bool(OBJECT(dev), "accel", &error_abort) ||
+            object_property_get_bool(OBJECT(dev), "realm", &error_abort)) {
             hwaddr db_start = 0;
 
             if (!kvm_enabled() || !kvm_irqchip_in_kernel()) {
