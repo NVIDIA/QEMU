@@ -1265,6 +1265,8 @@ int pcie_acs_init(PCIDevice *dev, uint16_t offset, uint16_t ctrl_bits,
 {
     bool is_downstream = pci_is_express_downstream_port(dev);
     uint16_t cap_bits = 0;
+    PCIEPort *p = PCIE_PORT(dev);
+    bool configured = p->acs_caps_configured;
 
     /* For endpoints, only multifunction devs may have an ACS capability: */
     assert(is_downstream ||
@@ -1286,7 +1288,7 @@ int pcie_acs_init(PCIDevice *dev, uint16_t offset, uint16_t ctrl_bits,
         cap_bits = PCI_ACS_SV | PCI_ACS_TB | PCI_ACS_RR |
             PCI_ACS_CR | PCI_ACS_UF | PCI_ACS_DT;
 
-        if (ctrl_bits & ~cap_bits) {
+        if (configured && (ctrl_bits & ~cap_bits)) {
             error_setg(errp,
                        "Unsupported ACS capabilities 0x%hx were supplied. "
                        "Supported capabilities are 0x%hx",
@@ -1296,7 +1298,17 @@ int pcie_acs_init(PCIDevice *dev, uint16_t offset, uint16_t ctrl_bits,
     }
 
     pci_set_word(dev->config + offset + PCI_ACS_CAP, cap_bits);
-    pci_set_word(dev->wmask + offset + PCI_ACS_CTRL, cap_bits);
+
+    if (is_downstream && configured) {
+        /*
+         * Block guest writes to ACS Control entirely to preserve QEMU
+         * ACS settings
+         */
+        pci_set_word(dev->wmask + offset + PCI_ACS_CTRL, 0);
+    } else {
+        pci_set_word(dev->wmask + offset + PCI_ACS_CTRL, cap_bits);
+    }
+
     pci_set_word(dev->config + offset + PCI_ACS_CTRL, ctrl_bits);
 
     return 0;
@@ -1308,6 +1320,35 @@ void pcie_acs_reset(PCIDevice *dev, uint16_t val)
         pci_set_word(dev->config + dev->exp.acs_cap + PCI_ACS_CTRL, val);
     }
 }
+
+static void set_acs_caps(Object *obj, Visitor *v, const char *name,
+                         void *opaque, Error **errp)
+{
+    PCIEPort *p = PCIE_PORT(obj);
+    const Property *prop = opaque;
+    uint16_t *ptr = object_field_prop_ptr(obj, prop);
+
+    if (!visit_type_uint16(v, name, ptr, errp)) {
+        return;
+    }
+    p->acs_caps_configured = true;
+}
+
+static void get_acs_caps(Object *obj, Visitor *v, const char *name,
+                         void *opaque, Error **errp)
+{
+    const Property *prop = opaque;
+    uint16_t *ptr = object_field_prop_ptr(obj, prop);
+
+    visit_type_uint16(v, name, ptr, errp);
+}
+
+const PropertyInfo qdev_prop_acs_caps = {
+    .type = "uint16",
+    .description = "PCIe ACS ctrl configuration (unset = not configured)",
+    .get = get_acs_caps,
+    .set = set_acs_caps,
+};
 
 void pcie_pasid_common_init(PCIDevice *dev, uint16_t offset,
                             uint8_t pasid_width, bool exec_perm, bool priv_mod)
