@@ -1041,7 +1041,8 @@ static int populate_smmuv3_dev(VirtMachineState *vms, GArray *sdev_blob)
 
         bus = PCI_BUS(object_property_get_link(obj, "primary-bus",
                                                &error_abort));
-        sdev.accel = object_property_get_bool(obj, "accel", &error_abort);
+        sdev.accel = object_property_get_bool(obj, "accel", &error_abort) ||
+                     object_property_get_bool(obj, "realm", &error_abort);
         sdev.ats = smmuv3_ats_enabled(ARM_SMMUV3(obj));
         sdev.id = object_property_get_uint(obj, "identifier", &error_abort);
         pbus = PLATFORM_BUS_DEVICE(vms->platform_bus_dev);
