@@ -26,6 +26,7 @@
 #include "hw/pci/pcie_aer.h"
 #include "hw/pci/pcie_sriov.h"
 #include "hw/core/hotplug.h"
+#include "hw/core/qdev-properties.h"
 
 typedef struct PCIEPort PCIEPort;
 typedef struct PCIESlot PCIESlot;
@@ -85,6 +86,8 @@ struct PCIExpressDevice {
 };
 
 #define COMPAT_PROP_PCP "power_controller_present"
+
+extern const PropertyInfo qdev_prop_acs_caps;
 
 /* PCI express capability helper functions */
 int pcie_cap_init(PCIDevice *dev, uint8_t offset, uint8_t type,
