@@ -70,6 +70,7 @@ struct SMMUv3State {
     /* SMMU has HW accelerator support for nested S1 + s2 */
     bool accel;
     struct SMMUv3AccelState *s_accel;
+    struct SMMUv3RealmState *s_realm;
     uint64_t msi_gpa;
     Error *migration_blocker;
     OnOffAuto ril;
@@ -78,6 +79,9 @@ struct SMMUv3State {
     SsidSizeMode ssidsize;
     /* SMMU CMDQV extension */
     OnOffAuto cmdqv;
+
+    bool realm; /* SMMU has Realm Management Monitor */
+    hwaddr mmio_base;
 
     Notifier machine_done;
 };

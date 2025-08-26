@@ -36,6 +36,7 @@
 #include "hw/arm/smmuv3.h"
 #include "smmuv3-accel.h"
 #include "smmuv3-internal.h"
+#include "smmuv3-realm.h"
 #include "smmu-internal.h"
 
 #define PTW_RECORD_FAULT(ptw_info, cfg) (((ptw_info).stage == SMMU_STAGE_1 && \
@@ -316,6 +317,7 @@ static void smmuv3_init_id_regs(SMMUv3State *s)
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, 1);
     s->aidr = 0x1;
     smmuv3_accel_idr_override(s);
+    smmuv3_realm_idr_override(s);
 }
 
 bool smmuv3_ats_enabled(SMMUv3State *s)
@@ -1982,8 +1984,11 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
                    "not supported.");
         return false;
     }
-
-    if (!s->accel) {
+    if (s->accel && s->realm) {
+        error_setg(errp, "accel=on and realm=on are mutually exclusive");
+        return false;
+    }
+    if (!s->accel && !s->realm) {
         if (s->ril == ON_OFF_AUTO_OFF) {
             error_setg(errp, "ril can only be disabled if accel=on");
             return false;
@@ -2041,6 +2046,17 @@ static void smmu_realize(DeviceState *d, Error **errp)
         }
     }
 
+    if (s->realm) {
+        if (!smmuv3_realm_init(s, errp)) {
+            return;
+        }
+        error_setg(&s->migration_blocker, "Migration not supported with SMMUv3 "
+                   "realm mode enabled");
+        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+            return;
+        }
+    }
+
     c->parent_realize(d, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
@@ -2050,7 +2066,8 @@ static void smmu_realize(DeviceState *d, Error **errp)
     qemu_mutex_init(&s->mutex);
 
     memory_region_init_io(&sys->iomem, OBJECT(s),
-                          &smmu_mem_ops, sys, TYPE_ARM_SMMUV3, 0x20000);
+                          s->realm ? NULL : &smmu_mem_ops, sys,
+                          TYPE_ARM_SMMUV3, 0x20000);
 
     sys->mrtypename = TYPE_SMMUV3_IOMMU_MEMORY_REGION;
 
@@ -2156,6 +2173,8 @@ static const Property smmuv3_properties[] = {
     DEFINE_PROP_SSIDSIZE_MODE("ssidsize", SMMUv3State, ssidsize,
                               SSID_SIZE_MODE_AUTO),
     DEFINE_PROP_ON_OFF_AUTO("cmdqv", SMMUv3State, cmdqv, ON_OFF_AUTO_AUTO),
+    DEFINE_PROP_BOOL("realm", SMMUv3State, realm, false),
+    DEFINE_PROP_UINT64("mmio_base", SMMUv3State, mmio_base, false),
 };
 
 static void smmuv3_instance_init(Object *obj)
@@ -2220,6 +2239,10 @@ static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,
     SMMUv3State *s3 = sdev->smmu;
     SMMUState *s = &(s3->smmu_state);
 
+    if (s3->realm) {
+        return 0;
+    }
+
     if (new & IOMMU_NOTIFIER_DEVIOTLB_UNMAP) {
         error_setg(errp, "SMMUv3 does not support dev-iotlb yet");
         return -EINVAL;
@@ -2274,4 +2297,3 @@ static void smmuv3_register_types(void)
 }
 
 type_init(smmuv3_register_types)
-

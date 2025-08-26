@@ -8,6 +8,16 @@
 #include "qapi/error.h"
 #include "hw/arm/smmuv3-realm.h"
 
+bool smmuv3_realm_init(SMMUv3State *s, Error **errp)
+{
+    error_setg(errp, "realm=on support not compiled in");
+    return false;
+}
+
+void smmuv3_realm_idr_override(SMMUv3State *s)
+{
+}
+
 bool smmuv3_realm_alloc_psmmu_viommu(HostIOMMUDevice *hiod,
                                      uint32_t *viommu_id, Error **errp)
 {

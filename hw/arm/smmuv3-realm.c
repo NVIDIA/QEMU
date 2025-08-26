@@ -6,12 +6,33 @@
  */
 
 #include "qemu/osdep.h"
+#include "trace.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
+#include "target/arm/kvm_arm.h"
+
+#include "hw/pci/pci_bridge.h"
+#include "hw/pci-host/gpex.h"
+#include "hw/core/iommu.h"
+#include "hw/vfio/pci.h"
 
 #include "smmuv3-realm.h"
 
 #define SMMU_STE_VALID      (1ULL << 0)
 #define SMMU_STE_CFG_BYPASS (1ULL << 3)
+
+void smmuv3_realm_idr_override(SMMUv3State *s)
+{
+    if (!s->realm) {
+        return;
+    }
+
+    s->idr[0] = VSMMU_IDR0_VALUE;
+    s->idr[1] = VSMMU_IDR1_VALUE;
+    s->idr[3] = VSMMU_IDR3_VALUE;
+    s->idr[5] = VSMMU_IDR5_VALUE;
+    s->aidr = VSMMU_AIDR_VALUE;
+}
 
 /*
  * Allocate a Realm vIOMMU on the nesting parent HWPT of @hiodi. @data describes
@@ -136,4 +157,273 @@ void smmuv3_realm_free_psmmu_viommu(HostIOMMUDevice *hiod)
     smmuv3_realm_psmmu_viommus =
         g_list_remove(smmuv3_realm_psmmu_viommus, viommu);
     smmuv3_realm_viommu_free(viommu);
+}
+
+static SMMUv3RealmDevice *smmuv3_realm_get_dev(SMMUState *bs,
+                                                SMMUPciBus *sbus,
+                                                PCIBus *bus, int devfn)
+{
+    SMMUDevice *sdev = sbus->pbdev[devfn];
+    SMMUv3RealmDevice *realm_dev;
+
+    if (sdev) {
+        return container_of(sdev, SMMUv3RealmDevice, sdev);
+    }
+
+    realm_dev = g_new0(SMMUv3RealmDevice, 1);
+    sdev = &realm_dev->sdev;
+    sbus->pbdev[devfn] = sdev;
+    smmu_init_sdev(bs, sdev, bus, devfn);
+    return realm_dev;
+}
+
+static SMMUv3RealmDevice *smmuv3_realm_find_dev(SMMUState *bs, PCIBus *bus,
+                                                 int devfn)
+{
+    SMMUPciBus *sbus = g_hash_table_lookup(bs->smmu_pcibus_by_busptr, bus);
+
+    if (!sbus || !sbus->pbdev[devfn]) {
+        return NULL;
+    }
+    return container_of(sbus->pbdev[devfn], SMMUv3RealmDevice, sdev);
+}
+
+/*
+ * Devices behind a Realm vSMMU all share one vIOMMU that describes the vSMMU to
+ * the kernel. The first device allocates it on top of its nesting parent HWPT.
+ */
+static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
+                                         Error **errp)
+{
+    struct iommu_viommu_arm_realm_vsmmuv3 args = { 0 };
+    HostIOMMUDeviceIOMMUFD *hiodi = realm_dev->hiodi;
+    SMMUv3State *s = ARM_SMMUV3(realm_dev->sdev.smmu);
+    SMMUv3RealmState *realm = s->s_realm;
+    SMMURealmViommu *viommu = realm->viommu;
+
+    if (realm_dev->viommu) {
+        return true;
+    }
+
+    if (!viommu) {
+        args.flags = IOMMU_VIOMMU_ARM_REALM_SMMUV3_FLAGS_VSMMU;
+        args.reg_base = s->mmio_base;
+        args.reg_top = s->mmio_base + 0x20000;
+        args.aidr = VSMMU_AIDR_VALUE;
+        args.idr[0] = VSMMU_IDR0_VALUE;
+        args.idr[1] = VSMMU_IDR1_VALUE;
+        args.idr[3] = VSMMU_IDR3_VALUE;
+        args.idr[5] = VSMMU_IDR5_VALUE;
+
+        viommu = smmuv3_realm_viommu_alloc(hiodi, &args, sizeof(args), errp);
+        if (!viommu) {
+            return false;
+        }
+        realm->viommu = viommu;
+    }
+
+    realm_dev->viommu = viommu;
+    QLIST_INSERT_HEAD(&viommu->device_list, realm_dev, next);
+    return true;
+}
+
+static void smmuv3_realm_dev_put_viommu(SMMUv3RealmDevice *realm_dev)
+{
+    SMMUv3State *s = ARM_SMMUV3(realm_dev->sdev.smmu);
+    SMMURealmViommu *viommu = realm_dev->viommu;
+
+    if (!viommu) {
+        return;
+    }
+
+    QLIST_REMOVE(realm_dev, next);
+    realm_dev->viommu = NULL;
+
+    if (QLIST_EMPTY(&viommu->device_list)) {
+        smmuv3_realm_viommu_free(viommu);
+        s->s_realm->viommu = NULL;
+    }
+}
+
+static bool smmuv3_realm_set_iommu_device(PCIBus *bus, void *opaque,
+                                           int devfn,
+                                           HostIOMMUDevice *hiod,
+                                           Error **errp)
+{
+    HostIOMMUDeviceIOMMUFD *hiodi = HOST_IOMMU_DEVICE_IOMMUFD(hiod);
+    SMMUState *bs = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(bs, bus);
+    SMMUv3RealmDevice *realm_dev =
+        smmuv3_realm_get_dev(bs, sbus, bus, devfn);
+
+    if (!hiodi) {
+        return true;
+    }
+
+    if (realm_dev->hiodi) {
+        if (realm_dev->hiodi != hiodi) {
+            error_setg(errp, "Device 0x%x already has an associated hiodi",
+                       smmu_get_sid(&realm_dev->sdev));
+            return false;
+        }
+        return true;
+    }
+
+    realm_dev->hiodi = hiodi;
+    trace_smmuv3_realm_set_iommu_device(devfn,
+                                        smmu_get_sid(&realm_dev->sdev));
+    return true;
+}
+
+static void smmuv3_realm_unset_iommu_device(PCIBus *bus, void *opaque,
+                                             int devfn)
+{
+    SMMUv3RealmDevice *realm_dev = smmuv3_realm_find_dev(opaque, bus, devfn);
+
+    if (!realm_dev || !realm_dev->hiodi) {
+        return;
+    }
+
+    smmuv3_realm_dev_put_viommu(realm_dev);
+    realm_dev->hiodi = NULL;
+    trace_smmuv3_realm_unset_iommu_device(devfn,
+                                          smmu_get_sid(&realm_dev->sdev));
+}
+
+static bool smmuv3_realm_alloc_viommu(PCIBus *bus, void *opaque, int devfn,
+                                      HostIOMMUDevice *hiod,
+                                      uint32_t *viommu_id, Error **errp)
+{
+    SMMUv3RealmDevice *realm_dev = smmuv3_realm_find_dev(opaque, bus, devfn);
+
+    if (!realm_dev || !realm_dev->hiodi ||
+        HOST_IOMMU_DEVICE(realm_dev->hiodi) != hiod) {
+        error_setg(errp, "Device 0x%x has no host IOMMU device set",
+                   PCI_BUILD_BDF(pci_bus_num(bus), devfn));
+        return false;
+    }
+
+    if (!smmuv3_realm_dev_get_viommu(realm_dev, errp)) {
+        return false;
+    }
+
+    *viommu_id = realm_dev->viommu->core.viommu_id;
+    return true;
+}
+
+static void smmuv3_realm_free_viommu(PCIBus *bus, void *opaque, int devfn,
+                                     HostIOMMUDevice *hiod)
+{
+    SMMUv3RealmDevice *realm_dev = smmuv3_realm_find_dev(opaque, bus, devfn);
+
+    if (realm_dev && realm_dev->hiodi) {
+        smmuv3_realm_dev_put_viommu(realm_dev);
+    }
+}
+
+static bool smmuv3_realm_pdev_allowed(PCIDevice *pdev, bool *vfio_pci)
+{
+    if (object_dynamic_cast(OBJECT(pdev), TYPE_PCI_BRIDGE) ||
+        object_dynamic_cast(OBJECT(pdev), TYPE_PXB_PCIE_DEV) ||
+        object_dynamic_cast(OBJECT(pdev), TYPE_GPEX_ROOT_DEVICE)) {
+        return true;
+    }
+
+    if (object_dynamic_cast(OBJECT(pdev), TYPE_VFIO_PCI)) {
+        *vfio_pci = true;
+        return object_property_get_link(OBJECT(pdev), "iommufd", NULL) != NULL;
+    }
+
+    return false;
+}
+
+static bool smmuv3_realm_supports_as(PCIBus *bus, void *opaque, int devfn,
+                                     Error **errp)
+{
+    PCIDevice *pdev = pci_find_device(bus, pci_bus_num(bus), devfn);
+    bool vfio_pci = false;
+
+    if (!pdev || smmuv3_realm_pdev_allowed(pdev, &vfio_pci)) {
+        return true;
+    }
+
+    if (vfio_pci) {
+        error_setg(errp, "vfio-pci endpoint devices without an iommufd "
+                   "backend are not allowed with arm-smmuv3,realm=on");
+    } else {
+        error_setg(errp, "Emulated endpoint devices are not allowed with "
+                   "arm-smmuv3,realm=on");
+    }
+    return false;
+}
+
+static AddressSpace *smmuv3_realm_find_add_as(PCIBus *bus, void *opaque,
+                                               int devfn)
+{
+    PCIDevice *pdev = pci_find_device(bus, pci_bus_num(bus), devfn);
+    SMMUState *bs = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(bs, bus);
+    SMMUv3RealmDevice *realm_dev =
+        smmuv3_realm_get_dev(bs, sbus, bus, devfn);
+    bool vfio_pci = false;
+
+    if (pdev && !smmuv3_realm_pdev_allowed(pdev, &vfio_pci)) {
+        g_assert_not_reached();
+    }
+
+    /*
+     * An untrusted Realm device can only access the shared, upper half of the
+     * IPA space. The RME DMA address space tracks shared RAM by those aliases,
+     * so the nesting parent HWPT holds only the mappings a T=0 device may use.
+     * Once the device becomes trusted, RMM programs its protected stage-2 from
+     * the Realm RTT instead.
+     */
+    if (vfio_pci) {
+        AddressSpace *dma_as = kvm_arm_rme_get_dma_as();
+
+        g_assert(dma_as);
+        return dma_as;
+    } else {
+        return &realm_dev->sdev.as;
+    }
+}
+
+static uint64_t smmuv3_realm_get_msi_gpa(PCIBus *bus, void *opaque,
+                                          int devfn)
+{
+    SMMUv3State *s = ARM_SMMUV3(opaque);
+
+    g_assert(s->msi_gpa);
+    return s->msi_gpa;
+}
+
+static uint64_t smmuv3_realm_get_viommu_flags(void *opaque)
+{
+    uint64_t flags = VIOMMU_FLAG_WANT_NESTING_PARENT;
+    SMMUv3State *s = ARM_SMMUV3(opaque);
+
+    if (smmuv3_pasid_supported(s)) {
+        flags |= VIOMMU_FLAG_PASID_SUPPORTED;
+    }
+    return flags;
+}
+
+static const PCIIOMMUOps smmuv3_realm_ops = {
+    .supports_address_space = smmuv3_realm_supports_as,
+    .get_address_space = smmuv3_realm_find_add_as,
+    .get_viommu_flags = smmuv3_realm_get_viommu_flags,
+    .alloc_viommu = smmuv3_realm_alloc_viommu,
+    .free_viommu = smmuv3_realm_free_viommu,
+    .set_iommu_device = smmuv3_realm_set_iommu_device,
+    .unset_iommu_device = smmuv3_realm_unset_iommu_device,
+    .get_msi_direct_gpa = smmuv3_realm_get_msi_gpa,
+};
+
+bool smmuv3_realm_init(SMMUv3State *s, Error **errp)
+{
+    SMMUState *bs = ARM_SMMU(s);
+
+    bs->iommu_ops = &smmuv3_realm_ops;
+    s->s_realm = g_new0(SMMUv3RealmState, 1);
+    return true;
 }
