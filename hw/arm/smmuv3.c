@@ -335,6 +335,27 @@ static void smmuv3_nested_init_regs(SMMUv3State *s)
         return;
     }
 
+    /*
+     * If the Guest goes through a reboot and we have devices in S1+S2
+     * we need to make the S1 in bypass as there might be usecases where
+     * QEMU/UEFI will try to access the device(eg: UEFI trying to retrieve
+     * boot partition info on an assigned vfio-pci nvme dev).
+     */
+    if (bs->viommu) {
+        QLIST_FOREACH(sdev, &bs->viommu->device_list, next) {
+            if (sdev->vdev) {
+                if (!host_iommu_device_iommufd_attach_hwpt(sdev->idev,
+                                                           sdev->viommu->bypass_hwpt_id,
+                                                           NULL)) {
+                    error_report("Failed to install bypass hwpt id %u "
+                                 "for dev id %u",
+                                 sdev->viommu->bypass_hwpt_id,
+                                 sdev->idev->devid);
+                }
+            }
+        }
+    }
+
     sdev = QLIST_FIRST(&bs->viommu->device_list);
     if (!sdev) {
         return;
