@@ -17,9 +17,173 @@
 #include "hw/vfio/pci.h"
 
 #include "smmuv3-accel.h"
+#include "smmuv3-internal.h"
 
 #define SMMU_STE_VALID      (1ULL << 0)
 #define SMMU_STE_CFG_BYPASS (1ULL << 3)
+
+#define STE0_V       MAKE_64BIT_MASK(0, 1)
+#define STE0_CONFIG  MAKE_64BIT_MASK(1, 3)
+#define STE0_S1FMT   MAKE_64BIT_MASK(4, 2)
+#define STE0_CTXPTR  MAKE_64BIT_MASK(6, 50)
+#define STE0_S1CDMAX MAKE_64BIT_MASK(59, 5)
+#define STE0_MASK    (STE0_S1CDMAX | STE0_CTXPTR | STE0_S1FMT | STE0_CONFIG | \
+                      STE0_V)
+
+#define STE1_S1DSS    MAKE_64BIT_MASK(0, 2)
+#define STE1_S1CIR    MAKE_64BIT_MASK(2, 2)
+#define STE1_S1COR    MAKE_64BIT_MASK(4, 2)
+#define STE1_S1CSH    MAKE_64BIT_MASK(6, 2)
+#define STE1_S1STALLD MAKE_64BIT_MASK(27, 1)
+#define STE1_ETS      MAKE_64BIT_MASK(28, 2)
+#define STE1_MASK     (STE1_ETS | STE1_S1STALLD | STE1_S1CSH | STE1_S1COR | \
+                       STE1_S1CIR | STE1_S1DSS)
+
+static bool
+smmuv3_accel_dev_uninstall_nested_ste(SMMUv3AccelDevice *accel_dev, bool abort,
+                                      Error **errp)
+{
+    HostIOMMUDeviceIOMMUFD *idev = accel_dev->idev;
+    SMMUS1Hwpt *s1_hwpt = accel_dev->s1_hwpt;
+    uint32_t hwpt_id;
+
+    if (!s1_hwpt || !accel_dev->viommu) {
+        return true;
+    }
+
+    if (abort) {
+        hwpt_id = accel_dev->viommu->abort_hwpt_id;
+    } else {
+        hwpt_id = accel_dev->viommu->bypass_hwpt_id;
+    }
+
+    if (!host_iommu_device_iommufd_attach_hwpt(idev, hwpt_id, errp)) {
+        return false;
+    }
+
+    iommufd_backend_free_id(s1_hwpt->iommufd, s1_hwpt->hwpt_id);
+    accel_dev->s1_hwpt = NULL;
+    g_free(s1_hwpt);
+    return true;
+}
+
+static bool
+smmuv3_accel_dev_install_nested_ste(SMMUv3AccelDevice *accel_dev,
+                                    uint32_t data_type, uint32_t data_len,
+                                    void *data, Error **errp)
+{
+    SMMUViommu *viommu = accel_dev->viommu;
+    SMMUS1Hwpt *s1_hwpt = accel_dev->s1_hwpt;
+    HostIOMMUDeviceIOMMUFD *idev = accel_dev->idev;
+    uint32_t flags = 0;
+
+    if (!idev || !viommu) {
+        error_setg(errp, "Device 0x%x has no associated IOMMU dev or vIOMMU",
+                   smmu_get_sid(&accel_dev->sdev));
+        return false;
+    }
+
+    if (s1_hwpt) {
+        if (!smmuv3_accel_dev_uninstall_nested_ste(accel_dev, true, errp)) {
+            return false;
+        }
+    }
+
+    s1_hwpt = g_new0(SMMUS1Hwpt, 1);
+    s1_hwpt->iommufd = idev->iommufd;
+    if (!iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid,
+                                    viommu->core.viommu_id, flags, data_type,
+                                    data_len, data, &s1_hwpt->hwpt_id, errp)) {
+        return false;
+    }
+
+    if (!host_iommu_device_iommufd_attach_hwpt(idev, s1_hwpt->hwpt_id, errp)) {
+        iommufd_backend_free_id(idev->iommufd, s1_hwpt->hwpt_id);
+        return false;
+    }
+    accel_dev->s1_hwpt = s1_hwpt;
+    return true;
+}
+
+bool
+smmuv3_accel_install_nested_ste(SMMUv3State *s, SMMUDevice *sdev, int sid,
+                                Error **errp)
+{
+    SMMUv3AccelDevice *accel_dev;
+    SMMUEventInfo event = {.type = SMMU_EVT_NONE, .sid = sid,
+                           .inval_ste_allowed = true};
+    struct iommu_hwpt_arm_smmuv3 nested_data = {};
+    uint64_t ste_0, ste_1;
+    uint32_t config;
+    STE ste;
+    int ret;
+
+    if (!s->accel) {
+        return true;
+    }
+
+    accel_dev = container_of(sdev, SMMUv3AccelDevice, sdev);
+    if (!accel_dev->viommu) {
+        return true;
+    }
+
+    ret = smmu_find_ste(sdev->smmu, sid, &ste, &event);
+    if (ret) {
+        error_setg(errp, "Failed to find STE for Device 0x%x", sid);
+        return true;
+    }
+
+    config = STE_CONFIG(&ste);
+    if (!STE_VALID(&ste) || !STE_CFG_S1_ENABLED(config)) {
+        if (!smmuv3_accel_dev_uninstall_nested_ste(accel_dev,
+                                                   STE_CFG_ABORT(config),
+                                                   errp)) {
+            return false;
+        }
+        smmuv3_flush_config(sdev);
+        return true;
+    }
+
+    ste_0 = (uint64_t)ste.word[0] | (uint64_t)ste.word[1] << 32;
+    ste_1 = (uint64_t)ste.word[2] | (uint64_t)ste.word[3] << 32;
+    nested_data.ste[0] = cpu_to_le64(ste_0 & STE0_MASK);
+    nested_data.ste[1] = cpu_to_le64(ste_1 & STE1_MASK);
+
+    if (!smmuv3_accel_dev_install_nested_ste(accel_dev,
+                                             IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                             sizeof(nested_data),
+                                             &nested_data, errp)) {
+        error_setg(errp, "Unable to install nested STE=%16LX:%16LX, sid=0x%x,"
+                   "ret=%d", nested_data.ste[1], nested_data.ste[0], sid, ret);
+        return false;
+    }
+    trace_smmuv3_accel_install_nested_ste(sid, nested_data.ste[1],
+                                          nested_data.ste[0]);
+    return true;
+}
+
+bool smmuv3_accel_install_nested_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+                                           Error **errp)
+{
+    SMMUv3AccelState *s_accel = s->s_accel;
+    SMMUv3AccelDevice *accel_dev;
+
+    if (!s_accel || !s_accel->viommu) {
+        return true;
+    }
+
+    QLIST_FOREACH(accel_dev, &s_accel->viommu->device_list, next) {
+        uint32_t sid = smmu_get_sid(&accel_dev->sdev);
+
+        if (sid >= range->start && sid <= range->end) {
+            if (!smmuv3_accel_install_nested_ste(s, &accel_dev->sdev,
+                                                 sid, errp)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 static SMMUv3AccelDevice *smmuv3_accel_get_dev(SMMUState *bs, SMMUPciBus *sbus,
                                                PCIBus *bus, int devfn)
