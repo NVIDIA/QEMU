@@ -8,6 +8,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "trace.h"
 
 #include "hw/arm/smmuv3.h"
 #include "hw/iommu.h"
@@ -16,6 +17,9 @@
 #include "hw/vfio/pci.h"
 
 #include "smmuv3-accel.h"
+
+#define SMMU_STE_VALID      (1ULL << 0)
+#define SMMU_STE_CFG_BYPASS (1ULL << 3)
 
 static SMMUv3AccelDevice *smmuv3_accel_get_dev(SMMUState *bs, SMMUPciBus *sbus,
                                                PCIBus *bus, int devfn)
@@ -33,6 +37,149 @@ static SMMUv3AccelDevice *smmuv3_accel_get_dev(SMMUState *bs, SMMUPciBus *sbus,
     sbus->pbdev[devfn] = sdev;
     smmu_init_sdev(bs, sdev, bus, devfn);
     return accel_dev;
+}
+
+static bool
+smmuv3_accel_dev_alloc_viommu(SMMUv3AccelDevice *accel_dev,
+                              HostIOMMUDeviceIOMMUFD *idev, Error **errp)
+{
+    struct iommu_hwpt_arm_smmuv3 bypass_data = {
+        .ste = { SMMU_STE_CFG_BYPASS | SMMU_STE_VALID, 0x0ULL },
+    };
+    struct iommu_hwpt_arm_smmuv3 abort_data = {
+        .ste = { SMMU_STE_VALID, 0x0ULL },
+    };
+    SMMUDevice *sdev = &accel_dev->sdev;
+    SMMUState *bs = sdev->smmu;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUv3AccelState *s_accel = s->s_accel;
+    uint32_t s2_hwpt_id = idev->hwpt_id;
+    SMMUViommu *viommu;
+    uint32_t viommu_id;
+
+    if (s_accel->viommu) {
+        accel_dev->viommu = s_accel->viommu;
+        return true;
+    }
+
+    if (!iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
+                                      IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
+                                      s2_hwpt_id, &viommu_id, errp)) {
+        return false;
+    }
+
+    viommu = g_new0(SMMUViommu, 1);
+    viommu->core.viommu_id = viommu_id;
+    viommu->core.s2_hwpt_id = s2_hwpt_id;
+    viommu->core.iommufd = idev->iommufd;
+
+    if (!iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid,
+                                    viommu->core.viommu_id, 0,
+                                    IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                    sizeof(abort_data), &abort_data,
+                                    &viommu->abort_hwpt_id, errp)) {
+        goto free_viommu;
+    }
+
+    if (!iommufd_backend_alloc_hwpt(idev->iommufd, idev->devid,
+                                    viommu->core.viommu_id, 0,
+                                    IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                    sizeof(bypass_data), &bypass_data,
+                                    &viommu->bypass_hwpt_id, errp)) {
+        goto free_abort_hwpt;
+    }
+
+    viommu->iommufd = idev->iommufd;
+
+    s_accel->viommu = viommu;
+    accel_dev->viommu = viommu;
+    return true;
+
+free_abort_hwpt:
+    iommufd_backend_free_id(idev->iommufd, viommu->abort_hwpt_id);
+free_viommu:
+    iommufd_backend_free_id(idev->iommufd, viommu->core.viommu_id);
+    g_free(viommu);
+    return false;
+}
+
+static bool smmuv3_accel_set_iommu_device(PCIBus *bus, void *opaque, int devfn,
+                                          HostIOMMUDevice *hiod, Error **errp)
+{
+    HostIOMMUDeviceIOMMUFD *idev = HOST_IOMMU_DEVICE_IOMMUFD(hiod);
+    SMMUState *bs = opaque;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUv3AccelState *s_accel = s->s_accel;
+    SMMUPciBus *sbus = smmu_get_sbus(bs, bus);
+    SMMUv3AccelDevice *accel_dev = smmuv3_accel_get_dev(bs, sbus, bus, devfn);
+    SMMUDevice *sdev = &accel_dev->sdev;
+    uint16_t sid = smmu_get_sid(sdev);
+
+    if (!idev) {
+        return true;
+    }
+
+    if (accel_dev->idev) {
+        if (accel_dev->idev != idev) {
+            error_setg(errp, "Device 0x%x already has an associated IOMMU dev",
+                       sid);
+            return false;
+        }
+        return true;
+    }
+
+    if (!smmuv3_accel_dev_alloc_viommu(accel_dev, idev, errp)) {
+        error_setg(errp, "Device 0x%x: Unable to alloc viommu", sid);
+        return false;
+    }
+
+    accel_dev->idev = idev;
+    QLIST_INSERT_HEAD(&s_accel->viommu->device_list, accel_dev, next);
+    trace_smmuv3_accel_set_iommu_device(devfn, sid);
+    return true;
+}
+
+static void smmuv3_accel_unset_iommu_device(PCIBus *bus, void *opaque,
+                                            int devfn)
+{
+    SMMUState *bs = opaque;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+    SMMUPciBus *sbus = g_hash_table_lookup(bs->smmu_pcibus_by_busptr, bus);
+    SMMUv3AccelDevice *accel_dev;
+    SMMUViommu *viommu;
+    SMMUDevice *sdev;
+    uint16_t sid;
+
+    if (!sbus) {
+        return;
+    }
+
+    sdev = sbus->pbdev[devfn];
+    if (!sdev) {
+        return;
+    }
+
+    sid = smmu_get_sid(sdev);
+    accel_dev = container_of(sdev, SMMUv3AccelDevice, sdev);
+    if (!host_iommu_device_iommufd_attach_hwpt(accel_dev->idev,
+                                               accel_dev->idev->hwpt_id,
+                                               NULL)) {
+        error_report("Unable to attach dev 0x%x to the default HW pagetable",
+                     sid);
+    }
+
+    accel_dev->idev = NULL;
+    QLIST_REMOVE(accel_dev, next);
+    trace_smmuv3_accel_unset_iommu_device(devfn, sid);
+
+    viommu = s->s_accel->viommu;
+    if (QLIST_EMPTY(&viommu->device_list)) {
+        iommufd_backend_free_id(viommu->iommufd, viommu->bypass_hwpt_id);
+        iommufd_backend_free_id(viommu->iommufd, viommu->abort_hwpt_id);
+        iommufd_backend_free_id(viommu->iommufd, viommu->core.viommu_id);
+        g_free(viommu);
+        s->s_accel->viommu = NULL;
+    }
 }
 
 static bool smmuv3_accel_pdev_allowed(PCIDevice *pdev, bool *vfio_pci)
@@ -121,6 +268,8 @@ static uint64_t smmuv3_accel_get_viommu_flags(void *opaque)
 static const PCIIOMMUOps smmuv3_accel_ops = {
     .get_address_space = smmuv3_accel_find_add_as,
     .get_viommu_flags = smmuv3_accel_get_viommu_flags,
+    .set_iommu_device = smmuv3_accel_set_iommu_device,
+    .unset_iommu_device = smmuv3_accel_unset_iommu_device,
 };
 
 void smmuv3_accel_init(SMMUv3State *s)
@@ -128,4 +277,5 @@ void smmuv3_accel_init(SMMUv3State *s)
     SMMUState *bs = ARM_SMMU(s);
 
     bs->iommu_ops = &smmuv3_accel_ops;
+    s->s_accel = g_new0(SMMUv3AccelState, 1);
 }
