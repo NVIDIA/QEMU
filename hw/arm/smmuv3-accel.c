@@ -387,6 +387,26 @@ static void smmuv3_accel_unset_iommu_device(PCIBus *bus, void *opaque,
     }
 }
 
+static AddressSpace *smmuv3_accel_find_msi_as(PCIBus *bus, void *opaque,
+                                              int devfn)
+{
+    SMMUState *bs = opaque;
+    SMMUPciBus *sbus = smmu_get_sbus(bs, bus);
+    SMMUv3AccelDevice *accel_dev = smmuv3_accel_get_dev(bs, sbus, bus, devfn);
+    SMMUDevice *sdev = &accel_dev->sdev;
+
+    /*
+     * If the assigned vfio-pci dev has S1 translation enabled by
+     * Guest, return IOMMU address space for MSI translation.
+     * Otherwise, return system address space.
+     */
+    if (accel_dev->s1_hwpt) {
+        return &sdev->as;
+    } else {
+        return &address_space_memory;
+    }
+}
+
 static bool smmuv3_accel_pdev_allowed(PCIDevice *pdev, bool *vfio_pci)
 {
 
@@ -475,6 +495,7 @@ static const PCIIOMMUOps smmuv3_accel_ops = {
     .get_viommu_flags = smmuv3_accel_get_viommu_flags,
     .set_iommu_device = smmuv3_accel_set_iommu_device,
     .unset_iommu_device = smmuv3_accel_unset_iommu_device,
+    .get_msi_address_space = smmuv3_accel_find_msi_as,
 };
 
 void smmuv3_accel_init(SMMUv3State *s)
