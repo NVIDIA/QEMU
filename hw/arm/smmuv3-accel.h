@@ -46,6 +46,8 @@ bool smmuv3_accel_install_nested_ste(SMMUv3State *s, SMMUDevice *sdev, int sid,
                                      Error **errp);
 bool smmuv3_accel_install_nested_ste_range(SMMUv3State *s, SMMUSIDRange *range,
                                            Error **errp);
+bool smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
+                                Error **errp);
 #else
 static inline void smmuv3_accel_init(SMMUv3State *s)
 {
@@ -59,6 +61,12 @@ smmuv3_accel_install_nested_ste(SMMUv3State *s, SMMUDevice *sdev, int sid,
 static inline bool
 smmuv3_accel_install_nested_ste_range(SMMUv3State *s, SMMUSIDRange *range,
                                       Error **errp)
+{
+    return true;
+}
+static inline bool
+smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
+                           Error **errp)
 {
     return true;
 }
