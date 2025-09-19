@@ -1913,8 +1913,6 @@ static void smmu_reset_exit(Object *obj, ResetType type)
     if (c->parent_phases.exit) {
         c->parent_phases.exit(obj, type);
     }
-
-    smmuv3_init_regs(s);
 }
 
 static void smmu_realize(DeviceState *d, Error **errp)
@@ -1945,6 +1943,8 @@ static void smmu_realize(DeviceState *d, Error **errp)
     sysbus_init_mmio(dev, &sys->iomem);
 
     smmu_init_irq(s, dev);
+
+    smmuv3_init_regs(s);
 }
 
 static const VMStateDescription vmstate_smmuv3_queue = {

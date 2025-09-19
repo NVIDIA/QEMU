@@ -40,6 +40,96 @@
                        STE1_S1CIR | STE1_S1DSS)
 
 static bool
+smmuv3_accel_check_hw_compatible(SMMUv3State *s,
+                                 struct iommu_hw_info_arm_smmuv3 *info,
+                                 Error **errp)
+{
+    uint32_t val;
+
+    /*
+     * QEMU SMMUv3 supports both linear and 2-level stream tables.
+     */
+    val = FIELD_EX32(info->idr[0], IDR0, STLEVEL);
+    if (val != FIELD_EX32(s->idr[0], IDR0, STLEVEL)) {
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, STLEVEL, val);
+        error_setg(errp, "Host SUMMUv3 differs in Stream Table format");
+        return false;
+    }
+
+    /* QEMU SMMUv3 supports only little-endian translation table walks */
+    val = FIELD_EX32(info->idr[0], IDR0, TTENDIAN);
+    if (!val && val > FIELD_EX32(s->idr[0], IDR0, TTENDIAN)) {
+        error_setg(errp, "Host SUMMUv3 doesn't support Little-endian "
+                   "translation table");
+        return false;
+    }
+
+    /* QEMU SMMUv3 supports only AArch64 translation table format */
+    val = FIELD_EX32(info->idr[0], IDR0, TTF);
+    if (val < FIELD_EX32(s->idr[0], IDR0, TTF)) {
+        error_setg(errp, "Host SUMMUv3 deosn't support Arch64 Translation "
+                   "table format");
+        return false;
+    }
+
+    /* QEMU SMMUv3 supports SIDSIZE 16 */
+    val = FIELD_EX32(info->idr[1], IDR1, SIDSIZE);
+    if (val < FIELD_EX32(s->idr[1], IDR1, SIDSIZE)) {
+        error_setg(errp, "Host SUMMUv3 SIDSIZE not compatible");
+        return false;
+    }
+
+    /* QEMU SMMUv3 supports Range Invalidation by default */
+    val = FIELD_EX32(info->idr[3], IDR3, RIL);
+    if (val != FIELD_EX32(s->idr[3], IDR3, RIL)) {
+        error_setg(errp, "Host SUMMUv3 deosn't support Range Invalidation");
+        return false;
+    }
+
+    val = FIELD_EX32(info->idr[5], IDR5, GRAN4K);
+    if (val != FIELD_EX32(s->idr[5], IDR5, GRAN4K)) {
+        error_setg(errp, "Host SMMUv3 doesn't support 64K translation granule");
+        return false;
+    }
+    val = FIELD_EX32(info->idr[5], IDR5, GRAN16K);
+    if (val != FIELD_EX32(s->idr[5], IDR5, GRAN16K)) {
+        error_setg(errp, "Host SMMUv3 doesn't support 16K translation granule");
+        return false;
+    }
+    val = FIELD_EX32(info->idr[5], IDR5, GRAN64K);
+    if (val != FIELD_EX32(s->idr[5], IDR5, GRAN64K)) {
+        error_setg(errp, "Host SMMUv3 doesn't support 16K translation granule");
+        return false;
+    }
+    return true;
+}
+
+static bool
+smmuv3_accel_hw_compatible(SMMUv3State *s, HostIOMMUDeviceIOMMUFD *idev,
+                           Error **errp)
+{
+    struct iommu_hw_info_arm_smmuv3 info;
+    uint32_t data_type;
+    uint64_t caps;
+
+    if (!iommufd_backend_get_device_info(idev->iommufd, idev->devid, &data_type,
+                                         &info, sizeof(info), &caps, errp)) {
+        return false;
+    }
+
+    if (data_type != IOMMU_HW_INFO_TYPE_ARM_SMMUV3) {
+        error_setg(errp, "Wrong data type (%d) for Host SMMUv3 device info",
+                     data_type);
+        return false;
+    }
+
+    if (!smmuv3_accel_check_hw_compatible(s, &info, errp)) {
+        return false;
+    }
+    return true;
+}
+
+static bool
 smmuv3_accel_alloc_vdev(SMMUv3AccelDevice *accel_dev, int sid, Error **errp)
 {
     SMMUViommu *viommu = accel_dev->viommu;
@@ -361,6 +451,14 @@ static bool smmuv3_accel_set_iommu_device(PCIBus *bus, void *opaque, int devfn,
             return false;
         }
         return true;
+    }
+
+    /*
+     * Check the host SMMUv3 associated with the dev is compatible with the
+     * QEMU SMMUv3 accel.
+     */
+    if (!smmuv3_accel_hw_compatible(s, idev, errp)) {
+        return false;
     }
 
     if (!smmuv3_accel_dev_alloc_viommu(accel_dev, idev, errp)) {
