@@ -3086,6 +3086,10 @@ static void virt_machine_device_plug_cb(HotplugHandler *hotplug_dev,
             }
 
             create_smmuv3_dev_dtb(vms, dev, bus);
+            if (object_property_get_bool(OBJECT(dev), "accel", &error_abort) &&
+                                         !vms->pci_preserve_config) {
+                vms->pci_preserve_config = true;
+            }
         }
     }
 
