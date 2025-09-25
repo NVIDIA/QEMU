@@ -49,6 +49,7 @@ bool smmuv3_accel_install_nested_ste_range(SMMUv3State *s, SMMUSIDRange *range,
 bool smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
                                 Error **errp);
 void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s);
+void smmuv3_accel_idr_override(SMMUv3State *s);
 #else
 static inline void smmuv3_accel_init(SMMUv3State *s)
 {
@@ -72,6 +73,9 @@ smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
     return true;
 }
 static inline void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s)
+{
+}
+static inline void smmuv3_accel_idr_override(SMMUv3State *s)
 {
 }
 #endif

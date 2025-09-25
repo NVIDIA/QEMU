@@ -300,6 +300,8 @@ static void smmuv3_init_regs(SMMUv3State *s)
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, 1);
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN64K, 1);
 
+    smmuv3_accel_idr_override(s);
+
     s->cmdq.base = deposit64(s->cmdq.base, 0, 5, SMMU_CMDQS);
     s->cmdq.prod = 0;
     s->cmdq.cons = 0;
@@ -1925,6 +1927,13 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
         return false;
     }
 #endif
+    if (s->accel) {
+        return true;
+    }
+    if (!s->ril) {
+        error_setg(errp, "ril can only be disabled if accel=on");
+        return false;
+    }
     return true;
 }
 
@@ -2047,6 +2056,8 @@ static const Property smmuv3_properties[] = {
      */
     DEFINE_PROP_STRING("stage", SMMUv3State, stage),
     DEFINE_PROP_BOOL("accel", SMMUv3State, accel, false),
+    /* RIL can be turned off for accel cases */
+    DEFINE_PROP_BOOL("ril", SMMUv3State, ril, true),
 };
 
 static void smmuv3_instance_init(Object *obj)
@@ -2074,6 +2085,8 @@ static void smmuv3_class_init(ObjectClass *klass, const void *data)
                                           "Enable SMMUv3 accelerator support."
                                           "Allows host SMMUv3 to be configured "
                                           "in nested mode for vfio-pci dev assignment");
+    object_class_property_set_description(klass, "ril",
+        "Enable/disable range invalidation support");
 }
 
 static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,
