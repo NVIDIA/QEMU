@@ -644,6 +644,10 @@ void smmuv3_accel_idr_override(SMMUv3State *s)
     if (!s->ril) {
         s->idr[3] = FIELD_DP32(s->idr[3], IDR3, RIL, 0);
     }
+    /* QEMU SMMUv3 has no ATS. Update IDR0 if user has enabled it */
+    if (s->ats) {
+        s->idr[0] = FIELD_DP32(s->idr[0], IDR0, ATS, 1); /* ATS */
+    }
 }
 
 /*

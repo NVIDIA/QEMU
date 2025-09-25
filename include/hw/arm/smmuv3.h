@@ -69,6 +69,7 @@ struct SMMUv3State {
     struct SMMUv3AccelState  *s_accel;
     Error  *migration_blocker;
     bool ril;
+    bool ats;
 };
 
 typedef enum {
