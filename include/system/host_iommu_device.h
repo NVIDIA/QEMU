@@ -115,6 +115,18 @@ struct HostIOMMUDeviceClass {
      * @hiod: handle to the host IOMMU device
      */
     uint64_t (*get_page_size_mask)(HostIOMMUDevice *hiod);
+    /**
+     * @get_pasid: Get PASID support information along this
+     *             @hiod Host IOMMU device
+     * Optional callback. If not implemented, PASID not supported
+     *
+     * @hiod: handle to the host IOMMU device
+     *
+     * @out_hw_caps: Output the generic iommu capability info which includes
+     *               device PASID CAP info
+     * Returns the width of PASIDs. Zero means no PASID support
+     */
+     uint8_t (*get_pasid)(HostIOMMUDevice *hiod, uint64_t *out_hw_caps);
 };
 
 /*

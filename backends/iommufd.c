@@ -523,6 +523,14 @@ bool host_iommu_device_iommufd_detach_hwpt(HostIOMMUDeviceIOMMUFD *idev,
     return idevc->detach_hwpt(idev, errp);
 }
 
+static uint8_t hiod_iommufd_get_pasid(HostIOMMUDevice *hiod, uint64_t *hw_caps)
+{
+    HostIOMMUDeviceCaps *caps = &hiod->caps;
+
+    *hw_caps = caps->hw_caps;
+    return caps->max_pasid_log2;
+}
+
 static int hiod_iommufd_get_cap(HostIOMMUDevice *hiod, int cap, Error **errp)
 {
     HostIOMMUDeviceCaps *caps = &hiod->caps;
@@ -543,6 +551,7 @@ static void hiod_iommufd_class_init(ObjectClass *oc, const void *data)
     HostIOMMUDeviceClass *hioc = HOST_IOMMU_DEVICE_CLASS(oc);
 
     hioc->get_cap = hiod_iommufd_get_cap;
+    hioc->get_pasid = hiod_iommufd_get_pasid;
 };
 
 static const TypeInfo types[] = {
