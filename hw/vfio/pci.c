@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 
 #include "hw/hw.h"
+#include "hw/iommu.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci_bridge.h"
@@ -2469,6 +2470,11 @@ static int vfio_setup_rebar_ecap(VFIOPCIDevice *vdev, uint16_t pos)
 static void vfio_add_ext_cap(VFIOPCIDevice *vdev)
 {
     PCIDevice *pdev = &vdev->pdev;
+    HostIOMMUDevice *hiod = vdev->vbasedev.hiod;
+    HostIOMMUDeviceClass *hiodc = HOST_IOMMU_DEVICE_GET_CLASS(hiod);
+    uint8_t max_pasid_log2 = 0;
+    bool pasid_cap_added = false;
+    uint64_t hw_caps;
     uint32_t header;
     uint16_t cap_id, next, size;
     uint8_t cap_ver;
@@ -2546,10 +2552,35 @@ static void vfio_add_ext_cap(VFIOPCIDevice *vdev)
                 pcie_add_capability(pdev, cap_id, cap_ver, next, size);
             }
             break;
+        case PCI_EXT_CAP_ID_PASID:
+             pasid_cap_added = true;
+             /* fallthrough */
         default:
             pcie_add_capability(pdev, cap_id, cap_ver, next, size);
         }
 
+    }
+
+    /*
+     * If PCI_EXT_CAP_ID_PASID not present, try to get information from the host
+     */
+    if (!pasid_cap_added && hiodc->get_pasid) {
+        max_pasid_log2 = hiodc->get_pasid(hiod, &hw_caps);
+    }
+
+    /*
+     * If supported, adds the PASID capability in the end of the PCIE config
+     * space. TODO: Add option for enabling pasid at a safe offset.
+     */
+    if (max_pasid_log2 && (pci_device_get_viommu_flags(pdev) &
+                           VIOMMU_FLAG_PASID_SUPPORTED)) {
+        bool exec_perm = (hw_caps & IOMMU_HW_CAP_PCI_PASID_EXEC) ? true : false;
+        bool priv_mod = (hw_caps & IOMMU_HW_CAP_PCI_PASID_PRIV) ? true : false;
+
+        pcie_pasid_init(pdev, PCIE_CONFIG_SPACE_SIZE - PCI_EXT_CAP_PASID_SIZEOF,
+                        max_pasid_log2, exec_perm, priv_mod);
+        /* PASID capability is fully emulated by QEMU */
+        memset(vdev->emulated_config_bits + pdev->exp.pasid_cap, 0xff, 8);
     }
 
     /* Cleanup chain head ID if necessary */
