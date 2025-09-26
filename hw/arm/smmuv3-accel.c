@@ -79,6 +79,13 @@ smmuv3_accel_check_hw_compatible(SMMUv3State *s,
         return false;
     }
 
+    /* If user enables PASID support(pasid=on), QEMU sets SSIDSIZE to 16 */
+    val = FIELD_EX32(info->idr[1], IDR1, SSIDSIZE);
+    if (val < FIELD_EX32(s->idr[1], IDR1, SSIDSIZE)) {
+        error_setg(errp, "Host SUMMUv3 SSIDSIZE not compatible");
+        return false;
+    }
+
     /* User can override QEMU SMMUv3 Range Invalidation support */
     val = FIELD_EX32(info->idr[3], IDR3, RIL);
     if (val != FIELD_EX32(s->idr[3], IDR3, RIL)) {
@@ -635,7 +642,14 @@ static uint64_t smmuv3_accel_get_viommu_flags(void *opaque)
      * The real HW nested support should be reported from host SMMUv3 and if
      * it doesn't, the nesting parent allocation will fail anyway in VFIO core.
      */
-    return VIOMMU_FLAG_WANT_NESTING_PARENT;
+    uint64_t flags = VIOMMU_FLAG_WANT_NESTING_PARENT;
+    SMMUState *bs = opaque;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+
+    if (s->pasid) {
+        flags |= VIOMMU_FLAG_PASID_SUPPORTED;
+    }
+    return flags;
 }
 
 static const PCIIOMMUOps smmuv3_accel_ops = {
@@ -663,6 +677,14 @@ void smmuv3_accel_idr_override(SMMUv3State *s)
     /* QEMU SMMUv3 has oas set 44. Update IDR5 if user has it set to 48 bits*/
     if (s->oas == 48) {
         s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, SMMU_IDR5_OAS_48);
+    }
+
+    /*
+     * By default QEMU SMMUv3 has no PASID(SSID) support. Update IDR1 if user
+     * has enabled it.
+     */
+    if (s->pasid) {
+        s->idr[1] = FIELD_DP32(s->idr[1], IDR1, SSIDSIZE, SMMU_IDR1_SSIDSIZE);
     }
 }
 

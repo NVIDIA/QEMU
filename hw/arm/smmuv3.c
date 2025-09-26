@@ -604,7 +604,8 @@ static int decode_ste(SMMUv3State *s, SMMUTransCfg *cfg,
         }
     }
 
-    if (STE_S1CDMAX(ste) != 0) {
+    /* If pasid enabled, we report SSIDSIZE = 16 */
+    if (!FIELD_EX32(s->idr[1], IDR1, SSIDSIZE) && STE_S1CDMAX(ste) != 0) {
         qemu_log_mask(LOG_UNIMP,
                       "SMMUv3 does not support multiple context descriptors yet\n");
         goto bad_ste;
@@ -1962,6 +1963,10 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
         error_setg(errp, "oas can only be set to 44 bits if accel=off");
         return false;
     }
+    if (s->pasid) {
+        error_setg(errp, "pasid can only be enabled if accel=on");
+        return false;
+    }
     return true;
 }
 
@@ -2088,6 +2093,7 @@ static const Property smmuv3_properties[] = {
     DEFINE_PROP_BOOL("ril", SMMUv3State, ril, true),
     DEFINE_PROP_BOOL("ats", SMMUv3State, ats, false),
     DEFINE_PROP_UINT8("oas", SMMUv3State, oas, 44),
+    DEFINE_PROP_BOOL("pasid", SMMUv3State, pasid, false),
 };
 
 static void smmuv3_instance_init(Object *obj)
