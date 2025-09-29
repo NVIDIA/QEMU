@@ -294,7 +294,8 @@ static void smmuv3_init_regs(SMMUv3State *s)
     s->idr[3] = FIELD_DP32(s->idr[3], IDR3, RIL, 1);
     s->idr[3] = FIELD_DP32(s->idr[3], IDR3, BBML, 2);
 
-    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, SMMU_IDR5_OAS); /* 44 bits */
+    /* OAS: 44 bits */
+    s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, SMMU_IDR5_OAS_44);
     /* 4K, 16K and 64K granule support */
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN4K, 1);
     s->idr[5] = FIELD_DP32(s->idr[5], IDR5, GRAN16K, 1);
@@ -1943,6 +1944,10 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
     }
 #endif
     if (s->accel) {
+        if (s->oas != 44 && s->oas != 48) {
+            error_setg(errp, "oas can only be set to 44 or 48 bits");
+            return false;
+        }
         return true;
     }
     if (!s->ril) {
@@ -1951,6 +1956,10 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
     }
     if (s->ats) {
         error_setg(errp, "ats can only be enabled if accel=on");
+        return false;
+    }
+    if (s->oas != 44) {
+        error_setg(errp, "oas can only be set to 44 bits if accel=off");
         return false;
     }
     return true;
@@ -2078,6 +2087,7 @@ static const Property smmuv3_properties[] = {
     /* RIL can be turned off for accel cases */
     DEFINE_PROP_BOOL("ril", SMMUv3State, ril, true),
     DEFINE_PROP_BOOL("ats", SMMUv3State, ats, false),
+    DEFINE_PROP_UINT8("oas", SMMUv3State, oas, 44),
 };
 
 static void smmuv3_instance_init(Object *obj)
@@ -2110,6 +2120,9 @@ static void smmuv3_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, "ats",
         "Enable/disable ATS support. Please ensure host platform has ATS "
         "support before enabling this");
+    object_class_property_set_description(klass, "oas",
+        "Specify Output Address Size. Supported values are 44 or 48 bits "
+        "Defaults to 44 bits");
 }
 
 static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,

@@ -86,6 +86,17 @@ smmuv3_accel_check_hw_compatible(SMMUv3State *s,
         return false;
     }
 
+    /*
+     * ToDo: OAS is not something Linux kernel doc says meaningful for user.
+     * But looks like OAS needs to be compatibe for accelerator support. Please
+     * check.
+     */
+    val = FIELD_EX32(info->idr[5], IDR5, OAS);
+    if (val < FIELD_EX32(s->idr[5], IDR5, OAS)) {
+        error_setg(errp, "Host SUMMUv3 OAS not compatible");
+        return false;
+    }
+
     val = FIELD_EX32(info->idr[5], IDR5, GRAN4K);
     if (val != FIELD_EX32(s->idr[5], IDR5, GRAN4K)) {
         error_setg(errp, "Host SMMUv3 doesn't support 64K translation granule");
@@ -647,6 +658,10 @@ void smmuv3_accel_idr_override(SMMUv3State *s)
     /* QEMU SMMUv3 has no ATS. Update IDR0 if user has enabled it */
     if (s->ats) {
         s->idr[0] = FIELD_DP32(s->idr[0], IDR0, ATS, 1); /* ATS */
+    }
+    /* QEMU SMMUv3 has oas set 44. Update IDR5 if user has it set to 48 bits*/
+    if (s->oas == 48) {
+        s->idr[5] = FIELD_DP32(s->idr[5], IDR5, OAS, SMMU_IDR5_OAS_48);
     }
 }
 
