@@ -634,6 +634,35 @@ static const PCIIOMMUOps smmuv3_accel_ops = {
     .get_msi_address_space = smmuv3_accel_find_msi_as,
 };
 
+/*
+ * If the guest reboots and devices are configured for S1+S2, Stage1 must
+ * be switched to bypass. Otherwise, QEMU/UEFI may fail when accessing a
+ * device, e.g. when UEFI retrieves boot partition information from an
+ * assigned vfio-pci NVMe device.
+ */
+void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s)
+{
+    SMMUv3AccelDevice *accel_dev;
+    SMMUViommu *viommu;
+
+    if (!s->accel || !s->s_accel->viommu) {
+        return;
+    }
+
+    viommu = s->s_accel->viommu;
+    QLIST_FOREACH(accel_dev, &viommu->device_list, next) {
+        if (!accel_dev->vdev) {
+            continue;
+        }
+        if (!host_iommu_device_iommufd_attach_hwpt(accel_dev->idev,
+                                                   viommu->bypass_hwpt_id,
+                                                   NULL)) {
+            error_report("Failed to install bypass hwpt id %u for dev id %u",
+                          viommu->bypass_hwpt_id, accel_dev->idev->devid);
+        }
+    }
+}
+
 void smmuv3_accel_init(SMMUv3State *s)
 {
     SMMUState *bs = ARM_SMMU(s);

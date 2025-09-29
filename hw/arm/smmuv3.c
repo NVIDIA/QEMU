@@ -1913,6 +1913,7 @@ static void smmu_reset_exit(Object *obj, ResetType type)
     if (c->parent_phases.exit) {
         c->parent_phases.exit(obj, type);
     }
+    smmuv3_accel_attach_bypass_hwpt(s);
 }
 
 static void smmu_realize(DeviceState *d, Error **errp)
