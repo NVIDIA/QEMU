@@ -1831,6 +1831,20 @@ struct vfio_iommu_spapr_tce_remove {
 };
 #define VFIO_IOMMU_SPAPR_TCE_REMOVE	_IO(VFIO_TYPE, VFIO_BASE + 20)
 
+/**
+ * VFIO_DEVICE_SET_DEV_INFO - _IOW(VFIO_TYPE, VFIO_BASE + 22, struct vfio_dev_info)
+ *
+ * Sets information related to the VM that needs to be passed to the hypervisor
+ * for establishing mapping between the hardware and the identifiers used by the
+ * guest.
+ */
+struct vfio_dev_info {
+	__u32 argsz;
+	__u32 reserved;
+	__u64 dev_num;
+};
+#define VFIO_DEVICE_SET_DEV_INFO	_IO(VFIO_TYPE, VFIO_BASE + 22)
+
 /* ***************************************************************** */
 
 #endif /* VFIO_H */
