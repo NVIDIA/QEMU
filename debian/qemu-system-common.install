@@ -11,11 +11,13 @@ usr/share/doc/qemu/system usr/share/doc/qemu-system-common
 
 # linux-specific
 usr/lib/qemu/qemu-bridge-helper
-usr/lib/qemu/virtfs-proxy-helper
-usr/share/man/man1/virtfs-proxy-helper.1
+# virtfs-proxy-helper removed in QEMU 9.0+ (replaced by vhost-user-fs)
+# usr/lib/qemu/virtfs-proxy-helper
+# usr/share/man/man1/virtfs-proxy-helper.1
 
 # common modules. Other gui modules are in qemu-system-gui
-usr/lib/${DEB_HOST_MULTIARCH}/qemu/accel-tcg-*.so
+# accel-tcg-*.so modules no longer built as separate .so files in QEMU 10.1+
+# usr/lib/${DEB_HOST_MULTIARCH}/qemu/accel-tcg-*.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-alsa.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-oss.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/chardev-baum.so
@@ -26,5 +28,6 @@ usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-host.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-redirect.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-smartcard.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-s390x-virtio-gpu-ccw.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-uefi-vars.so
 usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-curses.so
 debian/qemu-kvm-init /usr/share/qemu/init
