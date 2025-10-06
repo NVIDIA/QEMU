@@ -1,0 +1,106 @@
+qemu (1:8.0+dfsg-1) experimental; urgency=medium
+
+   Qemu upstream dropped support of the C-language virtiofsd daemon
+   implementation in version 8.0, so this package does not ship
+   virtiofsd anymore.  A rust-language implementation is available
+   in a separate virtiofsd package.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 18 Apr 2023 21:26:14 +0300
+
+qemu (1:7.0+dfsg-7) unstable; urgency=medium
+
+  Starting with this version of qemu-system-x86 on x86 architecture, xen
+  support is moved out to a separate package named qemu-system-xen.  Xen
+  release since 4.16.1-1 already uses qemu binary from this package.  In
+  order to support transition from old xen and xen-supporting qemu-system-x86
+  to separate xen build of qemu, the qemu-system-i386 binary is temporarily
+  replaced by a shell wrapper which detects xen usage and if found, redirects
+  the call to xen-enabled qemu binary if found (with a warning), or suggests
+  to install qemu-system-xen package.  If you used qemu-system-x86 (or
+  qemu-system-x86-xen on Ubuntu) to run xen, please install qemu-system-xen.
+  qemu-system-x86 is not used by xen anymore since 4.16.1-1.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 15 May 2022 15:15:58 +0300
+
+qemu (1:5.0-9) unstable; urgency=medium
+
+  With this version, kvm wrapper (initially from the separate kvm
+  package, which were later renamed to qemu-kvm) is merged back
+  to qemu-system-x86 package, replacing old qemu-kvm package.
+  'kvm' command name turned out to be very handy for manual
+  execution of qemu with kvm enabled, and we now rely on the
+  upstream behavor - when executable name ends with "kvm" it
+  enables the kvm mode by default if available, and falls back
+  to TCG if not.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 17 Jul 2020 12:54:35 +0300
+
+qemu (1:2.12+dfsg-2) unstable; urgency=medium
+
+   Since qemu 2.12, [G]UI display frontends can be built as modules.
+   Debian creates new package, qemu-system-gui, which currently
+   includes GTK3 support. This also switches display from SDL to GTK.
+   Qemu-system-* packages recommends installing qemu-system-gui, so
+   by default on upgrade you will have new package installed, and
+   local GUI will continue to work. However, if you choose to not
+   install recommended packages, you might consider installing
+   qemu-system-gui package separately, if you need local GUI support
+   as well. Without this package, qemu-system-* becomes "headless",
+   and can be used on servers to reduce amount of dependencies -
+   this way, no X11 stuff is needed by qemu-system anymore.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 27 Apr 2018 09:18:32 +0300
+
+qemu (1:2.2+dfsg-6exp) unstable; urgency=medium
+
+   Since Debian release 2.2+dfsg-6exp, a new package named qemu-block-extra
+   has been created and some less frequently used block backends has been
+   split out of main qemu-system binaries and from qemu-img binary to
+   this new package.  The backends which has been split are:
+     curl
+     iscsi
+     rbd (ceph/rados)
+     ssh
+   If you use any of these, please install qemu-block-extra package in
+   addition to qemu-system-* or qemu-utils package, because without it
+   these block backends won't work anymore.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 27 Apr 2015 09:29:55 +0300
+
+qemu (2.0.0+dfsg-1) unstable; urgency=low
+
+   qemu-system-* packages does not provide /usr/bin/qemu alternative
+   anymore, and all various alternatives will be unregistered at new
+   individual qemu-system packages install.  This is because different
+   architectures are not really alternatives, and never has been.
+   Historically, qemu emulated just one architecture, so the name "qemu"
+   was used for the binary.  However when more architectures were added,
+   the old name "qemu" was used as an alternative, pointing to one of
+   the emulators.  Upstream does not use the name "qemu" for binaries
+   for a long time.  If you have scripts using the old name "qemu"
+   please update them to use the right qemu-system-* binary.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 11 Apr 2014 19:57:22 +0400
+
+qemu (1.7.0+dfsg-2) unstable; urgency=low
+
+  Since version 1.7.0+dfsg-2, qemu-system-x86 switched from vgabios for
+  plex/bochs project to implementation of vgabios provided by seabios.
+  The latter is written almost entirely in C language so it is much easier
+  to debugu/develop, but it lacks some 16bit protected mode functions which
+  are present in vgabios.  This means that it is possible that, for eaxample,
+  some protected-mode games written for MS-DOS may not work since this
+  release.
+
+  This also means that vgabios package isn't used by qemu anymore, and might
+  be removed from the system if there are no other users of it left.
+
+
+  /usr/bin/kvm shell wrapper has been moved back to qemu-kvm package (it was
+  moved to qemu-system-x86 in version 1.3.0+dfsg-2exp).  Please note that we
+  do not re-install qemu-kvm package if it has been removed as obsolete, so
+  if you need /usr/bin/kvm wrapper please install qemu-kvm package again.
+  This change allows qemu-system-x86 package to co-exist with the old qemu-kvm
+  binary (not shell-wrapper) package from wheezy.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 28 Nov 2013 18:40:56 +0400

@@ -1,0 +1,5 @@
+# firmware files are arch-dependent binaries and can be statically linked
+qemu-system-data: arch-dependent-file-in-usr-share *usr/share/qemu/*
+qemu-system-data: arch-independent-package-contains-binary-or-object *usr/share/qemu/*
+qemu-system-data: statically-linked-binary *usr/share/qemu/*
+qemu-system-data: shared-library-lacks-prerequisites *usr/share/qemu/s390-*

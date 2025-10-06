@@ -1,0 +1,28 @@
+Historically, there were different naming in use for the
+same architectures within different groups/projects.  For
+example, amd64 architecture (Debian name) is also known as
+x86_64; arm64 and aarch64; and so on.  Qemu used one way
+to name the binaries, debian used another, some architectures
+are named the same way, while for other architectures there's
+a difference.
+
+Starting with debian qemu-user-static package version 8.0, we
+provide debian-compatible naming scheme for qemu-$arch-static
+binaries, to be used as qemu-${DEB_HOST_ARCH}-static.  For
+example, qemu-armel-static is a symlink for qemu-arm-static.
+
+In particular, the following extra names are provided:
+
+  amd64 => x86_64
+  arm64 => aarch64
+  armhf => arm
+  armel => arm
+  loong64 => loongarch64
+  powerpc => ppc
+  ppc64el => ppc64
+
+The other names do match between qemu and debian.
+
+There's another name which is also provided but which is
+neither in debian nor in qemu: it is ppc64le, which is
+the name used for this architecture in the linux kernel.

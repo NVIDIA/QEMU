@@ -1,0 +1,76 @@
+From: Harsh Prateek Bora <harshpb@linux.ibm.com>
+Date: Wed, 24 Jan 2024 10:30:55 +1000
+Subject: ppc/spapr: Initialize max_cpus limit to SPAPR_IRQ_NR_IPIS.
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Initialize the machine specific max_cpus limit as per the maximum range
+of CPU IPIs available. Keeping between 4096 to 8192 will throw IRQ not
+free error due to XIVE/XICS limitation and keeping beyond 8192 will hit
+assert in tcg_region_init or spapr_xive_claim_irq.
+
+Logs:
+
+Without patch fix:
+
+[root@host build]# qemu-system-ppc64 -accel tcg -smp 10,maxcpus=4097
+qemu-system-ppc64: IRQ 4096 is not free
+[root@host build]#
+
+On LPAR:
+[root@host build]# qemu-system-ppc64 -accel tcg -smp 10,maxcpus=8193
+**
+ERROR:../tcg/region.c:774:tcg_region_init: assertion failed:
+(region_size >= 2 * page_size)
+Bail out! ERROR:../tcg/region.c:774:tcg_region_init: assertion failed:
+(region_size >= 2 * page_size)
+Aborted (core dumped)
+[root@host build]#
+
+On x86:
+[root@host build]# qemu-system-ppc64 -accel tcg -smp 10,maxcpus=8193
+qemu-system-ppc64: ../hw/intc/spapr_xive.c:596: spapr_xive_claim_irq:
+Assertion `lisn < xive->nr_irqs' failed.
+Aborted (core dumped)
+[root@host build]#
+
+With patch fix:
+[root@host build]# qemu-system-ppc64 -accel tcg -smp 10,maxcpus=4097
+qemu-system-ppc64: Invalid SMP CPUs 4097. The max CPUs supported by
+machine 'pseries-8.2' is 4096
+[root@host build]#
+
+Reported-by: Kowshik Jois <kowsjois@linux.ibm.com>
+Tested-by: Kowshik Jois <kowsjois@linux.ibm.com>
+Reviewed-by: Cédric Le Goater <clg@kaod.org>
+Signed-off-by: Harsh Prateek Bora <harshpb@linux.ibm.com>
+Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+
+Origin: upstream https://gitlab.com/qemu-project/qemu/-/commit/c4f91d7b7be76c47015521ab0109c6e998a369b0
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/qemu/+bug/2055003
+---
+ hw/ppc/spapr.c | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/hw/ppc/spapr.c b/hw/ppc/spapr.c
+index d274109..2e56ee5 100644
+--- a/hw/ppc/spapr.c
++++ b/hw/ppc/spapr.c
+@@ -4647,13 +4647,10 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
+     mc->block_default_type = IF_SCSI;
+ 
+     /*
+-     * Setting max_cpus to INT32_MAX. Both KVM and TCG max_cpus values
+-     * should be limited by the host capability instead of hardcoded.
+-     * max_cpus for KVM guests will be checked in kvm_init(), and TCG
+-     * guests are welcome to have as many CPUs as the host are capable
+-     * of emulate.
++     * While KVM determines max cpus in kvm_init() using kvm_max_vcpus(),
++     * In TCG the limit is restricted by the range of CPU IPIs available.
+      */
+-    mc->max_cpus = INT32_MAX;
++    mc->max_cpus = SPAPR_IRQ_NR_IPIS;
+ 
+     mc->no_parallel = 1;
+     mc->default_boot_order = "";

@@ -1,0 +1,790 @@
+#!/usr/bin/make -f
+SHELL = /bin/sh -e
+
+# stop python from generating .pyc caches
+export PYTHONDONTWRITEBYTECODE=1
+
+# in order to keep output non-intermixed together, disable parallel building
+# of different targets in this d/rules but allow running parallel submakes
+.NOTPARALLEL:
+
+ifeq ($(shell dpkg-vendor --derives-from Ubuntu && echo yes),yes)
+VENDOR := UBUNTU
+DEB_BUILD_PARALLEL = yes
+else
+VENDOR := DEBIAN
+endif
+
+# get DEB_VERSION
+include /usr/share/dpkg/pkg-info.mk
+
+ifeq ($(and ${DEB_HOST_MULTIARCH},${DEB_HOST_ARCH}),)
+# Fast version of dpkg/architecture.mk defining all vars in one go
+   $(foreach d, $(shell dpkg-architecture | sed 's/=/?=/'), $(eval export $d))
+endif
+
+# we build in a sub-subdir so strip that from file paths too
+export DEB_CFLAGS_MAINT_APPEND = -ffile-prefix-map=../../=
+
+# Disable LTO on non-amd64 builds, see:
+# https://bugs.launchpad.net/ubuntu/+source/qemu/+bug/1921664
+# https://issues.redhat.com/browse/RHEL-7385
+ifneq ($(DEB_HOST_ARCH),amd64)
+  export DEB_BUILD_MAINT_OPTIONS += optimize=-lto
+endif
+
+# get CFLAGS LDFLAGS etc (should come after DEB_*MAINT*)
+include /usr/share/dpkg/buildflags.mk
+
+# Host architectures we produce packages for.
+# when changing this list, check d/control-in too, if any changes
+# needs to be done for build deps and --enable options.
+system-arch-linux = \
+	amd64 arm arm64 armel armhf i386 mips mipsel mips64 mips64el \
+	powerpc powerpcspe ppc64 ppc64el riscv64 s390x sparc sparc64 x32
+system-arch = ${system-arch-linux}
+user-arch = \
+	amd64 arm arm64 armel armhf i386 mips mipsel mips64 mips64el \
+	ppc64 ppc64el riscv64 s390x sparc sparc64 x32
+utils-arch = $(sort ${system-arch} ${user-arch} ia64 hppa m68k sh4 \
+	kfreebsd-amd64 kfreebsd-i386)
+# subset of system-arch
+spice-arch = amd64 i386 arm64 armel armhf mips64el mipsel ppc64el x32
+
+# DEB_BUILD_OPTIONS=parallel=N
+MAKEFLAGS += $(subst parallel=,-j,$(filter parallel=%,${DEB_BUILD_OPTIONS}))
+
+# verbose build
+V = $(if $(filter terse, ${DEB_BUILD_OPTIONS}),,1)
+
+NINJA = ninja $(if $V,-v) $(or $(filter -j%,${MAKEFLAGS}),-j1)
+
+# list of packages we're supposed to build
+BUILD_PACKAGES := $(shell dh_listpackages)
+
+enable-system = $(if $(filter qemu-system,${BUILD_PACKAGES}),y)
+enable-user = $(if $(filter qemu-user,${BUILD_PACKAGES}),y)
+enable-user-static = $(if $(filter qemu-user-static,${BUILD_PACKAGES}),y)
+
+QEMU_XEN = /usr/libexec/xen-qemu-system-i386
+PKGVERSION = Debian ${DEB_VERSION}
+SAVEMODDIR = /run/qemu/$(shell echo -n "${PKGVERSION}" | tr --complement '[:alnum:]+-.~' '_')
+# New Ubuntu package qemu-block-supplemental to hold modules we want in Universe
+# glusterfs is in universe, see LP: #2045063
+# This variable specifies a space-separated list of module filenames
+# If altering this list, please also update the package description in d/control*
+BLOCK_SUPPLEMENTAL_MODULES = block-gluster.so
+sysdataidir = debian/qemu-system-data/usr/share/qemu
+libdir = /usr/lib/${DEB_HOST_MULTIARCH}
+FIRMWAREPATH = /usr/share/qemu:/usr/share/seabios:/usr/lib/ipxe/qemu
+
+ALPHAEV67_CROSSPFX = alpha-linux-gnu-
+PPC_CROSSPFX = powerpc-linux-gnu-
+PPC64_CROSSPFX = powerpc64-linux-gnu-
+RISCV64_CROSSPFX = riscv64-linux-gnu-
+ARM_CROSSPFX = arm-none-eabi-
+
+extra-cflags = ${CFLAGS} ${CPPFLAGS}
+extra-ldflags = ${LDFLAGS} -Wl,--as-needed
+# we add another set of configure options from debian/control
+common_configure_opts = \
+	--with-pkgversion="$(PKGVERSION)" \
+	--extra-cflags="${extra-cflags}" \
+	--extra-ldflags="${extra-ldflags}" \
+	--prefix=/usr \
+	--sysconfdir=/etc \
+	--libdir=${libdir} \
+	--libexecdir=/usr/lib/qemu \
+	--firmwarepath=${FIRMWAREPATH} \
+	--localstatedir=/var \
+	--disable-install-blobs \
+	--disable-strip \
+	--localstatedir=/var \
+	--disable-download \
+	--disable-relocatable \
+
+# this disables building of qemu-keymap tool (!)
+# qemu-keymap might be helpful for qemu-system -k <lang>
+# but is -k flag useful these days?
+common_configure_opts += --disable-xkbcommon
+
+# pvrdma is an extension/optimisation for vmxnet3 vmware virtual network
+# adapter. This piece of code seems to be buggy and poorly maintained,
+# resulting in numerous security issues which comes unfixed for long time.
+# This device isn't native for qemu.  # Just disable it for now.
+common_configure_opts += --disable-pvrdma
+
+# Cross compiling support
+ifneq ($(DEB_BUILD_GNU_TYPE), $(DEB_HOST_GNU_TYPE))
+common_configure_opts  += --cross-prefix=$(DEB_HOST_GNU_TYPE)-
+endif
+
+comma:=,
+
+# qemu-system (softmmu) targets, in multiple packages
+# For each package:
+#  system-archlist-$pkg - list qemu architectues which should go to this pkg
+#  system-kvmcpus-$pkg  - list of ${DEB_HOST_ARCH_CPU}s where we create
+#                         kvm link for this package
+# For each of ${system-archlist-*}, optional:
+#  system-alias-$qcpu   - aliases for this qemu architecture
+# For each of ${system-kvmcpus-*}, mandatory:
+#  system-kvmlink-$dcpu - where to point kvm link for this ${DEB_HOST_ARCH_CPU}
+
+system-archlist-arm = aarch64 arm
+system-alias-aarch64 = arm64
+system-alias-arm = armel armhf
+system-kvmcpus-arm = arm64 arm
+system-kvmlink-arm64 = aarch64
+system-kvmlink-arm = arm
+
+system-archlist-mips = mips mipsel mips64 mips64el
+
+system-archlist-ppc = ppc ppc64
+system-alias-ppc = powerpc
+system-alias-ppc64 = ppc64le ppc64el
+system-kvmcpus-ppc = ppc64 ppc64el powerpc
+system-kvmlink-ppc64 = ppc64
+system-kvmlink-ppc64el = ppc64
+system-kvmlink-powerpc = ppc
+
+system-archlist-sparc = sparc sparc64
+
+system-s390x = $(if $(filter ${VENDOR},UBUNTU),s390x)
+
+system-archlist-s390x = ${system-s390x}
+system-kvmcpus-s390x = s390x
+system-kvmlink-s390x = s390x
+
+system-archlist-x86 = i386 x86_64
+system-alias-x86_64 = amd64
+system-kvmcpus-x86 = amd64 i386
+system-kvmlink-amd64 = x86_64
+system-kvmlink-i386 = x86_64
+
+system-archlist-misc = alpha avr cris hppa m68k loongarch64 \
+		microblaze microblazeel nios2 or1k riscv32 riscv64 rx sh4 sh4eb \
+		$(if ${system-s390x},,s390x) \
+		tricore xtensa xtensaeb
+system-alias-loongarch64 = loong64
+system-kvmcpus-misc = $(if ${system-s390x},,s390x)
+
+system-packages = arm mips ppc sparc x86 ${system-s390x} misc
+
+# install-system qemu-system-$pkg, ${system-archlist-$pkg}, kvm-link
+# install qemu-arch-list binaries with manpages and aliases into pkg
+# install kvm link to qemu-system-${kvm-link} if it is not empty
+# fills in qemu:Provides and qemu:archlist substvars
+define install-system
+	# installing $1
+	dh_installdirs -p $1 usr/bin usr/share/man/man1
+	mv -t debian/$1/usr/bin/ $(addprefix debian/tmp/usr/bin/qemu-system-,$2)
+$(foreach q,$2,\
+	@echo ".so man1/qemu-system.1" > debian/$1/usr/share/man/man1/qemu-system-$q.1
+    $(foreach a,${system-alias-$q},\
+	dh_link -p $1 usr/bin/qemu-system-$q usr/bin/qemu-system-$a
+	dh_link -p $1 usr/share/man/man1/qemu-system-$q.1 usr/share/man/man1/qemu-system-$a.1
+))
+$(if $3,\
+	dh_link -p $1 usr/bin/$3 usr/bin/kvm
+	dh_link -p $1 usr/share/man/man1/$3.1 usr/share/man/man1/kvm.1
+)
+# note: older make does not understand line-splitting inside $(functions ..)
+	echo 'qemu:Provides=$(if $3,qemu-kvm (=${DEB_VERSION})${comma})\
+	 $(patsubst %,% (=${DEB_VERSION})${comma},$(filter-out $1, $(patsubst %, qemu-system-%, any $2 $(foreach q,$2,${system-alias-$q}))))' \
+	    | tr _ - >> debian/$1.substvars
+# construct list `arch1 arch2 (alias) arch3..' for Description
+# and word-wrap it into two lines if too long
+	list='$(foreach q,$2,$q$(if ${system-alias-$q}, (${system-alias-$q})))'; \
+	  len2=$$(($${#list}/2)); \
+	  if [ $$len2 -gt 36 ]; then \
+	    while expr substr "$$list" $$len2 1 != " " >/dev/null; do len2=$$(($$len2+1)); done; \
+	    list="$$(expr substr "$$list" 1 $$(($$len2-1)))\$${Newline} $$(expr substr "$$list" $$(($$len2+1)) $$len2)"; \
+	  fi; \
+	  echo "qemu:archlist=$$list" >> debian/$1.substvars
+	dh_installdocs -p $1 --link-doc=qemu-system-common
+endef
+
+sysdata-components :=
+qemu-builds :=
+
+# several builds of qemu binaries:
+
+##############################################
+# main system and tools build
+configure-qemu: b/qemu/configured
+b/qemu/configured: configure
+	rm -rf b/qemu; mkdir -p b/qemu
+	cd b/qemu && \
+	    ../../configure ${common_configure_opts} \
+		--$(if ${enable-system},enable,disable)-system \
+		--disable-user --disable-linux-user \
+		--enable-tools \
+		--disable-xen \
+		--enable-modules \
+		$(if ${enable-system},--enable-module-upgrades) \
+		$(shell sh debian/extract-config-opts \
+		    $(DEB_HOST_ARCH_OS)-$(DEB_HOST_ARCH) debian/control) \
+		${QEMU_CONFIGURE_OPTIONS} || \
+	   { tail -n20 config.log meson-logs/meson-log.txt && false; }
+	touch $@
+
+build-qemu: b/qemu/built
+b/qemu/built: b/qemu/configured
+	${NINJA} -C b/qemu
+	touch $@
+
+test-qemu: b/qemu/tested
+b/qemu/tested: b/qemu/built
+ifeq (${enable-system},y)
+# copy all firmware files. An alternative is to remove qemu-bundle
+#	cp -a /usr/share/seabios/* /usr/lib/ipxe/qemu/* /usr/share/qemu/* \
+#	    b/qemu/qemu-bundle/usr/share/qemu/
+	rm -rf b/qemu/qemu-bundle
+	QEMU_MODULE_DIR=${CURDIR}/b/qemu \
+	    ${MAKE} -C b/qemu check-block
+endif
+	touch $@
+
+install-qemu: b/qemu/built
+	DESTDIR=${CURDIR}/debian/tmp \
+	    ${NINJA} -C b/qemu install
+
+# remove qtest "accel" modules
+	rm -f debian/tmp${libdir}/qemu/accel-qtest-*.so
+
+# fixup the manpage
+# Note: with no enable-system, qemu-system manpage will not be installed.
+	sed -i 's/\\fBqemu(1)\\fP manual page/\\fBqemu-system(1)\\fP manual page (in qemu-system-common package)/' \
+		debian/tmp/usr/share/man/man1/qemu-storage-daemon.1
+
+ifeq (${enable-system},y)
+
+	# qemu-system subpackages
+	mv debian/tmp/usr/share/man/man1/qemu.1 debian/tmp/usr/share/man/man1/qemu-system.1
+	$(foreach p,${system-packages},\
+	    $(call install-system,qemu-system-$p,${system-archlist-$p}\
+	    ,$(if $(filter ${DEB_HOST_ARCH_CPU},${system-kvmcpus-$p}),qemu-system-${system-kvmlink-${DEB_HOST_ARCH_CPU}})))
+
+ifeq ($(DEB_HOST_ARCH_OS),linux)
+
+ifeq (${VENDOR},UBUNTU)
+ifneq ($(filter ${DEB_HOST_ARCH},amd64 i386),)
+# on ubuntu *-spice existed, may be used in libvirt xml and scripts - keep links for compatibility
+# The sunset for this will be when Ubuntu-Bionic goes out of support which is expected to happen in 2028
+	install -p -t debian/qemu-system-x86/usr/bin debian/kvm-spice debian/qemu-system-x86_64-spice
+	install -p -t debian/qemu-system-x86/usr/share/man/man1/ debian/kvm-spice.1
+	echo ".so man1/kvm-spice.1" > debian/qemu-system-x86/usr/share/man/man1/qemu-system-x86_64-spice.1
+endif # x86
+# apport hook is ubuntu-specific
+	install -p -D -t debian/qemu-system-common/usr/share/apport/package-hooks/ \
+		 debian/source_qemu.py
+endif # ubuntu
+
+# for --enable-module-upgrades to work (also see run-qemu.mount install)
+# save block-extra loadable modules on upgrades
+# other module types for now (5.0) can't be loaded at runtime, only at startup
+# the maintscript fragments include version string so we have to generate them
+	echo 'case $$1 in (upgrade|deconfigure) [ -d /run/qemu ] || exit 0; ! findmnt --noheadings --target /run/qemu/ | grep -q noexec || exit 0; mkdir -p ${SAVEMODDIR}; for m in ${libdir}/qemu/block-*.so; do if echo "${BLOCK_SUPPLEMENTAL_MODULES}" | grep -qF `basename "$$m"`; then continue; else cp -p $$m ${SAVEMODDIR}/; fi;  done;; esac' \
+	  >> debian/qemu-block-extra.prerm.debhelper
+	echo 'case $$1 in (remove) for m in ${libdir}/qemu/block-*.so; do if echo "${BLOCK_SUPPLEMENTAL_MODULES}" | grep -qF `basename "$$m"`; then continue; else rm -f ${SAVEMODDIR}/`basename $$m`; fi; done;; esac' \
+	  >> debian/qemu-block-extra.postrm.debhelper
+	echo 'case $$1 in (purge) if systemctl is-active -q run-qemu.mount; then systemctl stop run-qemu.mount || true; fi; rm -rf "/run/qemu";; esac' \
+	  >> debian/qemu-block-extra.postrm.debhelper
+# do mostly the same for qemu-block-supplemental
+ifneq (,$(filter qemu-block-supplemental,${BUILD_PACKAGES}))
+	echo 'case $$1 in (upgrade|deconfigure) [ -d /run/qemu ] || exit 0; ! findmnt --noheadings --target /run/qemu/ | grep -q noexec || exit 0; mkdir -p ${SAVEMODDIR}; for m in ${BLOCK_SUPPLEMENTAL_MODULES}; do cp -p ${libdir}/qemu/$$m ${SAVEMODDIR}/; done;; esac' \
+	  >> debian/qemu-block-supplemental.prerm.debhelper
+	echo 'case $$1 in (remove) for m in ${BLOCK_SUPPLEMENTAL_MODULES}; do rm -f ${SAVEMODDIR}/$$m; done;; esac' \
+	  >> debian/qemu-block-supplemental.postrm.debhelper
+endif
+
+endif # linux
+
+else  # !enable-system
+
+# qemu-system manpage is built regardless of system target
+	rm -fv debian/tmp/usr/share/man/man1/qemu.1
+
+endif # enable-system
+
+qemu-builds += qemu
+
+##############################################
+# microvm build:
+configure-microvm: b/microvm/configured
+b/microvm/configured: configure debian/microvm-devices.mak
+	rm -rf b/microvm; mkdir -p b/microvm
+	cp -up debian/microvm-devices.mak configs/devices/x86_64-softmmu/microvm.mak
+	cd b/microvm && \
+		../../configure ${common_configure_opts} \
+		--extra-cflags="${extra-cflags} -DCONFIG_MICROVM_DEFAULT=1" \
+		--disable-docs \
+		--without-default-features \
+		--target-list=x86_64-softmmu --enable-kvm --disable-tcg \
+		--enable-pixman \
+		--enable-attr \
+		--enable-coroutine-pool \
+		--audio-drv-list="" \
+		--without-default-devices \
+		--with-devices-x86_64=microvm \
+		--enable-vhost-kernel --enable-vhost-net \
+		--enable-vhost-vdpa \
+		--enable-vhost-user --enable-vhost-user-blk-server \
+		--enable-vhost-crypto \
+		--enable-linux-aio \
+		--enable-numa \
+		--enable-seccomp \
+		--enable-virtfs \
+		--disable-vnc \
+		${QEMU_MICROVM_CONFIGURE_OPTIONS}
+	touch $@
+build-microvm: b/microvm/qemu-system-x86_64
+b/microvm/qemu-system-x86_64: b/microvm/configured
+	${NINJA} -C b/microvm qemu-system-x86_64
+install-microvm: b/microvm/qemu-system-x86_64
+	cp b/microvm/x86_64-softmmu/qemu-system-x86_64 debian/qemu-system-x86/usr/bin/qemu-system-x86_64-microvm
+	echo ".so man1/qemu-system.1" > debian/qemu-system-x86/usr/share/man/man1/qemu-system-x86_64-microvm.1
+# build microvm on amd64 only if system build is enabled
+qemu-builds += $(if $(filter ${DEB_HOST_ARCH}-${enable-system},amd64-y),microvm)
+
+##############################################
+# xen build (amd64 arch only, i386-softmmu target only)
+configure-xen: b/xen/configured
+b/xen/configured: configure
+	# system build for qemu-system-xen
+	rm -rf b/xen; mkdir -p b/xen
+	cd b/xen && \
+	    ../../configure ${common_configure_opts} \
+		--disable-install-blobs --disable-docs --disable-tools \
+		--without-default-features \
+		--enable-avx2 \
+		--enable-xen --target-list=i386-softmmu \
+		--enable-xen-pci-passthrough \
+		--disable-tcg --disable-kvm \
+		--audio-drv-list= \
+		--enable-libusb \
+		--enable-pixman --enable-vnc --enable-vnc-jpeg \
+		--enable-spice \
+		--enable-virtfs --enable-attr --enable-cap-ng \
+		${QEMU_XEN_CONFIGURE_OPTIONS}
+	touch $@
+build-xen: b/xen/built
+b/xen/built: b/xen/configured
+	${NINJA} -C b/xen qemu-system-i386
+	touch $@
+install-xen: b/xen/built
+	install -D b/xen/qemu-system-i386 \
+	  debian/qemu-system-xen${QEMU_XEN}
+qemu-builds += $(if $(filter qemu-system-xen,${BUILD_PACKAGES}),xen)
+
+##############################
+
+# list of linux-user targets, from configs/targets/*-linux-user.mak
+user-targets = \
+ aarch64 aarch64_be alpha arm armeb cris hexagon hppa i386 loongarch64 \
+ m68k microblaze microblazeel mips mips64 mips64el mipsel mipsn32 mipsn32el \
+ nios2 or1k ppc ppc64 ppc64le riscv32 riscv64 \
+ s390x sh4 sh4eb sparc sparc32plus sparc64 \
+ x86_64 xtensa xtensaeb
+# aliases for missing ${DEB_HOST_ARCH} names in qemu-user:
+user-alias-aarch64 = arm64
+user-alias-arm = armel armhf
+user-alias-loongarch64 = loong64
+user-alias-ppc = powerpc
+user-alias-ppc64le = ppc64el
+user-alias-x86_64 = amd64
+
+# install-user [-static]
+define install-user
+	dh_installdirs -p qemu-user$1 \
+	    usr/bin usr/share/man/man1 usr/share/doc/qemu-user$1
+$(foreach t,${user-targets},\
+	cp -p b/user$1/qemu-$t debian/qemu-user$1/usr/bin/qemu-$t$1
+	ln -sf qemu-user$1.1   debian/qemu-user$1/usr/share/man/man1/qemu-$t$1.1
+$(foreach a,${user-alias-$t},\
+	ln -sf qemu-$t$1   debian/qemu-user$1/usr/bin/qemu-$a$1
+	ln -sf qemu-$t$1.1 debian/qemu-user$1/usr/share/man/man1/qemu-$a$1.1
+))
+endef
+
+##############################################
+# user build
+configure-user: b/user/configured
+b/user/configured: configure
+# do not use debian/configure-opts here, all optional stuff will be enabled
+# automatically, dependencies are already verified in the main build
+	rm -rf b/user; mkdir -p b/user
+	cd b/user && \
+	    ../../configure ${common_configure_opts} \
+		--extra-cflags="${extra-cflags}" \
+		--disable-plugins \
+		--target-list="$(addsuffix -linux-user,${user-targets})"
+	touch $@
+build-user: b/user/built
+b/user/built: b/user/configured
+	# we use this invocation to build just the binaries
+	${NINJA} -C b/user $(addprefix qemu-,${user-targets})
+	touch $@
+install-user: b/user/built
+	$(call install-user,)
+	sed -e 's/qemu\\-user\\-static/qemu\\-user/g' \
+	    -e 's/ (static version)//' \
+	    debian/qemu-user-static.1 > debian/qemu-user/usr/share/man/man1/qemu-user.1
+	sed 's|-static||g' debian/qemu-user-static.README.Debian > \
+	    debian/qemu-user/usr/share/doc/qemu-user/README.Debian
+	dh_installdocs -p qemu-user-binfmt --link-doc=qemu-user
+	./debian/binfmt-install qemu-user-binfmt
+qemu-builds += $(if ${enable-user},user)
+
+##############################################
+# user-static build
+configure-user-static: b/user-static/configured
+b/user-static/configured: configure
+# do not use debian/configure-opts here, all optional stuff will be enabled
+# automatically, dependencies are already verified in the main build
+# See LP:#1908331 for --static-pie (the default in qemu) and #1053101
+# See https://sourceware.org/bugzilla/show_bug.cgi?id=29514
+# use --disable-pie on i386 for now due to #1056739
+# (maybe also add arm64 here for gcc12)
+	rm -rf b/user-static; mkdir -p b/user-static
+	cd b/user-static && \
+	    ../../configure ${common_configure_opts} \
+		--extra-cflags="${extra-cflags}" \
+		--static \
+		$(if $(filter i386,${DEB_HOST_ARCH}),--disable-pie) \
+		--disable-plugins \
+		--target-list="$(addsuffix -linux-user,${user-targets})"
+	touch $@
+build-user-static: b/user-static/built
+b/user-static/built: b/user-static/configured
+	# we use this invocation to build just the binaries
+	${NINJA} -C b/user-static $(addprefix qemu-,${user-targets})
+	touch $@
+install-user-static: b/user-static/built
+	$(call install-user,-static)
+	./debian/binfmt-install qemu-user-static
+qemu-builds += $(if ${enable-user-static},user-static)
+
+##############################################
+# qemu-system-for-host dep-only package
+# find the qemu-system-foo package which contains the right binary:
+#qemu-system-for-host=$(strip \
+#    $(foreach p,${system-packages},\
+#        $(if \
+#            $(filter \
+#                ${system-archlist-$p} $(foreach a,${system-archlist-$p},${system-alias-$a}),\
+#                ${DEB_HOST_ARCH_CPU}),\
+#            qemu-system-$p)))
+install-qemu-system-for-host:
+#	$(if ${qemu-system-for-host},,$(error no qemu-system-for-host found for ${DEB_HOST_ARCH_CPU}))
+#	echo 'qemu-for-host=${qemu-system-for-host}'
+	echo 'qemu:for-host=qemu-system-${DEB_HOST_ARCH_CPU}' \
+	  >> debian/qemu-system-for-host.substvars
+	dh_installdocs -p qemu-system-for-host --link-doc=qemu-system-common
+configure-qemu-system-for-host:
+build-qemu-system-for-host:
+qemu-builds += $(filter ${BUILD_PACKAGES},qemu-system-for-host)
+
+##############################################
+# common rules
+
+.PHONY: $(addprefix configure-, ${qemu-builds}) \
+	$(addprefix build-, ${qemu-builds}) \
+	$(addprefix install-, ${qemu-builds}) \
+	configure-arch build-arch test-qemu \
+	pre-install-arch install-arch binary-arch
+configure-arch: $(addprefix configure-, ${qemu-builds})
+build-arch: $(addprefix build-, ${qemu-builds}) \
+
+#XXX-cyclic-test-dep-dak-bug	$(if $(findstring nocheck, ${DEB_BUILD_OPTIONS} ${DEB_BUILD_PROFILES}),, test-qemu)
+
+pre-install-arch:
+	dh_testroot
+	dh_prep -a
+	dh_installdirs -a
+install-arch: pre-install-arch $(addprefix install-, ${qemu-builds})
+	dh_install -a
+ifneq (,$(filter qemu-block-supplemental,${BUILD_PACKAGES}))
+	# block-gluster.so should only be in qemu-block-supplemental, if it's built (it doesn't build on 32bit architectures)
+	dh_installdirs -p qemu-block-supplemental usr/lib/${DEB_HOST_MULTIARCH}/qemu
+	for m in ${BLOCK_SUPPLEMENTAL_MODULES}; do mv debian/qemu-block-extra/usr/lib/${DEB_HOST_MULTIARCH}/qemu/$$m debian/qemu-block-supplemental/usr/lib/${DEB_HOST_MULTIARCH}/qemu/; done
+	# This also introduces a "Depends: qemu-block-extra" to qemu-block-supplemental, which
+	# we want also because of the run-qemu.mount unit shipped there.
+	dh_installdocs -p qemu-block-supplemental --link-doc=qemu-block-extra
+endif
+	dh_missing -a
+	dh_installdocs -a
+	dh_installchangelogs -a
+	dh_installman -a
+	dh_installinit -pqemu-guest-agent
+	# install /etc/default/qemu-kvm
+	dh_installinit -a -pqemu-system-common --name=qemu-kvm
+	dh_installsystemd -pqemu-guest-agent --no-enable
+	dh_installudev -pqemu-guest-agent
+	# install and enable qemu-kvm.service
+	dh_installsystemd -a -pqemu-system-common --no-restart-on-upgrade --name=qemu-kvm
+# default-enable /run/qemu mount only on ubuntu,
+# on debian let it be manually controlled and off by default
+	dh_installsystemd -pqemu-block-extra --no-restart-on-upgrade --name=run-qemu \
+		$(if $(filter ${VENDOR},DEBIAN),--no-start --no-enable,)
+	dh_lintian -a
+	dh_strip_nondeterminism -a
+	dh_compress -a
+	dh_fixperms -a
+#968670: skip dwz << 0.14 on these arches, remove in bookworm+1
+	v="$$(dwz --version 2>&1 | sed -n 's/^dwz version //p')"; case "$$v" in \
+	  (0.1[0123]) echo "Skipping dwz version $$v on ${DEB_HOST_ARCH}: #968670" ;; \
+	  (*) dh_dwz -a ;; \
+	esac
+	dh_strip -a
+# qemu-user-static contains static binaries only, but they might be built
+# as static-pie executables and dpkg-shlibdeps complains. Just omit it here.
+	dh_shlibdeps -a -Nqemu-user-static
+ifeq (${enable-user-static},y)
+# after shlibdeps finished, grab ${shlibs:Depends} from -user package
+# and transform it into Built-Using field for -user-static.
+	if [ -f debian/qemu-user.substvars ]; then \
+	  pkgs=$$(sed -n -e's/([^)]*)//g' -e's/,//g' -e's/^shlibs:Depends=//p' debian/qemu-user.substvars); \
+	  srcs="$$srcs $$(dpkg-query -f '$${source:Package} (= $${source:Version}),' -W $$pkgs)"; \
+	  echo "built-using=$$srcs" >> debian/qemu-user-static.substvars ; \
+	fi
+endif
+binary-arch: install-arch binary-helper
+binary-arch: a=-a
+
+##############################################
+### firmware, qemu-user-data package
+
+### openbios rules
+b/openbios/config-host.mak:
+	mkdir -p b/openbios
+	cd b/openbios && ../../roms/openbios/config/scripts/switch-arch builtin-ppc builtin-sparc32 builtin-sparc64
+build-openbios: $(addprefix b/openbios/obj-, $(addsuffix /.built, ppc sparc32 sparc64))
+b/openbios/obj-%/.built: b/openbios/config-host.mak
+	${MAKE} -C ${@D} V=${V} EXTRACFLAGS="-ffreestanding -fno-pic -fno-stack-protector"
+	@touch $@
+install-openbios: build-openbios
+	install -m 0644 b/openbios/obj-ppc/openbios-qemu.elf ${sysdataidir}/openbios-ppc
+	install -m 0644 b/openbios/obj-sparc32/openbios-builtin.elf ${sysdataidir}/openbios-sparc32
+	install -m 0644 b/openbios/obj-sparc64/openbios-builtin.elf ${sysdataidir}/openbios-sparc64
+	install -m 0644 -t ${sysdataidir} \
+		b/openbios/obj-sparc32/QEMU,tcx.bin \
+		b/openbios/obj-sparc32/QEMU,cgthree.bin \
+		b/openbios/obj-sparc64/QEMU,VGA.bin
+sysdata-components += openbios
+
+### powernv firmware in roms/skiboot
+build-skiboot: b/skiboot/skiboot.lid
+b/skiboot/skiboot.lid: | roms/skiboot/.version
+	mkdir -p b/skiboot
+# skiboot makefiles makes it difficult to *add* an option to CFLAGS.
+# Abuse OPTS= for this, with the default being -Os.
+	grep -q '^OPTS=-Os$$' roms/skiboot/Makefile.main || \
+	  { echo "review OPTS= in skiboot/Makefile.main"; false; }
+	${MAKE} -C b/skiboot -f ${CURDIR}/roms/skiboot/Makefile \
+	  SRC=${CURDIR}/roms/skiboot \
+	  OPTS='-Os -ffile-prefix-map="${CURDIR}/roms/skiboot/"=' \
+	  CROSS_COMPILE=${PPC64_CROSSPFX} V=${V}
+install-skiboot: b/skiboot/skiboot.lid
+	install -m 0644 -t ${sysdataidir} $<
+sysdata-components += skiboot
+
+build-vof: b/vof/vof.bin
+b/vof/vof.bin: | b
+	mkdir -p b/vof
+	printf 'CC=$${CROSS}gcc\nLD=$${CROSS}ld\nOBJCOPY=$${CROSS}objcopy\nEXTRA_CFLAGS=-m32 -mbig-endian' > b/vof/config.mak
+	${MAKE} -C b/vof CROSS=${PPC64_CROSSPFX} SRC_DIR=../../pc-bios/vof -f../../pc-bios/vof/Makefile
+install-vof: b/vof/vof.bin
+	install -m 0644 -t ${sysdataidir} $<
+sysdata-components += vof
+
+### u-boot-e500 (u-boot.e500)
+build-u-boot-e500: b/u-boot/build-e500/u-boot
+b/u-boot/build-e500/u-boot: | b
+	cp -alu roms/u-boot b/
+	${MAKE} -C b/u-boot O=build-e500 qemu-ppce500_config
+	${MAKE} -C b/u-boot CROSS_COMPILE=${PPC_CROSSPFX} O=build-e500 V=$V
+	${PPC_CROSSPFX}strip $@
+install-u-boot-e500: b/u-boot/build-e500/u-boot
+	install -m 0644 $< ${sysdataidir}/u-boot.e500
+sysdata-components += u-boot-e500
+
+### u-boot-sam460 (u-boot-sam460-20100605.bin)
+build-u-boot-sam460: b/u-boot-sam460ex/u-boot.bin
+b/u-boot-sam460ex/u-boot.bin: | b
+	cp -alu roms/u-boot-sam460ex b/
+	${MAKE} -C b/u-boot-sam460ex Sam460ex_config
+	env -u LDFLAGS -u OBJCFLAGS \
+	${MAKE} -C b/u-boot-sam460ex CROSS_COMPILE=${PPC_CROSSPFX}
+#	${PPC_CROSSPFX}strip $@
+install-u-boot-sam460: b/u-boot-sam460ex/u-boot.bin | ${sysdataidir}
+	install -m 0644 $< ${sysdataidir}/u-boot-sam460-20100605.bin
+sysdata-components += u-boot-sam460
+
+### x86 optionrom
+build-x86-optionrom: b/optionrom/built
+b/optionrom/built:
+	mkdir -p b/optionrom
+	${MAKE} -f ${CURDIR}/debian/optionrom.mak -C b/optionrom SRC_PATH="${CURDIR}" all
+	touch $@
+install-x86-optionrom: build-x86-optionrom | ${sysdataidir}
+	${MAKE} -f ${CURDIR}/debian/optionrom.mak -C b/optionrom SRC_PATH="${CURDIR}" install DESTDIR="${CURDIR}/${sysdataidir}"
+sysdata-components += x86-optionrom
+
+### qboot, aka bios-microvm
+build-qboot: b/qboot/bios.bin
+b/qboot/bios.bin: | b
+	rm -rf b/qboot
+	meson setup roms/qboot b/qboot
+	ninja -C b/qboot $(if $V,-v)
+install-qboot: b/qboot/bios.bin
+	install -m 0644 $< ${sysdataidir}/qboot.rom
+sysdata-components += qboot
+
+### alpha firmware in roms/palcode-clipper
+build-palcode-clipper: b/qemu-palcode/palcode-clipper
+b/qemu-palcode/palcode-clipper: | b
+	cp -al roms/qemu-palcode b/
+#XXX #1019011 (remove OPT= alternative when fixed)
+	${MAKE} -C b/qemu-palcode CROSS=${ALPHAEV67_CROSSPFX} -k || \
+	${MAKE} -C b/qemu-palcode CROSS=${ALPHAEV67_CROSSPFX} OPT=-O1
+	${ALPHAEV67_CROSSPFX}strip b/qemu-palcode/palcode-clipper
+install-palcode-clipper: b/qemu-palcode/palcode-clipper
+	install -m 0644 $< ${sysdataidir}/palcode-clipper
+sysdata-components += palcode-clipper
+
+### SLOF
+build-slof: b/SLOF/boot_rom.bin
+b/SLOF/boot_rom.bin: | b
+	cp -al roms/SLOF b/
+	env -u LDFLAGS -u CFLAGS $(MAKE) -C b/SLOF qemu CROSS=${PPC64_CROSSPFX} V=${V}
+install-slof: b/SLOF/boot_rom.bin
+	install -m 0644 $< ${sysdataidir}/slof.bin
+sysdata-components += slof
+
+### s390x firmware in pc-bios/s390-ccw
+build-s390x-fw: b/s390fw/built
+b/s390fw/built:
+	mkdir -p b/s390fw
+	${MAKE} -f debian/s390fw.mak OUT=b/s390fw/
+	touch $@
+install-s390x-fw: build-s390x-fw
+	install -m 0644 -t ${sysdataidir} b/s390fw/s390*.img
+sysdata-components += s390x-fw
+
+### hppa-firmware (roms/seabios-hppa)
+build-hppa-fw: b/hppafw/hppa-firmware.img
+b/hppafw/hppa-firmware.img:
+	mkdir -p b/hppafw
+	echo CONFIG_PARISC=y > roms/seabios-hppa/.config
+	${MAKE} -C roms/seabios-hppa olddefconfig
+	${MAKE} -C roms/seabios-hppa OUT=../../b/hppafw/ PYTHON=python3 parisc
+	hppa-linux-gnu-strip -R.note -R.comment $@
+install-hppa-fw: b/hppafw/hppa-firmware.img
+	install -m 0644 $< ${sysdataidir}
+sysdata-components += hppa-fw
+
+### opensbi (riscv firmware)
+# we only build v64 variants, not v32
+build-opensbi: b/opensbi/.built
+b/opensbi/.built:
+	mkdir -p b/opensbi
+	${MAKE} -C roms/opensbi O=../../b/opensbi CROSS_COMPILE=${RISCV64_CROSSPFX} V=${V} PLATFORM=generic
+	${RISCV64_CROSSPFX}strip --strip-unneeded -R.comment -R.note b/opensbi/platform/generic/firmware/fw_dynamic.elf
+	touch $@
+install-opensbi: build-opensbi
+	install -m 0644 b/opensbi/platform/generic/firmware/fw_dynamic.bin ${sysdataidir}/opensbi-riscv64-generic-fw_dynamic.bin
+	install -m 0644 b/opensbi/platform/generic/firmware/fw_dynamic.elf ${sysdataidir}/opensbi-riscv64-generic-fw_dynamic.elf
+sysdata-components += opensbi
+
+### vbootrom (npcm7xx)
+build-vbootrom: b/vbootrom/.built
+b/vbootrom/.built: | b
+	cp -pa roms/vbootrom b/
+	${MAKE} -C b/vbootrom CROSS_COMPILE=${ARM_CROSSPFX}
+	touch $@
+install-vbootrom: build-vbootrom
+	install -m 0644 b/vbootrom/npcm7xx_bootrom.bin ${sysdataidir}/
+sysdata-components += vbootrom
+
+### misc firmware
+build-misc: b/misc/.built
+b/misc/.built:
+	mkdir -p b/misc
+	dtc -o b/misc/bamboo.dtb pc-bios/bamboo.dts
+	dtc -o b/misc/canyonlands.dtb pc-bios/canyonlands.dts
+	dtc -o b/misc/petalogix-ml605.dtb pc-bios/petalogix-ml605.dts
+	dtc -o b/misc/petalogix-s3adsp1800.dtb pc-bios/petalogix-s3adsp1800.dts
+	touch $@
+install-misc: build-misc
+	install -m 0644 b/misc/bamboo.dtb b/misc/canyonlands.dtb \
+		-D -t ${sysdataidir}
+	install -m 0644 b/misc/petalogix-ml605.dtb b/misc/petalogix-s3adsp1800.dtb \
+		-D -t debian/qemu-system-misc/usr/share/qemu/
+# icon for gtk ui
+	install -Dp -m0644 ui/icons/qemu.svg \
+	 -t debian/qemu-system-data/usr/share/icons/hicolor/scalable/apps/
+	install -Dp -m0644 ui/qemu.desktop \
+	  -t debian/qemu-system-data/usr/share/applications/
+# icon for sdl2 ui (non-sdl-image version)
+	install -Dp -m0644 ui/icons/qemu_32x32.bmp \
+	 debian/qemu-system-data/usr/share/icons/hicolor/32x32/apps/qemu.bmp
+	install -Dp -m0644 -t debian/qemu-system-data/usr/share/qemu/keymaps/ \
+	 $$(ls -1 pc-bios/keymaps/* | fgrep -v /meson.build)
+sysdata-components += misc
+
+${sysdataidir}:
+	mkdir -p -m 0755 $@
+b:
+	mkdir -p $@
+
+.PHONY: $(addprefix build-  , ${sysdata-components}) \
+	$(addprefix install-, ${sysdata-components}) \
+	build-indep pre-install-indep install-indep binary-indep
+$(addprefix build-  , ${sysdata-components}): | b
+$(addprefix install-, ${sysdata-components}): | ${sysdataidir}
+build-indep: $(addprefix build-, ${sysdata-components})
+pre-install-indep:
+	dh_testroot
+	dh_prep -i
+install-indep: pre-install-indep $(addprefix install-, ${sysdata-components})
+	dh_installdocs -i
+	dh_installchangelogs -i
+	dh_lintian -i
+	dh_compress -i
+	dh_fixperms -i
+binary-indep: install-indep binary-helper
+binary-indep: a=-i
+
+build: build-arch build-indep
+install: install-arch install-indep
+binary: install-arch install-indep binary-helper
+binary: a=
+binary-helper:
+	dh_installdeb $a
+	dh_gencontrol $a
+	dh_md5sums $a
+	dh_builddeb $a
+
+clean:	debian/control
+	dh_clean \
+		b/ \
+		configs/devices/x86_64-softmmu/microvm.mak \
+
+.PHONY: build install binary binary-helper clean
+
+ifneq (,$(wildcard debian/control-in))
+# only include rules for debian/control if debian/control-in is present
+debian/control: debian/control-in debian/rules
+	echo '# autogenerated file, please edit debian/control-in' > $@.tmp
+	sed -e 's/^:$(shell echo ${VENDOR} | tr '[A-Z]' '[a-z]')://' \
+		-e '/^:[a-z]*:/D' \
+		-e 's/:system-arch-linux:/$(sort ${system-arch-linux})/g' \
+		-e 's/:system-arch:/$(sort ${system-arch})/g' \
+		-e 's/:spice-arch:/$(sort ${spice-arch})/g' \
+		-e 's/:user-arch:/$(sort ${user-arch})/g' \
+		-e 's/:utils-arch:/${utils-arch}/g' \
+		$< >> $@.tmp
+	mv -f $@.tmp $@
+endif

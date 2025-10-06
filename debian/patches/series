@@ -1,0 +1,24 @@
+microvm-default-machine-type.patch
+linux-user-binfmt-P.diff
+note-missing-module-pkg-name.diff
+skip-unpack-edk2-blobs.patch
+qemu-bridge-helper-path.patch
+u-boot-sam460ex-fdi.patch
+u-boot-sam460ex-mstring.patch
+openbios-array-bounds.diff
+openbios-array-bounds-gcc12.patch
+openbios-use-source_date_epoch-in-makefile.patch
+seabios-hppa-use-consistent-date-and-remove-hostname.patch
+slof-remove-user-and-host-from-release-version.patch
+slof-ensure-ld-is-called-with-C-locale.patch
+openbios-spelling-endianess.patch
+disable-xen-on-x32.patch
+
+# ubuntu patches
+ubuntu/enable-svm-by-default.patch
+ubuntu/define-ubuntu-machine-types.patch
+ubuntu/pre-bionic-256k-ipxe-efi-roms.patch
+ubuntu/qboot-Disable-LTO-for-ELF-binary-build-step.patch
+ubuntu/lp-2055003-introduce-SPAPR_IRQ_NR_IPIS.patch
+ubuntu/lp-2055003-ppc64el-coredump-8193-vcpus.patch
+ubuntu/lp2012763-maxcpus-too-low.patch

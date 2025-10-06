@@ -1,0 +1,44 @@
+From e5fe12ebb41f4e24340c8c543231095482b6a9d8 Mon Sep 17 00:00:00 2001
+From: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+Date: Wed, 6 Jul 2022 10:10:55 +0200
+Subject: [PATCH] qboot: Disable LTO for ELF binary build step
+
+If LTO is enabled by default qboot fails to link as it exposes
+a few issues that break the build:
+
+  ../code16.c: Assembler messages:
+  ../code16.c:37: Error: redundant addr32 prefix
+  ../code16.c:27: Error: redundant addr32 prefix
+  ../code16.c:18: Error: redundant addr32 prefix
+
+Until fixed suppress this behavior by adding -fno-lto to the end
+of the linker flags.
+
+Fixes: #31
+
+Signed-off-by: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+
+Forwarded: yes
+Author: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+Origin: https://gitlab.com/bonzini/qboot/-/merge_requests/32
+Bug: https://gitlab.com/bonzini/qboot/-/issues/31
+Last-Update: 2022-07-06
+---
+ meson.build | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/roms/qboot/meson.build b/roms/qboot/meson.build
+index d060f75..a9792e8 100644
+--- a/roms/qboot/meson.build
++++ b/roms/qboot/meson.build
+@@ -19,6 +19,7 @@ link_args = ['-nostdlib', '-m32']
+ link_args += cc.get_supported_link_arguments('-Wl,--build-id=none')
+ link_args += '-Wl,-T' + meson.current_source_dir() / 'flat.lds'
+ link_args += cc.get_supported_link_arguments(['-no-pie'])
++link_args += cc.get_supported_link_arguments(['-fno-lto'])
+ 
+ elf = executable(
+   'bios.bin.elf',
+-- 
+2.37.0
+
