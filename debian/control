@@ -2,12 +2,12 @@
 Source: qemu
 Section: otherosfs
 Priority: optional
-Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Maintainer: NVIDIA BaseOS Team <dgx-dev@nvidia.com>
 XSBC-Original-Maintainer: Debian QEMU Team <pkg-qemu-devel@lists.alioth.debian.org>
 Uploaders: Michael Tokarev <mjt@tls.msk.ru>
 Build-Depends: debhelper-compat (= 13),
  python3:any,
- meson (>> 0.63.0~), ninja-build,
+ meson (>> 0.63.0~) | meson-1.5, ninja-build,
  flex, bison,
 Build-Depends-Arch:
 # In comments below we also specify (system-specific) arguments
@@ -127,25 +127,27 @@ Build-Depends-Arch:
 # various firmware files (kvmvapic.bin &Co), older qemu-system-data should work
 #XXX-cyclic-test-dep-dak-bug qemu-system-data [amd64 arm arm64 armel armhf i386 mips mips64 mips64el mipsel powerpc powerpcspe ppc64 ppc64el riscv64 s390x sparc sparc64 x32] <!nocheck>,
 Build-Depends-Indep:
+# Firmware build dependencies disabled since we're not building firmware
+# (sysdata-components commented out in debian/rules)
 # pc-bios/*.dts => *.dtb (PPC firmware)
  device-tree-compiler,
- gcc-s390x-linux-gnu,
+# gcc-s390x-linux-gnu,
 # qemu-palcode/palcode-clipper
- gcc-alpha-linux-gnu,
+# gcc-alpha-linux-gnu,
 # u-boot code
- gcc-powerpc-linux-gnu, bc,
+# gcc-powerpc-linux-gnu, bc,
 # skiboot firmware, openbios
- gcc-powerpc64-linux-gnu,
+# gcc-powerpc64-linux-gnu,
 # skiboot includes <openssl/something.h>
- libssl-dev,
+# libssl-dev,
 # openbios
- gcc-sparc64-linux-gnu, fcode-utils, xsltproc,
+# gcc-sparc64-linux-gnu, fcode-utils, xsltproc,
 # hppa-firmware
- gcc-hppa-linux-gnu,
+# gcc-hppa-linux-gnu,
 # opensbi
- gcc-riscv64-linux-gnu,
+# gcc-riscv64-linux-gnu,
 # vbootrom/npcm7xx_bootrom
- gcc-arm-none-eabi,
+# gcc-arm-none-eabi,
 Build-Conflicts: oss4-dev
 Standards-Version: 4.6.1
 Homepage: http://www.qemu.org/
