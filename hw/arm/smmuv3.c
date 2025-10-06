@@ -1949,6 +1949,7 @@ static void smmu_reset_exit(Object *obj, ResetType type)
         c->parent_phases.exit(obj, type);
     }
     smmuv3_accel_attach_bypass_hwpt(s);
+    tegra241_cmdqv_reset(s);
 }
 
 static bool smmu_validate_property(SMMUv3State *s, Error **errp)
@@ -1980,6 +1981,10 @@ static bool smmu_validate_property(SMMUv3State *s, Error **errp)
     }
     if (s->pasid) {
         error_setg(errp, "pasid can only be enabled if accel=on");
+        return false;
+    }
+    if (s->cmdqv) {
+        error_setg(errp, "NVIDIA cmdqv can only be enabled if accel=on");
         return false;
     }
     return true;
@@ -2024,6 +2029,12 @@ static void smmu_realize(DeviceState *d, Error **errp)
     smmu_init_irq(s, dev);
 
     smmuv3_init_regs(s);
+    /*
+     * This has to be after the above mmio and irq init as tegra241_cmdqv_init()
+     * also does a mmio/irq init. If not, the SMMUv3 probe may fail as it may
+     * read wrong mmio.
+     */
+     tegra241_cmdqv_init(s);
 }
 
 static const VMStateDescription vmstate_smmuv3_queue = {
@@ -2109,6 +2120,7 @@ static const Property smmuv3_properties[] = {
     DEFINE_PROP_BOOL("ats", SMMUv3State, ats, false),
     DEFINE_PROP_UINT8("oas", SMMUv3State, oas, 44),
     DEFINE_PROP_BOOL("pasid", SMMUv3State, pasid, false),
+    DEFINE_PROP_BOOL("cmdqv", SMMUv3State, cmdqv, false),
 };
 
 static void smmuv3_instance_init(Object *obj)
@@ -2144,6 +2156,8 @@ static void smmuv3_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, "oas",
         "Specify Output Address Size. Supported values are 44 or 48 bits "
         "Defaults to 44 bits");
+    object_class_property_set_description(klass, "cmdqv",
+        "Enable/disable NVIDIA hw cmdq. Supported only if accel=on");
 }
 
 static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,

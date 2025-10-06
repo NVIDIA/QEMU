@@ -72,6 +72,7 @@ struct SMMUv3State {
     bool ats;
     uint8_t oas;
     bool pasid;
+    bool cmdqv;
 };
 
 typedef enum {

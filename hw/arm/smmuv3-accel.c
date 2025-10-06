@@ -146,6 +146,11 @@ smmuv3_accel_hw_compatible(SMMUv3State *s, HostIOMMUDeviceIOMMUFD *idev,
     if (!smmuv3_accel_check_hw_compatible(s, &info, errp)) {
         return false;
     }
+
+    if (!tegra241_cmdqv_hw_compatible(s, idev, errp)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -507,21 +512,35 @@ smmuv3_accel_dev_alloc_viommu(SMMUv3AccelDevice *accel_dev,
     SMMUv3State *s = ARM_SMMUV3(bs);
     SMMUv3AccelState *s_accel = s->s_accel;
     uint32_t s2_hwpt_id = idev->hwpt_id;
+    uint32_t viommu_id = 0;
     SMMUViommu *viommu;
-    uint32_t viommu_id;
 
     if (s_accel->viommu) {
         accel_dev->viommu = s_accel->viommu;
         return true;
     }
 
-    if (!iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
-                                      IOMMU_VIOMMU_TYPE_ARM_SMMUV3, s2_hwpt_id,
-                                      NULL, 0, &viommu_id, errp)) {
-        return false;
+    viommu = g_new0(SMMUViommu, 1);
+
+    if (s->cmdqv) {
+        if (!iommufd_backend_alloc_viommu(
+                idev->iommufd, idev->devid, IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV,
+                s2_hwpt_id, &viommu->cmdqv_data, sizeof(viommu->cmdqv_data),
+                &viommu_id, errp)) {
+            error_report("NVIDIA CMDQV is unsupported, falling back to "
+                         "emulated cmdq");
+            s->cmdqv = false;
+        }
     }
 
-    viommu = g_new0(SMMUViommu, 1);
+    if (!viommu_id) {
+        if (!iommufd_backend_alloc_viommu(idev->iommufd, idev->devid,
+                IOMMU_VIOMMU_TYPE_ARM_SMMUV3, s2_hwpt_id, NULL, 0,
+                &viommu_id, errp)) {
+                return false;
+        }
+    }
+
     viommu->core.viommu_id = viommu_id;
     viommu->core.s2_hwpt_id = s2_hwpt_id;
     viommu->core.iommufd = idev->iommufd;
