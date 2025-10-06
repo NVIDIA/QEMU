@@ -80,6 +80,7 @@ struct RmeGuest {
     uint8_t personalization_value[ARM_RME_CONFIG_RPV_SIZE];
     RmeGuestMeasurementAlgorithm measurement_algo;
     bool use_measurement_log;
+    bool use_shared_mec;
 
     RmeRamRegion init_ram;
     uint8_t ipa_bits;
@@ -434,6 +435,9 @@ static int rme_configure_one(RmeGuest *guest, uint32_t cfg, Error **errp)
         }
         cfg_str = "hash algorithm";
         break;
+    case ARM_RME_CONFIG_MEC:
+        args.shared_mec = guest->use_shared_mec;
+        break;
     default:
         g_assert_not_reached();
     }
@@ -453,6 +457,7 @@ static int rme_configure(Error **errp)
     const uint32_t config_options[] = {
         ARM_RME_CONFIG_RPV,
         ARM_RME_CONFIG_HASH_ALGO,
+        ARM_RME_CONFIG_MEC,
     };
 
     for (option = 0; option < ARRAY_SIZE(config_options); option++) {
@@ -680,6 +685,20 @@ static void rme_set_measurement_log(Object *obj, bool value, Error **errp)
     guest->use_measurement_log = value;
 }
 
+static bool rme_get_shared_mec(Object *obj, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    return guest->use_shared_mec;
+}
+
+static void rme_set_shared_mec(Object *obj, bool value, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    guest->use_shared_mec = value;
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     object_class_property_add_str(oc, "personalization-value", rme_get_rpv,
@@ -700,6 +719,12 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
                                    rme_set_measurement_log);
     object_class_property_set_description(oc, "measurement-log",
             "Enable/disable Realm measurement log");
+
+    object_class_property_add_bool(oc, "shared-mec",
+                                   rme_get_shared_mec,
+                                   rme_set_shared_mec);
+    object_class_property_set_description(oc, "shared-mec",
+            "Enable/disable usage of a shared Memory Encryption Context (MEC)");
 }
 
 static void rme_guest_init(Object *obj)
