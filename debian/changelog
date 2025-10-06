@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia1-1) noble; urgency=medium
+
+  * Update to QEMU 10.1.0 upstream with NVIDIA support
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Tue, 07 Oct 2025 09:16:29 -0700
+
 qemu (1:8.2.2+ds-0ubuntu1) noble; urgency=medium
 
   * Merge version 8.2.2 from upstream. (LP: #2061005).  Cherry-picks from
