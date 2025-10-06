@@ -1216,12 +1216,15 @@
 #     memory (unmeasured) and can then be read by a verifier to
 #     reconstruct the RIM.
 #
+# @shared-mec: Enable/disable usage of a shared MEC.
+#
 # Since: 10.0
 ##
 { 'struct': 'RmeGuestProperties',
   'data': { '*personalization-value': 'str',
             '*measurement-algorithm': 'RmeGuestMeasurementAlgorithm',
-            '*measurement-log': 'bool'} }
+            '*measurement-log': 'bool',
+            '*shared-mec': 'bool'} }
 
 ##
 # @ObjectType:
