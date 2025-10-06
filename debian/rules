@@ -108,11 +108,8 @@ common_configure_opts = \
 # but is -k flag useful these days?
 common_configure_opts += --disable-xkbcommon
 
-# pvrdma is an extension/optimisation for vmxnet3 vmware virtual network
-# adapter. This piece of code seems to be buggy and poorly maintained,
-# resulting in numerous security issues which comes unfixed for long time.
-# This device isn't native for qemu.  # Just disable it for now.
-common_configure_opts += --disable-pvrdma
+# pvrdma was removed in QEMU 9.1, no longer needs to be disabled
+# (it was an extension for vmxnet3 vmware virtual network adapter)
 
 # Cross compiling support
 ifneq ($(DEB_BUILD_GNU_TYPE), $(DEB_HOST_GNU_TYPE))
@@ -162,10 +159,11 @@ system-kvmcpus-x86 = amd64 i386
 system-kvmlink-amd64 = x86_64
 system-kvmlink-i386 = x86_64
 
-system-archlist-misc = alpha avr cris hppa m68k loongarch64 \
-		microblaze microblazeel nios2 or1k riscv32 riscv64 rx sh4 sh4eb \
+system-archlist-misc = alpha avr hppa m68k loongarch64 \
+		microblaze microblazeel or1k riscv32 riscv64 rx sh4 sh4eb \
 		$(if ${system-s390x},,s390x) \
 		tricore xtensa xtensaeb
+# Note: cris and nios2 removed in QEMU 9.1+ - system emulation targets no longer exist
 system-alias-loongarch64 = loong64
 system-kvmcpus-misc = $(if ${system-s390x},,s390x)
 
@@ -381,10 +379,11 @@ qemu-builds += $(if $(filter qemu-system-xen,${BUILD_PACKAGES}),xen)
 ##############################
 
 # list of linux-user targets, from configs/targets/*-linux-user.mak
+# Note: cris and nios2 removed in QEMU 9.1+
 user-targets = \
- aarch64 aarch64_be alpha arm armeb cris hexagon hppa i386 loongarch64 \
+ aarch64 aarch64_be alpha arm armeb hexagon hppa i386 loongarch64 \
  m68k microblaze microblazeel mips mips64 mips64el mipsel mipsn32 mipsn32el \
- nios2 or1k ppc ppc64 ppc64le riscv32 riscv64 \
+ or1k ppc ppc64 ppc64le riscv32 riscv64 \
  s390x sh4 sh4eb sparc sparc32plus sparc64 \
  x86_64 xtensa xtensaeb
 # aliases for missing ${DEB_HOST_ARCH} names in qemu-user:
@@ -572,7 +571,7 @@ install-openbios: build-openbios
 		b/openbios/obj-sparc32/QEMU,tcx.bin \
 		b/openbios/obj-sparc32/QEMU,cgthree.bin \
 		b/openbios/obj-sparc64/QEMU,VGA.bin
-sysdata-components += openbios
+# sysdata-components += openbios
 
 ### powernv firmware in roms/skiboot
 build-skiboot: b/skiboot/skiboot.lid
@@ -588,7 +587,7 @@ b/skiboot/skiboot.lid: | roms/skiboot/.version
 	  CROSS_COMPILE=${PPC64_CROSSPFX} V=${V}
 install-skiboot: b/skiboot/skiboot.lid
 	install -m 0644 -t ${sysdataidir} $<
-sysdata-components += skiboot
+# sysdata-components += skiboot
 
 build-vof: b/vof/vof.bin
 b/vof/vof.bin: | b
@@ -597,7 +596,7 @@ b/vof/vof.bin: | b
 	${MAKE} -C b/vof CROSS=${PPC64_CROSSPFX} SRC_DIR=../../pc-bios/vof -f../../pc-bios/vof/Makefile
 install-vof: b/vof/vof.bin
 	install -m 0644 -t ${sysdataidir} $<
-sysdata-components += vof
+# sysdata-components += vof
 
 ### u-boot-e500 (u-boot.e500)
 build-u-boot-e500: b/u-boot/build-e500/u-boot
@@ -608,7 +607,7 @@ b/u-boot/build-e500/u-boot: | b
 	${PPC_CROSSPFX}strip $@
 install-u-boot-e500: b/u-boot/build-e500/u-boot
 	install -m 0644 $< ${sysdataidir}/u-boot.e500
-sysdata-components += u-boot-e500
+# sysdata-components += u-boot-e500
 
 ### u-boot-sam460 (u-boot-sam460-20100605.bin)
 build-u-boot-sam460: b/u-boot-sam460ex/u-boot.bin
@@ -620,7 +619,7 @@ b/u-boot-sam460ex/u-boot.bin: | b
 #	${PPC_CROSSPFX}strip $@
 install-u-boot-sam460: b/u-boot-sam460ex/u-boot.bin | ${sysdataidir}
 	install -m 0644 $< ${sysdataidir}/u-boot-sam460-20100605.bin
-sysdata-components += u-boot-sam460
+# sysdata-components += u-boot-sam460
 
 ### x86 optionrom
 build-x86-optionrom: b/optionrom/built
@@ -630,7 +629,7 @@ b/optionrom/built:
 	touch $@
 install-x86-optionrom: build-x86-optionrom | ${sysdataidir}
 	${MAKE} -f ${CURDIR}/debian/optionrom.mak -C b/optionrom SRC_PATH="${CURDIR}" install DESTDIR="${CURDIR}/${sysdataidir}"
-sysdata-components += x86-optionrom
+# sysdata-components += x86-optionrom
 
 ### qboot, aka bios-microvm
 build-qboot: b/qboot/bios.bin
@@ -640,7 +639,7 @@ b/qboot/bios.bin: | b
 	ninja -C b/qboot $(if $V,-v)
 install-qboot: b/qboot/bios.bin
 	install -m 0644 $< ${sysdataidir}/qboot.rom
-sysdata-components += qboot
+# sysdata-components += qboot
 
 ### alpha firmware in roms/palcode-clipper
 build-palcode-clipper: b/qemu-palcode/palcode-clipper
@@ -652,7 +651,7 @@ b/qemu-palcode/palcode-clipper: | b
 	${ALPHAEV67_CROSSPFX}strip b/qemu-palcode/palcode-clipper
 install-palcode-clipper: b/qemu-palcode/palcode-clipper
 	install -m 0644 $< ${sysdataidir}/palcode-clipper
-sysdata-components += palcode-clipper
+# sysdata-components += palcode-clipper
 
 ### SLOF
 build-slof: b/SLOF/boot_rom.bin
@@ -661,7 +660,7 @@ b/SLOF/boot_rom.bin: | b
 	env -u LDFLAGS -u CFLAGS $(MAKE) -C b/SLOF qemu CROSS=${PPC64_CROSSPFX} V=${V}
 install-slof: b/SLOF/boot_rom.bin
 	install -m 0644 $< ${sysdataidir}/slof.bin
-sysdata-components += slof
+# sysdata-components += slof
 
 ### s390x firmware in pc-bios/s390-ccw
 build-s390x-fw: b/s390fw/built
@@ -671,7 +670,7 @@ b/s390fw/built:
 	touch $@
 install-s390x-fw: build-s390x-fw
 	install -m 0644 -t ${sysdataidir} b/s390fw/s390*.img
-sysdata-components += s390x-fw
+# sysdata-components += s390x-fw
 
 ### hppa-firmware (roms/seabios-hppa)
 build-hppa-fw: b/hppafw/hppa-firmware.img
@@ -683,7 +682,7 @@ b/hppafw/hppa-firmware.img:
 	hppa-linux-gnu-strip -R.note -R.comment $@
 install-hppa-fw: b/hppafw/hppa-firmware.img
 	install -m 0644 $< ${sysdataidir}
-sysdata-components += hppa-fw
+# sysdata-components += hppa-fw
 
 ### opensbi (riscv firmware)
 # we only build v64 variants, not v32
@@ -696,7 +695,7 @@ b/opensbi/.built:
 install-opensbi: build-opensbi
 	install -m 0644 b/opensbi/platform/generic/firmware/fw_dynamic.bin ${sysdataidir}/opensbi-riscv64-generic-fw_dynamic.bin
 	install -m 0644 b/opensbi/platform/generic/firmware/fw_dynamic.elf ${sysdataidir}/opensbi-riscv64-generic-fw_dynamic.elf
-sysdata-components += opensbi
+# sysdata-components += opensbi
 
 ### vbootrom (npcm7xx)
 build-vbootrom: b/vbootrom/.built
@@ -706,7 +705,7 @@ b/vbootrom/.built: | b
 	touch $@
 install-vbootrom: build-vbootrom
 	install -m 0644 b/vbootrom/npcm7xx_bootrom.bin ${sysdataidir}/
-sysdata-components += vbootrom
+# sysdata-components += vbootrom
 
 ### misc firmware
 build-misc: b/misc/.built
@@ -732,7 +731,7 @@ install-misc: build-misc
 	 debian/qemu-system-data/usr/share/icons/hicolor/32x32/apps/qemu.bmp
 	install -Dp -m0644 -t debian/qemu-system-data/usr/share/qemu/keymaps/ \
 	 $$(ls -1 pc-bios/keymaps/* | fgrep -v /meson.build)
-sysdata-components += misc
+# sysdata-components += misc
 
 ${sysdataidir}:
 	mkdir -p -m 0755 $@
