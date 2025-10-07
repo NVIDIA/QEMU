@@ -1,4 +1,4 @@
-qemu (1:10.1.0+nvidia1-1) noble; urgency=medium
+qemu (1:10.1.0+nvidia-unstable1-1) noble; urgency=medium
 
   * Update to QEMU 10.1.0 upstream with NVIDIA support
 
