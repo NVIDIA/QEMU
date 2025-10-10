@@ -7,7 +7,7 @@ dtbs = [
   'petalogix-s3adsp1800.dtb',
 ]
 
-dtc = find_program('dtc', required: false)
+dtc = disabler()  # Force use of pre-built DTB files
 if dtc.found()
   foreach out : dtbs
     f = fs.replace_suffix(out, '.dts')
