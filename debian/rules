@@ -717,16 +717,17 @@ install-vbootrom: build-vbootrom
 build-misc: b/misc/.built
 b/misc/.built:
 	mkdir -p b/misc
-	dtc -o b/misc/bamboo.dtb pc-bios/bamboo.dts
-	dtc -o b/misc/canyonlands.dtb pc-bios/canyonlands.dts
-	dtc -o b/misc/petalogix-ml605.dtb pc-bios/petalogix-ml605.dts
-	dtc -o b/misc/petalogix-s3adsp1800.dtb pc-bios/petalogix-s3adsp1800.dts
+	# Use pre-built DTB files from pc-bios/dtb/
+	cp pc-bios/dtb/bamboo.dtb b/misc/bamboo.dtb
+	cp pc-bios/dtb/canyonlands.dtb b/misc/canyonlands.dtb
+	cp pc-bios/dtb/petalogix-ml605.dtb b/misc/petalogix-ml605.dtb
+	cp pc-bios/dtb/petalogix-s3adsp1800.dtb b/misc/petalogix-s3adsp1800.dtb
 	touch $@
 install-misc: build-misc
 	install -m 0644 b/misc/bamboo.dtb b/misc/canyonlands.dtb \
-		-D -t ${sysdataidir}
+		-D -t ${sysdataidir}/dtb
 	install -m 0644 b/misc/petalogix-ml605.dtb b/misc/petalogix-s3adsp1800.dtb \
-		-D -t debian/qemu-system-misc/usr/share/qemu/
+		-D -t debian/qemu-system-misc/usr/share/qemu/dtb/
 # icon for gtk ui
 	install -Dp -m0644 ui/icons/qemu.svg \
 	 -t debian/qemu-system-data/usr/share/icons/hicolor/scalable/apps/
@@ -737,7 +738,7 @@ install-misc: build-misc
 	 debian/qemu-system-data/usr/share/icons/hicolor/32x32/apps/qemu.bmp
 	install -Dp -m0644 -t debian/qemu-system-data/usr/share/qemu/keymaps/ \
 	 $$(ls -1 pc-bios/keymaps/* | fgrep -v /meson.build)
-# sysdata-components += misc
+sysdata-components += misc
 
 ${sysdataidir}:
 	mkdir -p -m 0755 $@
