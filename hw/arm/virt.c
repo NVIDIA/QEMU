@@ -1268,14 +1268,28 @@ static PFlashCFI01 *virt_flash_create1(VirtMachineState *vms,
     return PFLASH_CFI01(dev);
 }
 
+/* Create pflash devices early for blockdev property support.
+ * For confidential VMs, devices are created but not mapped. */
 static void virt_flash_create(VirtMachineState *vms)
 {
-    if (virt_machine_is_confidential(vms)) {
+    /* Always create for property registration.
+     * CCA check moved to virt_flash_map() instead. */
+    vms->flash[0] = virt_flash_create1(vms, "virt.flash0", "pflash0");
+    vms->flash[1] = virt_flash_create1(vms, "virt.flash1", "pflash1");
+}
+
+static void virt_flash_realize(PFlashCFI01 *flash, hwaddr size)
+{
+    DeviceState *dev = DEVICE(flash);
+
+    if (dev->realized) {
         return;
     }
 
-    vms->flash[0] = virt_flash_create1(vms, "virt.flash0", "pflash0");
-    vms->flash[1] = virt_flash_create1(vms, "virt.flash1", "pflash1");
+    assert(QEMU_IS_ALIGNED(size, VIRT_FLASH_SECTOR_SIZE));
+    assert(size / VIRT_FLASH_SECTOR_SIZE <= UINT32_MAX);
+    qdev_prop_set_uint32(dev, "num-blocks", size / VIRT_FLASH_SECTOR_SIZE);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 }
 
 static void virt_flash_map1(PFlashCFI01 *flash,
@@ -1283,11 +1297,6 @@ static void virt_flash_map1(PFlashCFI01 *flash,
                             MemoryRegion *sysmem)
 {
     DeviceState *dev = DEVICE(flash);
-
-    assert(QEMU_IS_ALIGNED(size, VIRT_FLASH_SECTOR_SIZE));
-    assert(size / VIRT_FLASH_SECTOR_SIZE <= UINT32_MAX);
-    qdev_prop_set_uint32(dev, "num-blocks", size / VIRT_FLASH_SECTOR_SIZE);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     memory_region_add_subregion(sysmem, base,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev),
@@ -1308,6 +1317,9 @@ static void virt_flash_map(VirtMachineState *vms,
      */
     hwaddr flashsize = vms->memmap[VIRT_FLASH].size / 2;
     hwaddr flashbase = vms->memmap[VIRT_FLASH].base;
+
+    virt_flash_realize(vms->flash[0], flashsize);
+    virt_flash_realize(vms->flash[1], flashsize);
 
     if (virt_machine_is_confidential(vms)) {
         return;
@@ -1373,6 +1385,10 @@ static bool virt_confidential_firmware_init(VirtMachineState *vms,
     MemoryRegion *fw_ram;
     hwaddr fw_base = vms->memmap[VIRT_FLASH].base;
     hwaddr fw_size = vms->memmap[VIRT_FLASH].size;
+    hwaddr flashsize = fw_size / 2;
+
+    virt_flash_realize(vms->flash[0], flashsize);
+    virt_flash_realize(vms->flash[1], flashsize);
 
     if (!MACHINE(vms)->firmware) {
         return false;
@@ -2319,8 +2335,6 @@ static void machvirt_init(MachineState *machine)
     bool has_ged = !vmc->no_ged;
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
-
-    virt_flash_create(vms);
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
 
@@ -3652,6 +3666,15 @@ static void virt_instance_init(Object *obj)
     vms->oem_id = g_strndup(ACPI_BUILD_APPNAME6, 6);
     vms->oem_table_id = g_strndup(ACPI_BUILD_APPNAME8, 8);
     cxl_machine_init(obj, &vms->cxl_devices_state);
+
+    /*
+     * Create pflash devices early for blockdev property support.
+     * For confidential VMs, the devices are created but won't be
+     * mapped into memory (virt_flash_map checks machine->cgs).
+     * This allows libvirt 10.x to use:
+     *   -machine virt-10.1,pflash0=node,pflash1=node
+     */
+    virt_flash_create(vms);
 }
 
 static const TypeInfo virt_machine_info = {
