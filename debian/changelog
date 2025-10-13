@@ -1,3 +1,10 @@
+qemu (1:10.1.0+nvidia-unstable3-1) noble; urgency=medium
+
+  * Revert "NVIDIA: SAUCE: hw/arm/virt: Define MEC as shared or private"
+  * Fix pflash and blockdev that broke virt-install and CCA workloads
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Mon, 13 Oct 2025 17:17:47 -0700
+
 qemu (1:10.1.0+nvidia-unstable2-1) noble; urgency=medium
 
   * Add initial CCA content from https://git.codelinaro.org/linaro/dcap/qemu.git
