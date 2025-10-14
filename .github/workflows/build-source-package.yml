@@ -1,0 +1,115 @@
+# Builds a Debian source package for QEMU
+
+name: Build Debian Source Package
+
+on:
+  push:
+    branches:
+      - 'nvidia/latest'
+      - 'nvidia_stable-10.1'
+
+  # Allow manual triggering of the workflow from the GitHub UI
+  workflow_dispatch:
+
+jobs:
+  build-source-package:
+    # arm64 is the primary platform of interest for this project
+    runs-on: ubuntu-24.04
+
+    steps:
+      # Step 1: Check out the repository's code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for all tags and branches, which can be necessary
+          # for tools like git-buildpackage to determine version numbers.
+          fetch-depth: 0
+
+      # Step 2: Install Debian packaging tools and build dependencies
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y devscripts equivs fakeroot git-buildpackage
+
+          # Use mk-build-deps to parse debian/control, create a dummy package
+          # with all build dependencies, and install it. This ensures all
+          # required build dependencies are present.
+          # The --no-install-recommends flag keeps the environment minimal.
+          sudo mk-build-deps -i --tool="apt-get -y --no-install-recommends"
+          # Remove debs that this generates from the working directory after install
+          rm -f qemu-build-deps*
+
+      # Step 3: Generate Upstream Tarball
+      - name: Generate Upstream Tarball
+        run: |
+          # Extract source name and upstream version from debian/changelog.
+          # The first sed command strips any epoch (e.g., "1:") from the start of the version.
+          # The second sed command strips the Debian revision from the end of the version string.
+          # dpkg-parsechangelog is in the dpkg-dev package, a dependency of devscripts.
+          export SOURCE_NAME=$(dpkg-parsechangelog -S Source)
+          export UPSTREAM_VERSION=$(dpkg-parsechangelog -S Version | sed 's/^[0-9]\+://' | sed 's/-[^-]*$//')
+
+          git config --global user.email "robot@builder.local"
+          git config --global user.name "Builder Robot"
+          # Create the .orig.tar.gz in the parent directory.
+          ./debian/build-source-package-from-git.sh
+
+      # Step 4: Upload Workspace for Debugging
+      - name: Upload Workspace for Debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-build-workspace
+          path: .
+
+      # Step 5: Build the Debian source package
+      - name: Build Source Package
+        run: |
+          # Use debuild to create the source package.
+          # -S: Build a source package only (no binaries).
+          # -us: Do not sign the source package.
+          # -uc: Do not sign the .changes file.
+          # This command will find and use the .orig.tar.gz we just created.
+          current_dir=$(pwd)
+          cd deb
+          # There should only be one thing in here, which is the tarball we'll extract
+          # so wildcard should be OK in this instance.
+          ls
+          tar -xvf $(ls -d * | head -n 1)
+          ls
+          cd $(ls -d */ | head -n 1)
+          debuild -S -us -uc
+          cd "$current_dir"
+
+      # Step 6: Log MD5 Checksums
+      - name: Log MD5 Checksums as Annotations
+        run: |
+          # Change to the parent directory where artifacts were created.
+          current_dir=$(pwd)
+          cd deb
+          mkdir source_package_artifacts
+
+          # Iterate over all the generated build artifacts.
+          for file in *.dsc *.orig.tar.* *.debian.tar.* *.changes *source.build *source.buildinfo; do
+            # Check if files matching the pattern exist before processing.
+            if [ -f "$file" ]; then
+              # Calculate the MD5 sum and format it for the annotation.
+              # The output of md5sum is "CHECKSUM  FILENAME".
+              checksum=$(md5sum "$file")
+
+              # Echo the checksum as a workflow notice annotation.
+              # This will make it easily visible in the GitHub Actions UI.
+              echo "::notice title=MD5 Checksum::$checksum"
+              mv "$file" source_package_artifacts
+            fi
+          done
+          mv source_package_artifacts "$current_dir"
+
+      # Step 7: Upload the generated source package files as artifacts
+      - name: Upload Debian Source Package Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # Name of the artifact bundle to be displayed in the GitHub UI
+          name: debian-source-package
+
+          path: source_package_artifacts
