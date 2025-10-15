@@ -1,0 +1,102 @@
+--- qemu.orig/hw/i386/pc_q35.c	2024-03-25 14:56:51.607442720 -0400
++++ qemu/hw/i386/pc_q35.c	2024-03-25 14:57:39.602962388 -0400
+@@ -913,6 +913,24 @@ static void pc_q35_jammy_hpb_machine_opt
+ DEFINE_Q35_MACHINE(jammy_hpb, "pc-q35-jammy-hpb", NULL,
+                    pc_q35_jammy_hpb_machine_options);
+ 
++static void pc_q35_jammy_maxcpus_machine_options(MachineClass *m)
++{
++    pc_q35_jammy_machine_options(m);
++    m->desc = "Ubuntu 22.04 PC (Q35 + ICH9, maxcpus=1024, 2009)";
++    m->max_cpus = 1024;
++}
++DEFINE_Q35_MACHINE(jammy_maxcpus, "pc-q35-jammy-maxcpus", NULL,
++                   pc_q35_jammy_maxcpus_machine_options);
++
++static void pc_q35_jammy_hpb_maxcpus_machine_options(MachineClass *m)
++{
++    pc_q35_jammy_hpb_machine_options(m);
++    m->desc = "Ubuntu 22.04 PC (Q35 + ICH9, +host-phys-bits=true, maxcpus=1024, 2009)";
++    m->max_cpus = 1024;
++}
++DEFINE_Q35_MACHINE(jammy_hpb_maxcpus, "pc-q35-jammy-hpb-maxcpus", NULL,
++                   pc_q35_jammy_hpb_maxcpus_machine_options);
++
+ static void pc_q35_kinetic_machine_options(MachineClass *m)
+ {
+     pc_q35_7_0_machine_options(m);
+@@ -970,6 +988,24 @@ static void pc_q35_mantic_hpb_machine_op
+ DEFINE_Q35_MACHINE(mantic_hpb, "pc-q35-mantic-hpb", NULL,
+                    pc_q35_mantic_hpb_machine_options);
+ 
++static void pc_q35_mantic_maxcpus_machine_options(MachineClass *m)
++{
++    pc_q35_mantic_machine_options(m);
++    m->desc = "Ubuntu 23.10 PC (Q35 + ICH9, maxcpus=1024, 2009)";
++    m->max_cpus = 1024;
++}
++DEFINE_Q35_MACHINE(mantic_maxcpus, "pc-q35-mantic-maxcpus", NULL,
++                   pc_q35_mantic_maxcpus_machine_options);
++
++static void pc_q35_mantic_hpb_maxcpus_machine_options(MachineClass *m)
++{
++    pc_q35_mantic_hpb_machine_options(m);
++    m->desc = "Ubuntu 23.10 PC (Q35 + ICH9, +host-phys-bits=true, maxcpus=1024, 2009)";
++    m->max_cpus = 1024;
++}
++DEFINE_Q35_MACHINE(mantic_hpb_maxcpus, "pc-q35-mantic-hpb-maxcpus", NULL,
++                   pc_q35_mantic_hpb_maxcpus_machine_options);
++
+ static void pc_q35_noble_machine_options(MachineClass *m)
+ {
+     pc_q35_8_2_machine_options(m);
+--- qemu.orig/hw/i386/pc_piix.c	2024-03-25 14:56:51.607442720 -0400
++++ qemu/hw/i386/pc_piix.c	2024-03-25 14:56:51.607442720 -0400
+@@ -1185,6 +1185,24 @@ static void pc_jammy_hpb_machine_options
+ DEFINE_I440FX_MACHINE(jammy_hpb, "pc-i440fx-jammy-hpb", NULL,
+                       pc_jammy_hpb_machine_options);
+ 
++static void pc_jammy_maxcpus_machine_options(MachineClass *m)
++{
++    pc_jammy_machine_options(m);
++    m->desc = "Ubuntu 22.04 PC (i440FX + PIIX, maxcpus=1024, 1996)";
++    m->alias = NULL;
++    m->max_cpus = 1024;
++}
++DEFINE_I440FX_MACHINE(jammy_maxcpus, "pc-i440fx-jammy-maxcpus", NULL,
++                      pc_jammy_maxcpus_machine_options);
++
++static void pc_jammy_hpb_maxcpus_machine_options(MachineClass *m)
++{
++    pc_jammy_hpb_machine_options(m);
++    m->desc = "Ubuntu 22.04 PC (i440FX + PIIX +host-phys-bits=true, maxcpus=1024, 1996)";
++}
++DEFINE_I440FX_MACHINE(jammy_hpb_maxcpus, "pc-i440fx-jammy-hpb-maxcpus", NULL,
++                      pc_jammy_hpb_maxcpus_machine_options);
++
+ static void pc_kinetic_machine_options(MachineClass *m)
+ {
+     pc_i440fx_7_0_machine_options(m);
+@@ -1245,6 +1263,22 @@ static void pc_mantic_hpb_machine_option
+ DEFINE_I440FX_MACHINE(mantic_hpb, "pc-i440fx-mantic-hpb", NULL,
+                       pc_mantic_hpb_machine_options);
+ 
++static void pc_mantic_maxcpus_machine_options(MachineClass *m)
++{
++    pc_mantic_machine_options(m);
++    m->desc = "Ubuntu 23.10 PC (i440FX + PIIX, maxcpus=1024, 1996)";
++}
++DEFINE_I440FX_MACHINE(mantic_maxcpus, "pc-i440fx-mantic-maxcpus", NULL,
++                      pc_mantic_maxcpus_machine_options);
++
++static void pc_mantic_hpb_maxcpus_machine_options(MachineClass *m)
++{
++    pc_mantic_hpb_machine_options(m);
++    m->desc = "Ubuntu 23.10 PC (i440FX + PIIX +host-phys-bits=true, maxcpus=1024, 1996)";
++}
++DEFINE_I440FX_MACHINE(mantic_hpb_maxcpus, "pc-i440fx-mantic-hpb-maxcpus", NULL,
++                      pc_mantic_hpb_maxcpus_machine_options);
++
+ static void pc_noble_machine_options(MachineClass *m)
+ {
+     pc_i440fx_8_2_machine_options(m);

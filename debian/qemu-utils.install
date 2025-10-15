@@ -1,0 +1,10 @@
+usr/bin/qemu-img
+usr/share/man/man1/qemu-img.1
+usr/bin/qemu-nbd
+usr/share/man/man8/qemu-nbd.8
+usr/bin/qemu-io
+usr/bin/qemu-storage-daemon
+usr/share/man/man1/qemu-storage-daemon.1
+usr/share/man/man7/qemu-storage-daemon-qmp-ref.7
+
+usr/share/man/man7/qemu-block-drivers.7

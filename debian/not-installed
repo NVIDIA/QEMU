@@ -1,0 +1,19 @@
+usr/include/qemu-plugin.h
+usr/share/doc/qemu/_static
+usr/share/doc/qemu/about
+usr/share/doc/qemu/devel
+usr/share/doc/qemu/interop
+usr/share/doc/qemu/specs
+usr/share/doc/qemu/tools
+usr/share/doc/qemu/*.*
+usr/share/doc/qemu/.buildinfo
+usr/bin/elf2dmp
+# test tool
+usr/bin/qemu-edid
+# we install these files in d/rules into arch-all qemu-system-data
+usr/share/icons
+usr/share/applications/qemu.desktop
+usr/share/qemu/keymaps
+# these 2 are installed even if no user or system build is requested
+usr/share/doc/qemu/user/index.html
+usr/share/doc/qemu/user/main.html

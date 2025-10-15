@@ -1,0 +1,5 @@
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-spice.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/chardev-spice.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-qxl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-spice-app.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-spice-core.so

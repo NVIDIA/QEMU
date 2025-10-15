@@ -1,0 +1,30 @@
+debian/qemu-ifup etc/
+debian/qemu-ifdown etc/
+
+usr/share/man/man1/qemu-system.1
+usr/share/qemu/trace-events-all
+usr/bin/qemu-pr-helper
+usr/share/man/man8/qemu-pr-helper.8
+usr/share/man/man7/qemu-qmp-ref.7
+usr/share/man/man7/qemu-cpu-models.7
+usr/share/doc/qemu/system usr/share/doc/qemu-system-common
+
+# linux-specific
+usr/lib/qemu/qemu-bridge-helper
+usr/lib/qemu/virtfs-proxy-helper
+usr/share/man/man1/virtfs-proxy-helper.1
+
+# common modules. Other gui modules are in qemu-system-gui
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/accel-tcg-*.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-alsa.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-oss.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/chardev-baum.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-gpu-pci.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-gpu.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-vga.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-host.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-redirect.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-usb-smartcard.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-s390x-virtio-gpu-ccw.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-curses.so
+debian/qemu-kvm-init /usr/share/qemu/init
