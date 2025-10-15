@@ -356,7 +356,6 @@ b/xen/configured: configure
 	    ../../configure ${common_configure_opts} \
 		--disable-install-blobs --disable-docs --disable-tools \
 		--without-default-features \
-		--enable-avx2 \
 		--enable-xen --target-list=i386-softmmu \
 		--enable-xen-pci-passthrough \
 		--disable-tcg --disable-kvm \
