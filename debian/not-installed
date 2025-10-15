@@ -17,3 +17,5 @@ usr/share/qemu/keymaps
 # these 2 are installed even if no user or system build is requested
 usr/share/doc/qemu/user/index.html
 usr/share/doc/qemu/user/main.html
+# VMware-specific helper, not needed for NVIDIA QEMU
+usr/bin/qemu-vmsr-helper
