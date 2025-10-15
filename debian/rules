@@ -341,7 +341,7 @@ build-microvm: b/microvm/qemu-system-x86_64
 b/microvm/qemu-system-x86_64: b/microvm/configured
 	${NINJA} -C b/microvm qemu-system-x86_64
 install-microvm: b/microvm/qemu-system-x86_64
-	cp b/microvm/x86_64-softmmu/qemu-system-x86_64 debian/qemu-system-x86/usr/bin/qemu-system-x86_64-microvm
+	cp b/microvm/qemu-system-x86_64 debian/qemu-system-x86/usr/bin/qemu-system-x86_64-microvm
 	echo ".so man1/qemu-system.1" > debian/qemu-system-x86/usr/share/man/man1/qemu-system-x86_64-microvm.1
 # build microvm on amd64 only if system build is enabled
 qemu-builds += $(if $(filter ${DEB_HOST_ARCH}-${enable-system},amd64-y),microvm)
