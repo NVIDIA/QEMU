@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia1-1) noble; urgency=medium
+
+  * Update to QEMU 10.1.0 upstream with NVIDIA support
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Thu, 16 Oct 2025 14:30:00 -0700
+
 qemu (1:8.2.2+ds-0ubuntu1.10) noble-security; urgency=medium
 
   * SECURITY UPDATE: double-free in QEMU virtio devices
