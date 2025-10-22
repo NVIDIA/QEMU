@@ -80,6 +80,8 @@ struct RmeGuest {
     uint8_t personalization_value[ARM_RME_CONFIG_RPV_SIZE];
     RmeGuestMeasurementAlgorithm measurement_algo;
     bool use_measurement_log;
+    bool mec_specified;
+    bool use_shared_mec;
 
     RmeRamRegion init_ram;
     uint8_t ipa_bits;
@@ -408,6 +410,59 @@ static int rme_close_measurement_log(Error **errp)
     return 0;
 }
 
+static int rme_configure_mec(RmeGuest *guest, Error **errp)
+{
+    struct arm_rme_config mec_query = {
+        .cfg = ARM_RME_CONFIG_MEC_QUERY,
+    };
+    struct arm_rme_config mec_cfg = {
+        .cfg = ARM_RME_CONFIG_MEC,
+        .shared_mec = guest->use_shared_mec,
+    };
+    bool private_mec_requested = (guest->use_shared_mec == 0);
+    int ret = 0;
+
+    /* Skip MEC configuration if not requested by user */
+    if (!guest->mec_specified) {
+        return 0;
+    }
+
+    /* First query if MEC is supported by the kernel */
+    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+                            KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&mec_query);
+    if (ret) {
+        if (private_mec_requested) {
+            error_setg_errno(errp, -ret,
+                "Private MECID requested but MEC query failed - kernel may not support MEC");
+            return ret;
+        }
+        /* For shared MEC, we can continue without MEC support */
+        warn_report("MEC query failed - continuing without MEC configuration");
+        return 0;
+    }
+
+    /* Check if MEC is supported */
+    if (!mec_query.mec_supported) {
+        if (private_mec_requested) {
+            error_setg_errno(errp, ENOTSUP,
+                "Private MECID requested but MEC is not supported by the kernel");
+            return -ENOTSUP;
+        }
+        /* For shared MEC, we can continue without MEC support */
+        warn_report("MEC is not supported by the kernel - continuing without MEC configuration");
+        return 0;
+    }
+
+    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+                            KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&mec_cfg);
+    if (ret) {
+        error_setg_errno(errp, -ret, "MEC configuration failed");
+        return ret;
+    }
+
+    return 0;
+}
+
 static int rme_configure_one(RmeGuest *guest, uint32_t cfg, Error **errp)
 {
     int ret;
@@ -461,6 +516,12 @@ static int rme_configure(Error **errp)
             return ret;
         }
     }
+
+    ret = rme_configure_mec(rme_guest, errp);
+    if (ret) {
+        return ret;
+    }
+
     return 0;
 }
 
@@ -680,6 +741,21 @@ static void rme_set_measurement_log(Object *obj, bool value, Error **errp)
     guest->use_measurement_log = value;
 }
 
+static bool rme_get_shared_mec(Object *obj, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    return guest->use_shared_mec;
+}
+
+static void rme_set_shared_mec(Object *obj, bool value, Error **errp)
+{
+    RmeGuest *guest = RME_GUEST(obj);
+
+    guest->mec_specified = true;
+    guest->use_shared_mec = value;
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     object_class_property_add_str(oc, "personalization-value", rme_get_rpv,
@@ -700,6 +776,12 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
                                    rme_set_measurement_log);
     object_class_property_set_description(oc, "measurement-log",
             "Enable/disable Realm measurement log");
+
+    object_class_property_add_bool(oc, "shared-mec",
+                                   rme_get_shared_mec,
+                                   rme_set_shared_mec);
+    object_class_property_set_description(oc, "shared-mec",
+            "Enable/disable usage of a shared Memory Encryption Context (MEC)");
 }
 
 static void rme_guest_init(Object *obj)
@@ -710,6 +792,7 @@ static void rme_guest_init(Object *obj)
     }
     rme_guest = RME_GUEST(obj);
     rme_guest->measurement_algo = RME_GUEST_MEASUREMENT_ALGORITHM_SHA512;
+    rme_guest->mec_specified = false;
 }
 
 static void rme_guest_finalize(Object *obj)
