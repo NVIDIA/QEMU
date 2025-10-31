@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia-unstable4-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: hw/arm/virt: Define MEC as shared or private
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 31 Oct 2025 10:02:30 -0500
+
 qemu (1:10.1.0+nvidia-unstable3-1) noble; urgency=medium
 
   * Revert "NVIDIA: SAUCE: hw/arm/virt: Define MEC as shared or private"
