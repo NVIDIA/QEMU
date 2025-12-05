@@ -21,6 +21,7 @@
 #include "system/confidential-guest-support.h"
 #include "system/kvm.h"
 #include "system/runstate.h"
+#include <sys/utsname.h>
 
 #define TYPE_RME_GUEST "rme-guest"
 OBJECT_DECLARE_SIMPLE_TYPE(RmeGuest, RME_GUEST)
@@ -86,6 +87,7 @@ struct RmeGuest {
     RmeRamRegion init_ram;
     uint8_t ipa_bits;
     size_t num_cpus;
+    unsigned int rme_capable;   /* Runtime-detected KVM_CAP_ARM_RME value */
 
     RealmDmaRegion *dma_region;
     QLIST_HEAD(, RealmRamDiscardListener) ram_discard_list;
@@ -428,7 +430,7 @@ static int rme_configure_mec(RmeGuest *guest, Error **errp)
     }
 
     /* First query if MEC is supported by the kernel */
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&mec_query);
     if (ret) {
         if (private_mec_requested) {
@@ -453,7 +455,7 @@ static int rme_configure_mec(RmeGuest *guest, Error **errp)
         return 0;
     }
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&mec_cfg);
     if (ret) {
         error_setg_errno(errp, -ret, "MEC configuration failed");
@@ -493,7 +495,7 @@ static int rme_configure_one(RmeGuest *guest, uint32_t cfg, Error **errp)
         g_assert_not_reached();
     }
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_CONFIG_REALM, (intptr_t)&args);
     if (ret) {
         error_setg_errno(errp, -ret, "failed to configure %s", cfg_str);
@@ -535,7 +537,7 @@ static int rme_init_ram(RmeRamRegion *ram, Error **errp)
         .size = end - start,
     };
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_INIT_RIPAS_REALM,
                             (intptr_t)&init_args);
     if (ret) {
@@ -560,7 +562,7 @@ static int rme_populate_range(hwaddr base, size_t size, bool measure,
         .flags = measure ? KVM_ARM_RME_POPULATE_FLAGS_MEASURE : 0,
     };
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_POPULATE_REALM,
                             (intptr_t)&populate_args);
     if (ret) {
@@ -629,7 +631,7 @@ static int rme_create_realm(Error **errp)
         return -1;
     }
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_CREATE_REALM);
     if (ret) {
         error_setg_errno(errp, -ret, "failed to create Realm Descriptor");
@@ -658,7 +660,7 @@ static int rme_create_realm(Error **errp)
         return -1;
     }
 
-    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_ARM_RME, 0,
+    ret = kvm_vm_enable_cap(kvm_state, rme_guest->rme_capable, 0,
                             KVM_CAP_ARM_RME_ACTIVATE_REALM);
     if (ret) {
         error_setg_errno(errp, -ret, "failed to activate realm");
@@ -786,13 +788,28 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
 
 static void rme_guest_init(Object *obj)
 {
+    struct utsname buf;
+    int major, minor;
+
     if (rme_guest) {
         error_report("a single instance of RmeGuest is supported");
         exit(1);
     }
+
     rme_guest = RME_GUEST(obj);
     rme_guest->measurement_algo = RME_GUEST_MEASUREMENT_ALGORITHM_SHA512;
     rme_guest->mec_specified = false;
+
+    rme_guest->rme_capable = KVM_CAP_ARM_RME;
+
+    if (uname(&buf) == 0) {
+        if (sscanf(buf.release, "%d.%d", &major, &minor) == 2) {
+            /* For Linux kernel v6.16, KVM_CAP_ARM_RME == 243 */
+            if ((major == 6) && (minor == 16)) {
+                rme_guest->rme_capable = 243;
+            }
+        }
+    }
 }
 
 static void rme_guest_finalize(Object *obj)
@@ -865,7 +882,7 @@ int kvm_arm_rme_init(MachineState *ms)
         return -EINVAL;
     }
 
-    if (!kvm_check_extension(kvm_state, KVM_CAP_ARM_RME)) {
+    if (!kvm_check_extension(kvm_state, rme_guest->rme_capable)) {
         return -ENODEV;
     }
 
