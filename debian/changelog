@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia-unstable5-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: target/arm: Handle KVM_CAP_ARM_RME ABI change between kernel versions
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 05 Dec 2025 12:07:48 -0600
+
 qemu (1:10.1.0+nvidia-unstable4-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: hw/arm/virt: Define MEC as shared or private
