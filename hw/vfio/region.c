@@ -252,7 +252,7 @@ int vfio_region_mmap(VFIORegion *region)
     prot |= region->flags & VFIO_REGION_INFO_FLAG_WRITE ? PROT_WRITE : 0;
 
     for (i = 0; i < region->nr_mmaps; i++) {
-        size_t align = MIN(1ULL << ctz64(region->mmaps[i].size), 1 * GiB);
+        size_t align = MIN(pow2ceil(region->mmaps[i].size), 1 * GiB);
         void *map_base, *map_align;
 
         /*
