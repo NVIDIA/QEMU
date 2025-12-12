@@ -145,20 +145,56 @@ static void acpi_generic_initiator_class_init(ObjectClass *oc, const void *data)
         "NUMA node associated with the PCI device");
 }
 
-static int build_acpi_generic_initiator(Object *obj, void *opaque)
+static gint memory_device_addr_sort(gconstpointer a, gconstpointer b)
+{
+    const AcpiGenericInitiator *gi_a = a;
+    const AcpiGenericInitiator *gi_b = b;
+
+    if (gi_a->node > gi_b->node) {
+        return 1;
+    } else if (gi_a->node < gi_b->node) {
+        return -1;
+    }
+    return 0;
+}
+
+static int acpi_generic_initiator_list(Object *obj, void *opaque)
+{
+    GSList **list = opaque;
+
+    if (object_dynamic_cast(obj, TYPE_ACPI_GENERIC_INITIATOR)) {
+        *list = g_slist_insert_sorted(*list, ACPI_GENERIC_INITIATOR(obj),
+                                      memory_device_addr_sort);
+    }
+
+    object_child_foreach(obj, acpi_generic_initiator_list, opaque);
+    return 0;
+}
+
+/*
+ * Identify Generic Initiator objects and link them into the list which is
+ * returned to the caller.
+ *
+ * Note: it is the caller's responsibility to free the list to avoid
+ * memory leak.
+ */
+static GSList *acpi_generic_initiator_get_list(void)
+{
+    GSList *list = NULL;
+
+    object_child_foreach(object_get_root(),
+                         acpi_generic_initiator_list, &list);
+    return list;
+}
+
+static int build_acpi_generic_initiator(AcpiGenericInitiator *gi,
+                                        GArray *table_data)
 {
     MachineState *ms = MACHINE(qdev_get_machine());
-    AcpiGenericInitiator *gi;
-    GArray *table_data = opaque;
     int32_t devfn;
     uint8_t bus;
     Object *o;
 
-    if (!object_dynamic_cast(obj, TYPE_ACPI_GENERIC_INITIATOR)) {
-        return 0;
-    }
-
-    gi = ACPI_GENERIC_INITIATOR(obj);
     if (gi->node >= ms->numa_state->num_nodes) {
         error_printf("%s: Specified node %d is invalid.\n",
                      TYPE_ACPI_GENERIC_INITIATOR, gi->node);
@@ -180,6 +216,19 @@ static int build_acpi_generic_initiator(Object *obj, void *opaque)
     build_srat_pci_generic_initiator(table_data, gi->node, 0, bus, devfn);
 
     return 0;
+}
+
+static void build_all_acpi_generic_initiators(GArray *table_data)
+{
+    GSList *gi_list, *list = acpi_generic_initiator_get_list();
+    AcpiGenericInitiator *gi;
+
+    for (gi_list = list; gi_list; gi_list = gi_list->next) {
+        gi = gi_list->data;
+        build_acpi_generic_initiator(gi, table_data);
+    }
+
+    g_slist_free(list);
 }
 
 typedef struct AcpiGenericPort {
@@ -295,9 +344,8 @@ static int build_acpi_generic_port(Object *obj, void *opaque)
 
 void build_srat_generic_affinity_structures(GArray *table_data)
 {
-    object_child_foreach_recursive(object_get_root(),
-                                   build_acpi_generic_initiator,
-                                   table_data);
+    build_all_acpi_generic_initiators(table_data);
+
     object_child_foreach_recursive(object_get_root(), build_acpi_generic_port,
                                    table_data);
 }
