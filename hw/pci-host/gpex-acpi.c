@@ -110,6 +110,9 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
     CrsRangeEntry *entry;
     int i;
 
+    /* Reset GPU ID for each complete ACPI table build */
+    acpi_egm_memory_reset_gpu_id();
+
     /* start to construct the tables for pxb */
     crs_range_set_init(&crs_range_set);
     if (bus) {

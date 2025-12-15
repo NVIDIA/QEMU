@@ -20,5 +20,6 @@ typedef struct AcpiEgmMemory {
 } AcpiEgmMemory;
 
 void build_acpi_egm_memory_dsdt(Aml *dev, int bus);
+void acpi_egm_memory_reset_gpu_id(void);
 
 #endif
