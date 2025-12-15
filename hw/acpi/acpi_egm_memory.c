@@ -114,6 +114,11 @@ typedef struct DsdtInfo {
     int bus;
 } DsdtInfo;
 
+void acpi_egm_memory_reset_gpu_id(void)
+{
+    gpu_id = 0;
+}
+
 static int build_all_acpi_egm_memory_dsdt(Object *obj, void *opaque)
 {
     MachineState *ms = MACHINE(qdev_get_machine());
