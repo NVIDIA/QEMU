@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia-unstable6-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: target/arm: Use shared helper for KVM_CAP_ARM_RME detection
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 17 Dec 2025 14:44:45 -0600
+
 qemu (1:10.1.0+nvidia-unstable5-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: target/arm: Handle KVM_CAP_ARM_RME ABI change between kernel versions
