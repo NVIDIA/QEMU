@@ -23,6 +23,37 @@
 #include "system/runstate.h"
 #include <sys/utsname.h>
 
+/*
+ * Returns the correct KVM_CAP_ARM_RME capability value for the running kernel.
+ * This handles the ABI change between kernel versions:
+ *   - Linux 6.16: KVM_CAP_ARM_RME == 243
+ *   - Linux 6.17+: KVM_CAP_ARM_RME == 244
+ */
+unsigned int kvm_arm_rme_get_cap(void)
+{
+    static unsigned int rme_cap = 0;
+    static bool detected = false;
+
+    if (!detected) {
+        struct utsname buf;
+        int major, minor;
+
+        rme_cap = KVM_CAP_ARM_RME;
+
+        if (uname(&buf) == 0) {
+            if (sscanf(buf.release, "%d.%d", &major, &minor) == 2) {
+                /* For Linux kernel v6.16, KVM_CAP_ARM_RME == 243 */
+                if ((major == 6) && (minor == 16)) {
+                    rme_cap = 243;
+                }
+            }
+        }
+        detected = true;
+    }
+
+    return rme_cap;
+}
+
 #define TYPE_RME_GUEST "rme-guest"
 OBJECT_DECLARE_SIMPLE_TYPE(RmeGuest, RME_GUEST)
 
@@ -788,9 +819,6 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
 
 static void rme_guest_init(Object *obj)
 {
-    struct utsname buf;
-    int major, minor;
-
     if (rme_guest) {
         error_report("a single instance of RmeGuest is supported");
         exit(1);
@@ -800,16 +828,7 @@ static void rme_guest_init(Object *obj)
     rme_guest->measurement_algo = RME_GUEST_MEASUREMENT_ALGORITHM_SHA512;
     rme_guest->mec_specified = false;
 
-    rme_guest->rme_capable = KVM_CAP_ARM_RME;
-
-    if (uname(&buf) == 0) {
-        if (sscanf(buf.release, "%d.%d", &major, &minor) == 2) {
-            /* For Linux kernel v6.16, KVM_CAP_ARM_RME == 243 */
-            if ((major == 6) && (minor == 16)) {
-                rme_guest->rme_capable = 243;
-            }
-        }
-    }
+    rme_guest->rme_capable = kvm_arm_rme_get_cap();
 }
 
 static void rme_guest_finalize(Object *obj)
