@@ -36,7 +36,11 @@ CcaCapability *qmp_query_cca_capabilities(Error **errp)
         return NULL;
     }
 
-    if (!kvm_check_extension(kvm_state, KVM_CAP_ARM_RME)) {
+    /*
+     * Use the runtime-detected KVM_CAP_ARM_RME value to handle
+     * the ABI change between kernel versions (243 on 6.16, 244 on later).
+     */
+    if (!kvm_check_extension(kvm_state, kvm_arm_rme_get_cap())) {
         error_setg(errp, "RME is not enabled in KVM");
         return NULL;
     }

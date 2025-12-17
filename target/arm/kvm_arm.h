@@ -275,6 +275,15 @@ void kvm_arm_enable_mte(Object *cpuobj, Error **errp);
 void arm_cpu_kvm_set_irq(void *arm_cpu, int irq, int level);
 
 /**
+ * kvm_arm_rme_get_cap:
+ *
+ * Returns the correct KVM_CAP_ARM_RME capability value for the running
+ * kernel. This handles the ABI change between kernel versions where the
+ * capability number differs (e.g., 243 on kernel 6.16, 244 on later kernels).
+ */
+unsigned int kvm_arm_rme_get_cap(void);
+
+/**
  * kvm_arm_rme_init
  * @ms: the machine state
  *
