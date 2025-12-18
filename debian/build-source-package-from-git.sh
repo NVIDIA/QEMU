@@ -28,4 +28,5 @@ git commit -s -a -m "[DROP THIS] Include submodules for packaging"
 
 # Produce an orig tarball
 mkdir -p deb
-git archive --prefix=qemu-10.1.0/ -o deb/qemu_10.1.0+nvidia1.orig.tar.gz HEAD
+debversion=$(dpkg-parsechangelog -S Version | sed 's/^[0-9]\+://' | sed 's/-[^-]*$//')
+git archive --prefix=qemu-10.1.0/ -o deb/qemu_$debversion.orig.tar.gz HEAD
