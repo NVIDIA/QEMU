@@ -1,3 +1,17 @@
+qemu (1:10.1.0+nvidia3-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: acpi: generic initiator in sorted order
+  * NVIDIA: SAUCE: hw/vfio: adjust alignment for hugepfnmap
+  * NVIDIA: SAUCE: pcie/acs: Make ACS Control read-only to guests
+  * NVIDIA: SAUCE: Expose ACS caps on Guest as configured by the HYP
+  * NVIDIA: SAUCE: xio3130_downstream: Add ACS support for downstream PCIe ports
+  * NVIDIA: SAUCE: hw/arm: GB300 workaround for GPU BAR1 GPA=HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 workaround for GPU BAR1 HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 DirectNIC GPA=HPA
+  * CANONICAL: [Infrastructure] Make orig name more dynamic
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 09 Dec 2026 14:30:00 -0700
+
 qemu (1:10.1.0+nvidia1-1) noble; urgency=medium
 
   * Update to QEMU 10.1.0 upstream with NVIDIA support
