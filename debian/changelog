@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia4-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: Reset gpu_id each time building DSDT
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 14 Jan 2026 18:19:51 -0600
+
 qemu (1:10.1.0+nvidia3-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: acpi: generic initiator in sorted order
