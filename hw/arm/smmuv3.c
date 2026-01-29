@@ -2121,6 +2121,8 @@ static const Property smmuv3_properties[] = {
     DEFINE_PROP_UINT8("oas", SMMUv3State, oas, 44),
     DEFINE_PROP_BOOL("pasid", SMMUv3State, pasid, false),
     DEFINE_PROP_BOOL("cmdqv", SMMUv3State, cmdqv, false),
+    /* GPA of MSI doorbell, for SMMUv3 accel use. */
+    DEFINE_PROP_UINT64("msi-gpa", SMMUv3State, msi_gpa, 0),
 };
 
 static void smmuv3_instance_init(Object *obj)
