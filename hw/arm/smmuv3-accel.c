@@ -692,6 +692,15 @@ static AddressSpace *smmuv3_accel_find_msi_as(PCIBus *bus, void *opaque,
     }
 }
 
+static uint64_t smmuv3_accel_get_msi_gpa(PCIBus *bus, void *opaque, int devfn)
+{
+    SMMUState *bs = opaque;
+    SMMUv3State *s = ARM_SMMUV3(bs);
+
+    g_assert(s->msi_gpa);
+    return s->msi_gpa;
+}
+
 static bool smmuv3_accel_pdev_allowed(PCIDevice *pdev, bool *vfio_pci)
 {
 
@@ -788,6 +797,7 @@ static const PCIIOMMUOps smmuv3_accel_ops = {
     .set_iommu_device = smmuv3_accel_set_iommu_device,
     .unset_iommu_device = smmuv3_accel_unset_iommu_device,
     .get_msi_address_space = smmuv3_accel_find_msi_as,
+    .get_msi_direct_gpa = smmuv3_accel_get_msi_gpa,
 };
 
 void smmuv3_accel_idr_override(SMMUv3State *s)
