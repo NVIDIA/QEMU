@@ -24,10 +24,30 @@
 #include <sys/utsname.h>
 
 /*
- * Returns the correct KVM_CAP_ARM_RME capability value for the running kernel.
- * This handles the ABI change between kernel versions:
- *   - Linux 6.16: KVM_CAP_ARM_RME == 243
- *   - Linux 6.17+: KVM_CAP_ARM_RME == 244
+ * Sysfs paths for KVM CCA capability detection.
+ * v11+ host patches (6.18+) use RMI naming, v10 (6.17) uses RME naming.
+ */
+#define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
+#define KVM_CAP_ARM_RME_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rme"
+
+/*
+ * Returns the correct KVM CCA capability value for the running kernel.
+ *
+ * The ARM CCA host patches underwent a naming change from RME to RMI in v11:
+ *   - v10 (Linux 6.17): KVM_CAP_ARM_RME, sysfs param kvm_cap_arm_rme
+ *   - v11 (Linux 6.18+): KVM_CAP_ARM_RMI, sysfs param kvm_cap_arm_rmi
+ *
+ * Detection order:
+ *   1. Try reading from the v11 sysfs module parameter (RMI naming):
+ *        /sys/module/kvm/parameters/kvm_cap_arm_rmi
+ *
+ *   2. Try reading from the v10 sysfs module parameter (RME naming):
+ *        /sys/module/kvm/parameters/kvm_cap_arm_rme
+ *
+ *   3. Fall back to uname-based detection for Linux 6.16 dev kernel
+ *      (which does not have the sysfs parameter): capability == 243
+ *
+ *   4. Otherwise use the compile-time KVM_CAP_ARM_RME value.
  */
 unsigned int kvm_arm_rme_get_cap(void)
 {
@@ -35,16 +55,33 @@ unsigned int kvm_arm_rme_get_cap(void)
     static bool detected = false;
 
     if (!detected) {
-        struct utsname buf;
-        int major, minor;
+        FILE *f = NULL;
+        int cap;
 
         rme_cap = KVM_CAP_ARM_RME;
 
-        if (uname(&buf) == 0) {
-            if (sscanf(buf.release, "%d.%d", &major, &minor) == 2) {
-                /* For Linux kernel v6.16, KVM_CAP_ARM_RME == 243 */
-                if ((major == 6) && (minor == 16)) {
-                    rme_cap = 243;
+        /* First try v11 sysfs path (RMI naming, 6.18+ kernels) */
+        f = fopen(KVM_CAP_ARM_RMI_SYSFS_PATH, "r");
+        if (!f) {
+            /* Then try v10 sysfs path (RME naming, 6.17 kernels) */
+            f = fopen(KVM_CAP_ARM_RME_SYSFS_PATH, "r");
+        }
+
+        if (f) {
+            if (fscanf(f, "%d", &cap) == 1 && cap > 0) {
+                rme_cap = cap;
+            }
+            fclose(f);
+        } else {
+            /* Fallback for 6.16 dev kernel (no sysfs parameter) */
+            struct utsname buf;
+            int major, minor;
+
+            if (uname(&buf) == 0) {
+                if (sscanf(buf.release, "%d.%d", &major, &minor) == 2) {
+                    if (major == 6 && minor == 16) {
+                        rme_cap = 243;
+                    }
                 }
             }
         }
