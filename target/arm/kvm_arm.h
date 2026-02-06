@@ -277,9 +277,16 @@ void arm_cpu_kvm_set_irq(void *arm_cpu, int irq, int level);
 /**
  * kvm_arm_rme_get_cap:
  *
- * Returns the correct KVM_CAP_ARM_RME capability value for the running
- * kernel. This handles the ABI change between kernel versions where the
- * capability number differs (e.g., 243 on kernel 6.16, 244 on later kernels).
+ * Returns the correct KVM CCA capability value for the running kernel.
+ * Supports both v10 (RME naming, 6.17) and v11+ (RMI naming, 6.18+) host patches.
+ *
+ * First tries to read from the sysfs module parameters:
+ *   /sys/module/kvm/parameters/kvm_cap_arm_rmi  (v11+, 6.18+)
+ *   /sys/module/kvm/parameters/kvm_cap_arm_rme  (v10, 6.17)
+ *
+ * Falls back to uname-based kernel version detection (6.16=243, 6.17=244,
+ * 6.18=246) if sysfs is not available, or uses the compile-time
+ * KVM_CAP_ARM_RME value as a last resort.
  */
 unsigned int kvm_arm_rme_get_cap(void);
 
