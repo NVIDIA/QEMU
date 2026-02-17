@@ -460,10 +460,9 @@ static bool vfio_populate_device(VFIODevice *vbasedev, Error **errp)
 
         vdev->regions[i] = g_new0(VFIORegion, 1);
         ret = vfio_region_setup(OBJECT(vdev), vbasedev,
-                                vdev->regions[i], i, name);
+                                vdev->regions[i], i, name, errp);
         g_free(name);
         if (ret) {
-            error_setg_errno(errp, -ret, "failed to get region %d info", i);
             goto reg_error;
         }
     }
