@@ -1,3 +1,18 @@
+qemu (1:10.1.0+nvidia5-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: hw/acpi/pci.c: preserve generic initiator insertion order
+  * hw/vfio: align mmap to power-of-2 of region size for hugepfnmap
+  * vfio: Add Error ** parameter to vfio_region_setup()
+  * hw/vfio: sort and validate sparse mmap regions by offset
+  * NVIDIA: SAUCE: pcie/acs: Make ACS Control read-only to guests
+  * NVIDIA: SAUCE: Expose ACS caps on Guest as configured by the HYP
+  * NVIDIA: SAUCE: xio3130_downstream: Add ACS support for downstream PCIe ports
+  * NVIDIA: SAUCE: hw/arm: GB300 workaround for GPU BAR1 GPA=HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 workaround for GPU BAR1 HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 DirectNIC GPA=HPA
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 11 Mar 2026 10:18:00 -0500
+
 qemu (1:10.1.0+nvidia1egmfix-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: Reset gpu_id each time building DSDT
