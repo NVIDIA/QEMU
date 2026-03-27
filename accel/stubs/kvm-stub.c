@@ -144,6 +144,12 @@ int kvm_create_guest_memfd(uint64_t size, uint64_t flags, Error **errp)
     return -ENOSYS;
 }
 
+int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
+{
+    error_setg(errp, "KVM is not enabled");
+    return -ENOSYS;
+}
+
 int kvm_set_memory_attributes_private(hwaddr start, uint64_t size)
 {
     return -ENOSYS;
