@@ -1,3 +1,13 @@
+qemu (1:10.1.0+nvidia-unstable8-1) noble; urgency=medium
+
+  * Revert "NVIDIA: SAUCE: hw/pci/pci: Introduce optional get_msi_address_space() callback"
+  * Revert "NVIDIA: SAUCE: hw/arm/smmuv3-accel: Make use of get_msi_address_space() callback"
+  * hw/arm/virt: Set msi-gpa property
+  * hw/arm/smmuv3-accel: Implement get_msi_direct_gpa callback
+  * hw/pci/pci: Introduce a callback to retrieve the MSI doorbell GPA directly
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 15 Apr 2026 10:02:00 -0500
+
 qemu (1:10.1.0+nvidia-unstable7-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: target/arm: Add sysfs detection for KVM CCA capability
