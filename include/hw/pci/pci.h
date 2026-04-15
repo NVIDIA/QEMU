@@ -653,21 +653,6 @@ typedef struct PCIIOMMUOps {
                             hwaddr addr, bool lpig, uint16_t prgi, bool is_read,
                             bool is_write);
     /**
-     * @get_msi_address_space: get the address space for MSI doorbell address
-     * for devices
-     *
-     * Optional callback which returns a pointer to an #AddressSpace. This
-     * is required if MSI doorbell also gets translated through IOMMU(eg: ARM)
-     *
-     * @bus: the #PCIBus being accessed.
-     *
-     * @opaque: the data passed to pci_setup_iommu().
-     *
-     * @devfn: device and function number
-     */
-    AddressSpace * (*get_msi_address_space)(PCIBus *bus, void *opaque,
-                                            int devfn);
-    /**
      * @get_msi_direct_gpa: get the guest physical address of MSI doorbell
      * for the device on a PCI bus.
      *
@@ -691,7 +676,6 @@ AddressSpace *pci_device_iommu_address_space(PCIDevice *dev);
 bool pci_device_set_iommu_device(PCIDevice *dev, HostIOMMUDevice *hiod,
                                  Error **errp);
 void pci_device_unset_iommu_device(PCIDevice *dev);
-AddressSpace *pci_device_iommu_msi_address_space(PCIDevice *dev);
 bool pci_device_iommu_msi_direct_gpa(PCIDevice *dev, hwaddr *out_doorbell);
 
 /**
