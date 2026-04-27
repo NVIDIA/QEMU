@@ -134,6 +134,7 @@ typedef struct VFIOCXL {
     bool     machine_done_registered;
     VFIORegion region;
     VFIORegion comp_regs_region;
+    Notifier   machine_done;
 } VFIOCXL;
 
 struct VFIOPCIDevice {
