@@ -228,8 +228,9 @@ static int vfio_setup_region_sparse_mmaps(VFIORegion *region,
     return 0;
 }
 
-int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
-                      int index, const char *name, Error **errp)
+int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
+                               VFIORegion *region, int index, const char *name,
+                               Error **errp, const MemoryRegionOps *ops)
 {
     struct vfio_region_info *info = NULL;
     int ret;
@@ -249,7 +250,8 @@ int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
 
     if (region->size) {
         region->mem = g_new0(MemoryRegion, 1);
-        memory_region_init_io(region->mem, obj, &vfio_region_ops,
+        memory_region_init_io(region->mem, obj,
+                              ops ? ops : &vfio_region_ops,
                               region, name, region->size);
 
         if (!vbasedev->no_mmap &&
@@ -263,6 +265,7 @@ int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
                 region->mmaps[0].offset = 0;
                 region->mmaps[0].size = region->size;
             } else if (ret) {
+                vfio_region_finalize(region);
                 return ret;
             }
         }
@@ -271,6 +274,13 @@ int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
     trace_vfio_region_setup(vbasedev->name, index, name,
                             region->flags, region->fd_offset, region->size);
     return 0;
+}
+
+int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
+                      int index, const char *name, Error **errp)
+{
+    return vfio_region_setup_with_ops(obj, vbasedev, region, index,
+                                      name, errp, NULL);
 }
 
 static void vfio_subregion_unmap(VFIORegion *region, int index)
@@ -488,7 +498,7 @@ void vfio_region_exit(VFIORegion *region)
 
     for (i = 0; i < region->nr_mmaps; i++) {
         if (region->mmaps[i].mmap) {
-            memory_region_del_subregion(region->mem, &region->mmaps[i].mem);
+            vfio_subregion_unmap(region, i);
         }
     }
 
