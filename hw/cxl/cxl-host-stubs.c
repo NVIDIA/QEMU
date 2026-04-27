@@ -17,4 +17,6 @@ hwaddr cxl_fmws_set_memmap(hwaddr base, hwaddr max_addr)
 };
 void cxl_fmws_update_mmio(void) {};
 
+hwaddr cxl_fmws_base;
+
 const MemoryRegionOps cfmws_ops;
