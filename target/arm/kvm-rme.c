@@ -55,6 +55,7 @@ struct RmeGuest {
     ConfidentialGuestSupport parent_obj;
     Notifier rom_load_notifier;
     GSList *ram_regions;
+    bool activated;
     uint8_t ipa_bits;
 
     RealmDmaRegion *dma_region;
@@ -138,7 +139,7 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
 {
     Error *errp = NULL;
 
-    if (!running) {
+    if (!running || rme_guest->activated) {
         return;
     }
 
@@ -148,6 +149,7 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
         return;
     }
 
+    rme_guest->activated = true;
     kvm_mark_guest_state_protected();
 }
 
