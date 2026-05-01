@@ -4763,6 +4763,11 @@ void kvm_mark_guest_state_protected(void)
     kvm_state->guest_state_protected = true;
 }
 
+bool kvm_guest_state_protected(void)
+{
+    return kvm_state && kvm_state->guest_state_protected;
+}
+
 int kvm_create_guest_memfd(uint64_t size, uint64_t flags, Error **errp)
 {
     int fd;
