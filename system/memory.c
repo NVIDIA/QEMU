@@ -3643,10 +3643,27 @@ bool memory_region_init_ram_guest_memfd(MemoryRegion *mr, Object *owner,
                                         const char *name, uint64_t size,
                                         Error **errp)
 {
-    if (!memory_region_init_ram_flags_nomigrate(mr, owner, name, size,
-                                                RAM_GUEST_MEMFD, errp)) {
-        return false;
+    if (machine_require_guest_memfd_convert_in_place(current_machine)) {
+        int fd = kvm_create_guest_memfd(size, errp);
+
+        if (fd < 0) {
+            return false;
+        }
+        if (!memory_region_init_ram_from_fd(mr, owner, name, size,
+                                            RAM_SHARED |
+                                            RAM_GUEST_MEMFD |
+                                            RAM_GUEST_MEMFD_SHAREABLE,
+                                            fd, 0, errp)) {
+            close(fd);
+            return false;
+        }
+    } else {
+        if (!memory_region_init_ram_flags_nomigrate(mr, owner, name, size,
+                                                    RAM_GUEST_MEMFD, errp)) {
+            return false;
+        }
     }
+
     memory_region_register_ram(mr, owner);
     return true;
 }
