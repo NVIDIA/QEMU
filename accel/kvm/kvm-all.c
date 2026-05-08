@@ -1833,7 +1833,14 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
             abort();
         }
 
-        if (memory_region_has_guest_memfd(mr)) {
+        /*
+         * In-place memory attributes belong to the guest_memfd inode.
+         * Ordinary files can start shared via INIT_SHARED; HugeTLB files
+         * start private and Realm population converts the required ranges.
+         * Do not impose VM-wide private attributes in either case.
+         */
+        if (memory_region_has_guest_memfd(mr) &&
+            !machine_require_guest_memfd_convert_in_place(current_machine)) {
             err = kvm_set_memory_attributes_private(start_addr, slot_size);
             if (err) {
                 error_report("%s: failed to set memory attribute private: %s",
