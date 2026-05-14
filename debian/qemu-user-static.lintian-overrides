@@ -1,0 +1,4 @@
+qemu-user-static: spelling-error-in-binary addd add *usr/bin/qemu-*-static*
+qemu-user-static: spelling-error-in-binary nott not *usr/bin/qemu-*-static*
+# these are static-pic executables, not shared executables:
+qemu-user-static: shared-library-lacks-prerequisites *usr/bin/qemu-*-static*

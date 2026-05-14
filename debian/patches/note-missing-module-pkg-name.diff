@@ -1,0 +1,97 @@
+Date: Sun, 22 Aug 2021 15:16:25 +0300
+Updated: Wed, 03 Jan 2024 14:12:39 +0300
+From: Michael Tokarev <mjt@tls.msk.ru>
+Subject: Note missing module package name
+Debian-Specific: yes
+Forwarded: not-needed
+
+Debian ships different modules in different packages.
+By default qemu ignores the fact that it can not load
+a module, pretending this module never existed.
+Give a useful hint about the package where the module
+in question resides.
+
+This is a hack, but it makes qemu packaged in debian
+more user-friendly.
+
+diff --git a/audio/audio.c b/audio/audio.c
+index 8d1e4ad922..15f1071bdc 100644
+--- a/audio/audio.c
++++ b/audio/audio.c
+@@ -1745,5 +1745,9 @@ static AudioState *audio_init(Audiodev *dev, Error **errp)
+             done = !audio_driver_init(s, driver, dev, errp);
+         } else {
+-            error_setg(errp, "Unknown audio driver `%s'", drvname);
++            error_setg(errp, "Unknown audio driver `%s'. Perhaps you want to install %s package?",
++                       drvname,
++                       !strcmp(drvname, "spice") ? "qemu-system-modules-spice" :
++                       !strcmp(drvname, "dbus") ? "qemu-system-modules-opengl" :
++                       "qemu-system-gui");
+         }
+         if (!done) {
+diff --git a/block.c b/block.c
+index a097772238..d5e7cb19bb 100644
+--- a/block.c
++++ b/block.c
+@@ -476,4 +476,5 @@ BlockDriver *bdrv_find_format(const char *format_name)
+                 error_report_err(local_err);
+             }
++            else error_report("Unable to load block driver %s. Perhaps you want to install qemu-block-extra package?", block_driver_modules[i].library_name);
+             break;
+         }
+@@ -966,5 +967,8 @@ BlockDriver *bdrv_find_protocol(const char *filename,
+                 return NULL;
+             }
+-            break;
++            else {
++                error_setg(errp, "Unable to load block driver %s. Perhaps you want to install qemu-block-extra package?", block_driver_modules[i].library_name);
++                return NULL;
++            }
+         }
+     }
+diff --git a/system/vl.c b/system/vl.c
+index 6b87bfa32c..dfa7f6a228 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1049,5 +1049,7 @@ static void select_vgahw(const MachineClass *machine_class, const char *p)
+         if (ti->opt_name && strstart(p, ti->opt_name, &opts)) {
+             if (!vga_interface_available(t)) {
+-                error_report("%s not available", ti->name);
++                error_report("%s not available. Perhaps you want to install %s package?", ti->name,
++                        /* qxl is in spice, some are in opengl, the some are in common */
++                        !strcmp(ti->opt_name, "qxl") ? "qemu-system-modules-spice" : "qemu-system-modules-opengl");
+                 exit(1);
+             }
+@@ -3496,5 +3498,10 @@ void qemu_init(int argc, char **argv)
+ #ifdef CONFIG_SPICE
+             case QEMU_OPTION_spice:
+-                opts = qemu_opts_parse_noisily(qemu_find_opts("spice"), optarg, false);
++                olist = qemu_find_opts("spice");
++                if (!olist) {
++                    error_report("Perhaps you want to install qemu-system-modules-spice package?");
++                    exit(1);
++                }
++                opts = qemu_opts_parse_noisily(olist, optarg, false);
+                 if (!opts) {
+                     exit(1);
+diff --git a/ui/console.c b/ui/console.c
+index 7db921e3b7..07a473a385 100644
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -1644,5 +1644,4 @@ bool qemu_display_find_default(DisplayOptions *opts)
+     return false;
+ }
+-
+ void qemu_display_early_init(DisplayOptions *opts)
+ {
+@@ -1659,6 +1658,8 @@ void qemu_display_early_init(DisplayOptions *opts)
+     }
+     if (dpys[opts->type] == NULL) {
+-        error_report("Display '%s' is not available.",
+-                     DisplayType_str(opts->type));
++        error_report("Display '%s' is not available. Perhaps you want to install %s package?",
++                     DisplayType_str(opts->type),
++                     (!strcmp(DisplayType_str(opts->type), "dbus") || !strcmp(DisplayType_str(opts->type), "egl-headless"))
++                      ? "qemu-system-modules-opengl" : "qemu-system-gui");
+         exit(1);
+     }
