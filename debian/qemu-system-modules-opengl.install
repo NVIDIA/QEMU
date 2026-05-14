@@ -1,0 +1,8 @@
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-opengl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-egl-headless.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-gpu-pci-gl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-gpu-gl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/hw-display-virtio-vga-gl.so
+# ui-dbus requires ui-opengl
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-dbus.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-dbus.so

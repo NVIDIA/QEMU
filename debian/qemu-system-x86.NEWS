@@ -1,0 +1,10 @@
+qemu (1:8.2.2+ds-0ubuntu1.12) noble; urgency=medium
+
+  * To backport the fix for arch-caps (LP: #2131822) in old Ubuntu releases.
+    We add new Ubuntu v2 machine types that will contain this fix:
+      - pc-i440fx-noble-v2
+      - pc-q35-noble-v2
+    The creation of these machine types allow to not break existing guests.
+    The -v2 machine type becomes the default Ubuntu machine.
+
+ -- Hector Cao <hector.cao@canonical.com>  Mon, 15 Dec 2025 12:33:49 +0000
