@@ -1,0 +1,11 @@
+Tests: test-qemu-img.sh
+Depends: qemu-utils
+Restrictions: superficial
+
+Tests: test-qemu-system.sh
+Depends: qemu-system-x86
+Restrictions: superficial
+
+Tests: test-qemu-user.sh
+Depends: qemu-user, qemu-user-static
+Restrictions: superficial

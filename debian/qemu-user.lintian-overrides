@@ -1,0 +1,3 @@
+qemu-user: spelling-error-in-binary addd add *usr/bin/qemu-*
+qemu-user: spelling-error-in-binary nott not *usr/bin/qemu-*
+qemu-user: spare-manual-page [usr/share/man/man1/qemu-user.1.gz]

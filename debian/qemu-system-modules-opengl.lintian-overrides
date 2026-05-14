@@ -1,0 +1,3 @@
+# probably false positives
+qemu-system-modules-opengl: shared-library-lacks-prerequisites [usr/lib/*/qemu/hw-display-virtio-gpu-pci-gl.so]
+qemu-system-modules-opengl: shared-library-lacks-prerequisites [usr/lib/*/qemu/hw-display-virtio-vga-gl.so]
