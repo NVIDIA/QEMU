@@ -1,0 +1,1 @@
+dir_to_symlink /usr/share/doc/qemu-system-sparc qemu-system-common 1:8.0+dfsg-4~ qemu-system-sparc

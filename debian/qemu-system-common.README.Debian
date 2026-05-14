@@ -1,0 +1,35 @@
+Historically, there were different naming in use for the
+same architectures within different groups/projects.  For
+example, amd64 architecture (Debian name) is also known as
+x86_64; arm64 and aarch64; and so on.  Qemu used one way
+to name the binaries, debian used another, some architectures
+are named the same way, while for other architectures there's
+a difference.
+
+Starting with debian qemu-system-* packages version 8.0, we now
+provide debian-compatible naming scheme for qemu-system-$arch
+binaries, shipping symlinks to qemu names when qemu name is
+different from debian's.  For example, qemu-system-amd64 is a
+symlink to qemu-system-x86_64.
+
+Since qemu-system emulates a CPU (it is agnostic to what
+OS/kernel/abi is being actually used inside), we can use
+qemu-system-${DEB_HOST_ARCH_CPU} from dpkg-architecture,
+not qemu-system-${DEB_HOST_ARCH}.
+
+In particular, the following extra names are provided:
+
+  amd64 => x86_64
+  arm64 => aarch64
+  loong64 => loongarch64
+  powerpc => ppc
+  ppc64el => ppc64
+
+The other names do match between qemu and debian.
+
+There's another name which is also provided but which is
+neither in debian nor in qemu: it is ppc64le, which is
+the name used for this architecture in the linux kernel.
+
+One can run qemu-system-$archos binary, and you can
+list it in (Build-)Depends: field too.

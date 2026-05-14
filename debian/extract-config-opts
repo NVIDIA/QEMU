@@ -1,0 +1,22 @@
+#! /bin/sh
+
+# This is a trivial script to parse comments in debian/control
+# into a set of system-specific configure options.
+# Usage:  ./debian/extract-config-opts $OS-$ARCH debian/control
+
+osarch=$1
+control=$2
+
+sed -n 's/^# \?--/--/p' $control | \
+while IFS='	' read f p x; do
+  set -- $p
+  if [ $# = 0 ]; then  echo $f; continue; fi
+  for p in "$@"; do
+    case "$p" in
+      *-any) p="${p%-any}-*" ;;
+      *-*) ;;
+      *) p="linux-$p" ;;
+    esac
+    eval "case \$osarch in ($p) echo \$f; continue;; esac"
+  done
+done

@@ -1,0 +1,10 @@
+usr/share/locale/*/LC_MESSAGES/qemu.mo
+usr/share/qemu/vhost-user/50-qemu-gpu.json
+usr/lib/qemu/vhost-user-gpu
+# modules
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-gtk.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/ui-sdl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-sdl.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-jack.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-pa.so
+usr/lib/${DEB_HOST_MULTIARCH}/qemu/audio-pipewire.so

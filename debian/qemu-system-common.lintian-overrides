@@ -1,0 +1,9 @@
+# probably a false positives
+qemu-system-common: shared-library-lacks-prerequisites [usr/lib/*/qemu/hw-display-virtio-gpu-pci.so]
+qemu-system-common: shared-library-lacks-prerequisites [usr/lib/*/qemu/hw-display-virtio-vga.so]
+qemu-system-common: shared-library-lacks-prerequisites [usr/lib/*/qemu/hw-s390x-virtio-gpu-ccw.so]
+qemu-system-common: hardening-no-fortify-functions [usr/lib/*/qemu/audio-alsa.so]
+qemu-system-common: hardening-no-fortify-functions [usr/lib/*/qemu/audio-oss.so]
+# this is a common/generic manpage used by all qemu-system-*  binaries
+qemu-system-common: spare-manual-page [usr/share/man/man1/qemu-system.1.gz]
+qemu-system-common: spare-manual-page [usr/share/man/man1/virtfs-proxy-helper.1.gz]
