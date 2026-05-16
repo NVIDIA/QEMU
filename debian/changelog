@@ -1,3 +1,23 @@
+qemu (1:11.0.0+nvidia1-1) noble; urgency=medium
+
+  * Update to QEMU v11.0.0 upstream with NVIDIA support
+  * Items included in upstream v11.0.0:
+    - vSMMUv3 v9
+    - DMABUF v4
+    - vEVENTQ v8,
+    - hugepfnmap v4,
+    - SMMUv3 AUTO properties v5
+  * hw/vfio/iommufd: Control dirty tracking for nesting parent HWPT
+  * hw/arm/smmuv3: Have smmuv3_accel_init() take an Error* parameter
+  * hw/arm/smmuv3-accel: Resolve AUTO properties v3 (7 patches)
+  * hw/arm/virt: Introduce Tegra241 CMDQV support for accelerated
+    SMMUv3 (31 patches)
+  * hw/acpi/pci.c: preserve generic initiator insertion order
+  * EGM support on virtualization (6 patches)
+  * Ubuntu Noble debian packaging from noble-updates (8.2.2+ds-0ubuntu1.16)
+
+ -- Jiandi An <jan@nvidia.com>  Thu, 15 May 2026 23:18:08 -0500
+
 qemu (1:8.2.2+ds-0ubuntu1.16) noble-security; urgency=medium
 
   * SECURITY UPDATE: use-after-free
