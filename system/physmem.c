@@ -3674,6 +3674,25 @@ bool address_space_is_io(AddressSpace *as, hwaddr addr)
     return !(memory_region_is_ram(mr) || memory_region_is_romd(mr));
 }
 
+bool address_space_range_is_ram(AddressSpace *as, hwaddr addr, hwaddr size)
+{
+    MemoryRegion *mr;
+    hwaddr xlat, l;
+
+    RCU_READ_LOCK_GUARD();
+    while (size > 0) {
+        l = size;
+        mr = address_space_translate(as, addr, &xlat, &l, false,
+                                     MEMTXATTRS_UNSPECIFIED);
+        if (!memory_region_is_ram(mr)) {
+            return false;
+        }
+        size -= l;
+        addr += l;
+    }
+    return true;
+}
+
 static hwaddr
 flatview_extend_translation(FlatView *fv, hwaddr addr,
                             hwaddr target_len,
