@@ -18,6 +18,95 @@
 #include "tegra241-cmdqv.h"
 #include "trace.h"
 
+static void tegra241_cmdqv_free_vcmdq(Tegra241CMDQV *cmdqv, int index)
+{
+    IOMMUFDViommu *viommu = cmdqv->s_accel->viommu;
+    IOMMUFDHWqueue *vcmdq = cmdqv->vcmdq[index];
+
+    if (!vcmdq) {
+        return;
+    }
+    iommufd_backend_free_id(viommu->iommufd, vcmdq->hw_queue_id);
+    g_free(vcmdq);
+    cmdqv->vcmdq[index] = NULL;
+}
+
+static void tegra241_cmdqv_free_all_vcmdq(Tegra241CMDQV *cmdqv)
+{
+    /* uapi/linux/iommufd.h: hw_queue destroy must be in descending @index. */
+    for (int i = (TEGRA241_CMDQV_MAX_CMDQ - 1); i >= 0; i--) {
+        tegra241_cmdqv_free_vcmdq(cmdqv, i);
+    }
+}
+
+/*
+ * Allocate a host HW VCMDQ from the current cached BASE / size for @index.
+ *
+ * Setup is a no-op (returns true) when any of the following preconditions
+ * isn't met yet:
+ *  - BASE not prgrammed yet.
+ *  - VCMDQ is not mapped to a VINTF (CMDQ_ALLOC_MAP.ALLOC == 0)
+ *  - BASE / size don't resolve to a RAM region
+ *  - CMDQV global enable or VINTF enable is not yet asserted
+ */
+static bool tegra241_cmdqv_setup_vcmdq(Tegra241CMDQV *cmdqv, int index,
+                                       Error **errp)
+{
+    SMMUv3AccelState *accel = cmdqv->s_accel;
+    uint64_t base_mask = (uint64_t)R_VCMDQ0_BASE_L_ADDR_MASK |
+                         (uint64_t)R_VCMDQ0_BASE_H_ADDR_MASK << 32;
+    uint64_t addr = cmdqv->vcmdq_base[index] & base_mask;
+    uint64_t log2 = cmdqv->vcmdq_base[index] & R_VCMDQ0_BASE_L_LOG2SIZE_MASK;
+    uint64_t size = 1ULL << (log2 + 4);
+    IOMMUFDViommu *viommu = accel->viommu;
+    IOMMUFDHWqueue *hw_queue;
+    uint32_t hw_queue_id;
+
+    /* BASE not programmed yet. */
+    if (!cmdqv->vcmdq_base[index]) {
+        return true;
+    }
+
+    /* VCMDQ not yet mapped to a VINTF. */
+    if (!(cmdqv->cmdq_alloc_map[index] & R_CMDQ_ALLOC_MAP_0_ALLOC_MASK)) {
+        return true;
+    }
+
+    /* Ignore any invalid address. This may come as part of reset etc. */
+    if (!address_space_range_is_ram(&address_space_memory, addr, size)) {
+        return true;
+    }
+
+    if (!tegra241_cmdqv_enabled(cmdqv) || !tegra241_vintf_enabled(cmdqv)) {
+        return true;
+    }
+
+    tegra241_cmdqv_free_vcmdq(cmdqv, index);
+
+    if (!iommufd_backend_alloc_hw_queue(viommu->iommufd, viommu->viommu_id,
+                                        IOMMU_HW_QUEUE_TYPE_TEGRA241_CMDQV,
+                                        index, addr, size, &hw_queue_id,
+                                        errp)) {
+        return false;
+    }
+    hw_queue = g_new(IOMMUFDHWqueue, 1);
+    hw_queue->hw_queue_id = hw_queue_id;
+    hw_queue->viommu = viommu;
+    cmdqv->vcmdq[index] = hw_queue;
+
+    return true;
+}
+
+static void tegra241_cmdqv_setup_all_vcmdq(Tegra241CMDQV *cmdqv,
+                                           Error **errp)
+{
+    for (int i = 0; i < TEGRA241_CMDQV_MAX_CMDQ; i++) {
+        if (!tegra241_cmdqv_setup_vcmdq(cmdqv, i, errp)) {
+            return;
+        }
+    }
+}
+
 /*
  * Returns true if the per-VCMDQ CMDQ_EN_OK bit is set.
  */
@@ -172,7 +261,7 @@ static void tegra241_cmdqv_write_vcmdq_page0(Tegra241CMDQV *cmdqv,
  */
 static void tegra241_cmdqv_write_vcmdq_page1(Tegra241CMDQV *cmdqv,
                                              hwaddr offset0, int index,
-                                             uint32_t value)
+                                             uint32_t value, Error **errp)
 {
     switch (offset0) {
     case A_VCMDQ0_BASE_L:
@@ -181,6 +270,7 @@ static void tegra241_cmdqv_write_vcmdq_page1(Tegra241CMDQV *cmdqv,
         }
         cmdqv->vcmdq_base[index] =
             deposit64(cmdqv->vcmdq_base[index], 0, 32, value);
+        tegra241_cmdqv_setup_vcmdq(cmdqv, index, errp);
         break;
     case A_VCMDQ0_BASE_H:
         if (tegra241_vcmdq_enabled(cmdqv, index)) {
@@ -188,6 +278,7 @@ static void tegra241_cmdqv_write_vcmdq_page1(Tegra241CMDQV *cmdqv,
         }
         cmdqv->vcmdq_base[index] =
             deposit64(cmdqv->vcmdq_base[index], 32, 32, value);
+        tegra241_cmdqv_setup_vcmdq(cmdqv, index, errp);
         break;
     case A_VCMDQ0_CONS_INDX_BASE_DRAM_L:
         cmdqv->vcmdq_cons_indx_base[index] =
@@ -210,7 +301,7 @@ static void tegra241_cmdqv_write_vcmdq_page1(Tegra241CMDQV *cmdqv,
  */
 static void tegra241_cmdqv_write_vcmdq_page1_64(Tegra241CMDQV *cmdqv,
                                                 hwaddr offset0, int index,
-                                                uint64_t value)
+                                                uint64_t value, Error **errp)
 {
     switch (offset0) {
     case A_VCMDQ0_BASE_L:
@@ -218,6 +309,7 @@ static void tegra241_cmdqv_write_vcmdq_page1_64(Tegra241CMDQV *cmdqv,
             return;
         }
         cmdqv->vcmdq_base[index] = value;
+        tegra241_cmdqv_setup_vcmdq(cmdqv, index, errp);
         break;
     case A_VCMDQ0_CONS_INDX_BASE_DRAM_L:
         cmdqv->vcmdq_cons_indx_base[index] = value;
@@ -282,8 +374,14 @@ static void tegra241_cmdqv_config_vintf_write(Tegra241CMDQV *cmdqv,
         if (value & R_VINTF0_CONFIG_ENABLE_MASK) {
             if (tegra241_cmdqv_mmap_vintf_page0(cmdqv, errp)) {
                 cmdqv->vintf_status |= R_VINTF0_STATUS_ENABLE_OK_MASK;
+                /*
+                 * VCMDQs whose BASE was programmed before VINTF was
+                 * enabled need their hw_queue allocated now.
+                 */
+                tegra241_cmdqv_setup_all_vcmdq(cmdqv, errp);
             }
         } else {
+            tegra241_cmdqv_free_all_vcmdq(cmdqv);
             tegra241_cmdqv_munmap_vintf_page0(cmdqv, errp);
             cmdqv->vintf_status &= ~R_VINTF0_STATUS_ENABLE_OK_MASK;
         }
@@ -394,16 +492,37 @@ static void tegra241_cmdqv_writel_mmio(Tegra241CMDQV *cmdqv, hwaddr offset,
         cmdqv->config = value;
         if (value & R_CONFIG_CMDQV_EN_MASK) {
             cmdqv->status |= R_STATUS_CMDQV_ENABLED_MASK;
+            /*
+             * VCMDQs whose BASE was programmed before CMDQV was enabled
+             * need their hw_queue allocated now.
+             */
+            tegra241_cmdqv_setup_all_vcmdq(cmdqv, &local_err);
         } else {
+            tegra241_cmdqv_free_all_vcmdq(cmdqv);
             cmdqv->status &= ~R_STATUS_CMDQV_ENABLED_MASK;
         }
         break;
     case A_VI_INT_MASK_0 ... A_VI_INT_MASK_1:
         cmdqv->vi_int_mask[(offset - A_VI_INT_MASK_0) / 4] = value;
         break;
-    case A_CMDQ_ALLOC_MAP_0 ... A_CMDQ_ALLOC_MAP_1:
-        cmdqv->cmdq_alloc_map[(offset - A_CMDQ_ALLOC_MAP_0) / 4] = value;
+    case A_CMDQ_ALLOC_MAP_0 ... A_CMDQ_ALLOC_MAP_1: {
+        int idx = (offset - A_CMDQ_ALLOC_MAP_0) / 4;
+        bool was_alloc = cmdqv->cmdq_alloc_map[idx] &
+                         R_CMDQ_ALLOC_MAP_0_ALLOC_MASK;
+        bool now_alloc = value & R_CMDQ_ALLOC_MAP_0_ALLOC_MASK;
+
+        cmdqv->cmdq_alloc_map[idx] = value;
+        /*
+         * If the VCMDQ was already programmed (BASE) before mapping, fire
+         * setup on the ALLOC 0->1 transition; tear down on 1->0.
+         */
+        if (!was_alloc && now_alloc) {
+            tegra241_cmdqv_setup_vcmdq(cmdqv, idx, &local_err);
+        } else if (was_alloc && !now_alloc) {
+            tegra241_cmdqv_free_vcmdq(cmdqv, idx);
+        }
         break;
+    }
     case A_VINTF0_CONFIG ... A_VINTF0_LVCMDQ_ERR_MAP_3:
         tegra241_cmdqv_config_vintf_write(cmdqv, offset, value, &local_err);
         break;
@@ -432,7 +551,8 @@ static void tegra241_cmdqv_writel_mmio(Tegra241CMDQV *cmdqv, hwaddr offset,
     case A_VCMDQ0_BASE_L ... A_VCMDQ1_CONS_INDX_BASE_DRAM_H:
         index = (offset - CMDQV_VCMDQ_PAGE1_BASE) / CMDQV_VCMDQ_STRIDE;
         tegra241_cmdqv_write_vcmdq_page1(cmdqv,
-                offset - index * CMDQV_VCMDQ_STRIDE, index, value);
+                offset - index * CMDQV_VCMDQ_STRIDE, index, value,
+                &local_err);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s unhandled write access at 0x%" PRIx64 "\n",
@@ -451,6 +571,7 @@ static void tegra241_cmdqv_writel_mmio(Tegra241CMDQV *cmdqv, hwaddr offset,
 static void tegra241_cmdqv_writell_mmio(Tegra241CMDQV *cmdqv, hwaddr offset,
                                         uint64_t value)
 {
+    Error *local_err = NULL;
     int index;
 
     switch (offset) {
@@ -465,12 +586,17 @@ static void tegra241_cmdqv_writell_mmio(Tegra241CMDQV *cmdqv, hwaddr offset,
     case A_VCMDQ0_BASE_L ... A_VCMDQ1_CONS_INDX_BASE_DRAM_H:
         index = (offset - CMDQV_VCMDQ_PAGE1_BASE) / CMDQV_VCMDQ_STRIDE;
         tegra241_cmdqv_write_vcmdq_page1_64(cmdqv,
-                offset - index * CMDQV_VCMDQ_STRIDE, index, value);
+                offset - index * CMDQV_VCMDQ_STRIDE, index, value,
+                &local_err);
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "%s unhandled 64-bit write at 0x%" PRIx64 " (WI)\n",
                       __func__, offset);
+    }
+
+    if (local_err) {
+        error_report_err(local_err);
     }
 }
 
