@@ -37,12 +37,15 @@
 #define CMDQV_VINTF_PAGE1_BASE  0x40000
 #define CMDQV_VCMDQ_STRIDE      0x80
 
+#define VINTF_PAGE_SIZE 0x10000
+
 typedef struct Tegra241CMDQV {
     struct iommu_viommu_tegra241_cmdqv cmdqv_data;
     SMMUv3AccelState *s_accel;
     MemoryRegion mmio_cmdqv;
     qemu_irq irq;
     IOMMUFDVeventq *veventq;
+    void *vintf_page0;
 
     /* CMDQ-V Config page register cache */
     uint32_t config;
