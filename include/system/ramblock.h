@@ -175,6 +175,7 @@ int qemu_ram_get_fd(const RAMBlock *rb);
 
 size_t qemu_ram_pagesize(const RAMBlock *block);
 size_t qemu_ram_pagesize_largest(void);
+size_t qemu_ram_backend_pagesize_min(void);
 #include "exec/target_page.h"
 #include "exec/hwaddr.h"
 
