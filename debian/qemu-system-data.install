@@ -1,2 +1,4 @@
 usr/share/qemu/dtb/bamboo.dtb
 usr/share/qemu/dtb/canyonlands.dtb
+usr/share/qemu/dtb/pegasos1.dtb
+usr/share/qemu/dtb/pegasos2.dtb

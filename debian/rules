@@ -249,7 +249,7 @@ install-qemu: b/qemu/built
 	    ${NINJA} -C b/qemu install
 
 # remove qtest "accel" modules
-	rm -f debian/tmp${libdir}/qemu/accel-qtest-*.so
+	rm -f debian/tmp${libdir}/qemu/accel-qtest*.so
 
 # fixup the manpage
 # Note: with no enable-system, qemu-system manpage will not be installed.
