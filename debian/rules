@@ -160,7 +160,7 @@ system-kvmlink-amd64 = x86_64
 system-kvmlink-i386 = x86_64
 
 system-archlist-misc = alpha avr hppa m68k loongarch64 \
-		microblaze microblazeel or1k riscv32 riscv64 rx sh4 sh4eb \
+		microblaze or1k riscv32 riscv64 rx sh4 sh4eb \
 		$(if ${system-s390x},,s390x) \
 		tricore xtensa xtensaeb
 # Note: cris and nios2 removed in QEMU 9.1+ - system emulation targets no longer exist
