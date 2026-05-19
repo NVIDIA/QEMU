@@ -2005,6 +2005,35 @@ size_t qemu_ram_pagesize_largest(void)
     return largest;
 }
 
+/*
+ * Returns the smallest page size among RAM regions backed by a
+ * memory-backend object. Falls back to qemu_real_host_page_size() if no
+ * memory-backend RAM blocks are found.
+ */
+size_t qemu_ram_backend_pagesize_min(void)
+{
+    RAMBlock *rb;
+    size_t pg, min_pg = SIZE_MAX;
+
+    RAMBLOCK_FOREACH(rb) {
+        MemoryRegion *mr = rb->mr;
+
+        if (!mr || !memory_region_is_ram(mr)) {
+            continue;
+        }
+        if (!object_dynamic_cast(mr->owner, TYPE_MEMORY_BACKEND)) {
+            continue;
+        }
+
+        pg = qemu_ram_pagesize(rb);
+        if (pg && pg < min_pg) {
+            min_pg = pg;
+        }
+    }
+
+    return (min_pg == SIZE_MAX) ? qemu_real_host_page_size() : min_pg;
+}
+
 static int memory_try_enable_merging(void *addr, size_t len)
 {
     if (!machine_mem_merge(current_machine)) {
