@@ -3373,6 +3373,85 @@ static void kvm_eat_signals(CPUState *cpu)
     } while (sigismember(&chkset, SIG_IPI));
 }
 
+/*
+ * This handles checking whether a conversion overlaps with any holes in
+ * the given section/range, and indicates whether or not the section/range
+ * can be safely skipped (which is generally allowed as long as the
+ * conversion is private->shared and not the other way around).
+ *
+ * Returns 0 if section is normal guest-memfd-backed memory, or is a hole or
+ * non-RAM/ROM region that should be skipped as MMIO. In the latter case, the
+ * 'skip' parameter will be set. Returns < 0 if the conversion request is not
+ * valid.
+ */
+static int handle_memory_hole(MemoryRegionSection *section, bool to_private,
+                              bool *skip)
+{
+    MemoryRegion *mr = section->mr;
+
+    if (!mr) {
+        /*
+         * TDX requires vMMIO region to be shared to inject #VE to guest.
+         * OVMF issues conservatively MapGPA(shared) on 32bit PCI MMIO
+         * region, and vIO-APIC 0xFEC00000 4K page.
+         * OVMF assigns 32bit PCI MMIO region to
+         * [top of low memory: typically 2GB=0xC000000,  0xFC00000)
+         *
+         * If the current lookup failed to find any regions, then skip the
+         * entire remaining range as a hole/MMIO.
+         */
+        if (!to_private) {
+            *skip = true;
+            return 0;
+        }
+        return -EINVAL;
+    }
+
+    /*
+     * Because vMMIO region must be shared, guest TD may convert vMMIO
+     * region to shared explicitly.  Don't complain such case.  See
+     * memory_region_type() for checking if the region is MMIO region.
+     */
+    if (!memory_region_has_guest_memfd(mr)) {
+        bool assigned_ram_device =
+            machine_has_assigned_device_memory(current_machine) &&
+            memory_region_is_ram_device(mr);
+
+        if (!to_private &&
+            (!memory_region_is_ram(mr) || assigned_ram_device) &&
+            !memory_region_is_rom(mr) &&
+            !memory_region_is_romd(mr)) {
+            /*
+             * NVIDIA Realms may have marked a device GFN PRIVATE during
+             * validation. Clear that VM attribute when the guest releases
+             * the mapping; silently skipping it would leave stale state.
+             */
+            if (assigned_ram_device &&
+                (kvm_supported_memory_attributes &
+                 KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+                int ret = kvm_set_memory_attributes_shared(
+                    section->offset_within_address_space,
+                    int128_get64(section->size));
+
+                if (ret) {
+                    return ret;
+                }
+            }
+            *skip = true;
+            return 0;
+        }
+        error_report("Convert non guest_memfd backed memory region "
+                     "(0x%" HWADDR_PRIx " + 0x%" HWADDR_PRIx ") to %s",
+                     section->offset_within_address_space,
+                     int128_get64(section->size),
+                     to_private ? "private" : "shared");
+        return -EINVAL;
+    }
+
+    *skip = false;
+    return 0;
+}
+
 int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
 {
     MemoryRegionSection section;
@@ -3380,6 +3459,7 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
     MemoryRegion *mr;
     RAMBlock *rb;
     void *addr;
+    bool skip;
     int ret = -EINVAL;
 
     trace_kvm_convert_memory(start, size, to_private ? "shared_to_private" : "private_to_shared");
@@ -3395,72 +3475,16 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
 
     section = memory_region_find(get_system_memory(), start, size);
     mr = section.mr;
-    if (!mr) {
-        /*
-         * Ignore converting non-assigned region to shared.
-         *
-         * TDX requires vMMIO region to be shared to inject #VE to guest.
-         * OVMF issues conservatively MapGPA(shared) on 32bit PCI MMIO region,
-         * and vIO-APIC 0xFEC00000 4K page.
-         * OVMF assigns 32bit PCI MMIO region to
-         * [top of low memory: typically 2GB=0xC000000,  0xFC00000)
-         */
-        if (!to_private) {
-            return 0;
-        }
-        return ret;
-    }
 
-    if (!int128_eq(section.size, int128_make64(size))) {
+    if (mr && !int128_eq(section.size, int128_make64(size))) {
         error_report("Convert memory range (0x%" HWADDR_PRIx
                      " + 0x%" HWADDR_PRIx ") crosses a memory-region "
                      "boundary", start, size);
         goto out_unref;
     }
 
-    if (!memory_region_has_guest_memfd(mr)) {
-        /*
-         * Because vMMIO region may be shared, guest TD may convert vMMIO
-         * region to shared explicitly. Don't complain such case. See
-         * memory_region_type() for checking if the region is MMIO region.
-         */
-        if (!to_private &&
-            (!memory_region_is_ram(mr) ||
-             (machine_has_assigned_device_memory(current_machine) &&
-              memory_region_is_ram_device(mr))) &&
-            !memory_region_is_rom(mr) &&
-            !memory_region_is_romd(mr)) {
-            /*
-             * For ram_device regions (e.g. VFIO BARs), the realm may
-             * have marked individual gfns PRIVATE through
-             * iommufd_tsm_dev_memmap_exit() when validating a VDEV
-             * mapping. When the realm later asks to release the
-             * mapping with RSI_IPA_STATE_SET(EMPTY), the kernel
-             * surfaces it here as a !to_private convert. A silent
-             * ret=0 would leave PRIVATE set with no DEV mapping
-             * behind it; honour the release by actually clearing the
-             * attribute. The kvm_arch_post_set_memory_attributes()
-             * side-effect then tears down any leftover ASSIGNED-DEV
-             * S2 via kvm_unmap_gfn_range(KVM_FILTER_PRIVATE), keeping
-             * userspace's view in sync with the kernel's.
-             *
-             * For the non-ram_device legs of this branch (e.g. TDX
-             * vMMIO traps) no PRIVATE attribute was ever installed,
-             * so preserve the original ret=0 fast path.
-             */
-            if (machine_has_assigned_device_memory(current_machine) &&
-                memory_region_is_ram_device(mr) &&
-                (kvm_supported_memory_attributes &
-                 KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
-                ret = kvm_set_memory_attributes_shared(start, size);
-            } else {
-                ret = 0;
-            }
-        } else {
-            error_report("Convert non guest_memfd backed memory region "
-                        "(0x%"HWADDR_PRIx" ,+ 0x%"HWADDR_PRIx") to %s",
-                        start, size, to_private ? "private" : "shared");
-        }
+    ret = handle_memory_hole(&section, to_private, &skip);
+    if (ret || skip) {
         goto out_unref;
     }
 
