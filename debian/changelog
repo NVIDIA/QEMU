@@ -1,3 +1,19 @@
+qemu (1:10.1.0+nvidia-unstable9-1) noble; urgency=medium
+
+  * NVIDIA: VR: SAUCE: vfio/listener: Skip DMA mapping for VFIO-owned RAM-device regions
+  * NVIDIA: VR: SAUCE: hw/arm/smmu-common: Allow pxb-cxl as SMMUv3 primary bus
+  * NVIDIA: VR: SAUCE: hw/vfio+cxl: Program HDM decoder 0 at machine_done for firmware-committed devices
+  * NVIDIA: VR: SAUCE: hw/vfio/pci: Wire CXL component-register BAR with COMP_REGS overlay
+  * NVIDIA: VR: SAUCE: hw/vfio/pci: Add CXL Type-2 device detection and region setup
+  * NVIDIA: VR: SAUCE: hw/vfio/region: Add vfio_region_setup_with_ops() for custom region ops
+  * NVIDIA: VR: SAUCE: linux-headers: Update vfio.h for CXL Type-2 device passthrough
+  * NVIDIA: VR: SAUCE: cxl: Add preserve_config to pxb-cxl OSC method
+  * NVIDIA: VR: SAUCE: hw/arm/virt: Add CXL FMWS PA window for device memory
+  * vfio: Add Error ** parameter to vfio_region_setup()
+  * hw/vfio: sort and validate sparse mmap regions by offset
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 27 May 2026 19:44:00 -0500
+
 qemu (1:10.1.0+nvidia-unstable8-1) noble; urgency=medium
 
   * Revert "NVIDIA: SAUCE: hw/pci/pci: Introduce optional get_msi_address_space() callback"
