@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia-unstable11-1) noble; urgency=medium
+
+  * hw/vfio/iommufd: Control dirty tracking for nesting parent HWPT
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 29 May 2026 17:12:09 -0500
+
 qemu (1:10.1.0+nvidia-unstable10-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: fix: build with GCC 15 and C23 headers
