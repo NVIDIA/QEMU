@@ -14,6 +14,7 @@ Build-Depends-Arch:
 # to qemu's configure script, -- optional features which depend
 # on build-dependencies.
  python3-venv,
+ python3-wheel,
 # --enable-docs
 # for python3-sphinx:native see #995622
  texinfo, python3-sphinx:native, python3-sphinx-rtd-theme,
