@@ -84,7 +84,7 @@ PPC64_CROSSPFX = powerpc64-linux-gnu-
 RISCV64_CROSSPFX = riscv64-linux-gnu-
 ARM_CROSSPFX = arm-none-eabi-
 
-extra-cflags = ${CFLAGS} ${CPPFLAGS}
+extra-cflags = $(filter-out -Werror=implicit-function-declaration,${CFLAGS}) ${CPPFLAGS}
 extra-ldflags = ${LDFLAGS} -Wl,--as-needed
 # we add another set of configure options from debian/control
 common_configure_opts = \
