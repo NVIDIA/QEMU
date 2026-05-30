@@ -1,3 +1,10 @@
+qemu (1:11.0.0+nvidia2-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: fix: add python3-wheel build dependency
+  * NVIDIA: SAUCE: fix: build QEMU 11.0 with GCC 15 C++ plugins
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 29 May 2026 18:38:03 -0500
+
 qemu (1:11.0.0+nvidia1-1) noble; urgency=medium
 
   * Update to QEMU v11.0.0 upstream with NVIDIA support
