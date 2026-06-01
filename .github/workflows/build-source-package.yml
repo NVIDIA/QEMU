@@ -19,7 +19,7 @@ jobs:
     steps:
       # Step 1: Check out the repository's code
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Fetch all history for all tags and branches, which can be necessary
           # for tools like git-buildpackage to determine version numbers.
@@ -57,7 +57,7 @@ jobs:
 
       # Step 4: Upload Workspace for Debugging
       - name: Upload Workspace for Debugging
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pre-build-workspace
           path: .
@@ -107,7 +107,7 @@ jobs:
 
       # Step 7: Upload the generated source package files as artifacts
       - name: Upload Debian Source Package Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Name of the artifact bundle to be displayed in the GitHub UI
           name: debian-source-package
