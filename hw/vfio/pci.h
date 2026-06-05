@@ -132,6 +132,7 @@ typedef struct VFIOCXL {
     hwaddr   fmws_base;         /* GPA base programmed into HDM decoder 0 */
     bool     dpa_in_system_mem;
     bool     machine_done_registered;
+    bool     fmws_reserved;
     VFIORegion region;
     VFIORegion comp_regs_region;
     Notifier   machine_done;
