@@ -216,7 +216,11 @@ void cxl_build_cedt(GArray *table_offsets, GArray *table_data,
 
     cfmws_list = cxl_fmws_get_all_sorted();
     for (iter = cfmws_list; iter; iter = iter->next) {
-        cedt_build_cfmws(CXL_FMW(iter->data), cedt);
+        CXLFixedWindow *fw = CXL_FMW(iter->data);
+
+        if (fw->placed) {
+            cedt_build_cfmws(fw, cedt);
+        }
     }
     g_slist_free(cfmws_list);
 

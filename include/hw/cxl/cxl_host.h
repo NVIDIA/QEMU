@@ -23,12 +23,14 @@ GSList *cxl_fmws_get_all_sorted(void);
 /**
  * cxl_fmws_base - GPA base of the first CXL Fixed Memory Window region.
  *
- * Set by cxl_fmws_set_memmap() to the base address it receives (typically
- * ROUND_UP(highest_gpa + 1, 256 MiB) on ARM virt). Valid after the
- * machine memory-map init callback returns, i.e. at machine_done time.
- * Zero when no machine has called cxl_fmws_set_memmap() (stub builds).
+ * Set by cxl_fmws_set_memmap() to the base address of the first CFMWS
+ * successfully placed in the machine memory map. Valid after the machine
+ * memory-map init callback returns, i.e. at machine_done time. Zero when
+ * no CFMWS was placed.
  */
 extern hwaddr cxl_fmws_base;
+extern uint64_t cxl_fmws_size;
+extern unsigned int cxl_fmws_count;
 
 extern const MemoryRegionOps cfmws_ops;
 
