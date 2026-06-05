@@ -3591,6 +3591,22 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
     cxl->dpa_in_system_mem = true;
 }
 
+static bool vfio_cxl_reserve_fmws(VFIOPCIDevice *vdev, Error **errp)
+{
+    if (!(vdev->vbasedev.flags & VFIO_DEVICE_FLAGS_CXL)) {
+        return true;
+    }
+
+    if (vfio_cxl_fmws_reserved) {
+        error_setg(errp, "vfio-cxl: CXL FMWS base is already reserved");
+        return false;
+    }
+
+    vfio_cxl_fmws_reserved = true;
+    vdev->cxl.fmws_reserved = true;
+    return true;
+}
+
 static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
 {
     VFIODevice *vbasedev = &vdev->vbasedev;
@@ -3683,14 +3699,6 @@ static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
     trace_vfio_cxl_setup_params(vbasedev->name, cxl->hdm_regs_bar_index,
                                  cxl->hdm_regs_offset, cxl->hdm_regs_size,
                                  cxl->dpa_size);
-
-    if (vfio_cxl_fmws_reserved) {
-        error_setg(errp, "vfio-cxl: CXL FMWS base is already reserved");
-        return false;
-    }
-
-    vfio_cxl_fmws_reserved = true;
-    cxl->fmws_reserved = true;
 
     /*
      * Only pre-program the HDM decoder if the kernel reported the device as
@@ -3957,6 +3965,10 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
 
     if (!vfio_device_attach(name, vbasedev,
                             pci_device_iommu_address_space(pdev), errp)) {
+        goto error;
+    }
+
+    if (!vfio_cxl_reserve_fmws(vdev, errp)) {
         goto error;
     }
 
