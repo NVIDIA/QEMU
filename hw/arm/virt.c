@@ -1733,8 +1733,6 @@ static void create_cxl_host_reg_region(VirtMachineState *vms)
     memory_region_init(mr, OBJECT(vms), "cxl_host_reg",
                        vms->memmap[VIRT_CXL_HOST].size);
     memory_region_add_subregion(sysmem, vms->memmap[VIRT_CXL_HOST].base, mr);
-    vms->highmem_cxl = true;
-    vms->highmem_cxl_mmio = true;
 }
 
 static void create_platform_bus(VirtMachineState *vms)
@@ -2030,6 +2028,11 @@ static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
 
     /* We know for sure that at least the memory fits in the PA space */
     vms->highest_gpa = memtop - 1;
+
+    if (vms->cxl_devices_state.is_enabled) {
+        vms->highmem_cxl = true;
+        vms->highmem_cxl_mmio = true;
+    }
 
     virt_set_high_memmap(vms, base, pa_bits);
 

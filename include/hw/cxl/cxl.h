@@ -39,6 +39,7 @@ typedef struct CXLFixedWindow {
     /* Todo: XOR based interleaving */
     MemoryRegion mr;
     hwaddr base;
+    bool placed;
 } CXLFixedWindow;
 #define TYPE_CXL_FMW "cxl-fmw"
 OBJECT_DECLARE_SIMPLE_TYPE(CXLFixedWindow, CXL_FMW)
