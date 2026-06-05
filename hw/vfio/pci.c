@@ -54,6 +54,7 @@
 
 /* Protected by BQL */
 static KVMRouteChange vfio_route_change;
+static bool vfio_cxl_fmws_in_use;
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
@@ -3267,6 +3268,7 @@ void vfio_pci_put_device(VFIOPCIDevice *vdev)
     if (vdev->cxl.dpa_in_system_mem) {
         memory_region_del_subregion(get_system_memory(), vdev->cxl.region.mem);
         vdev->cxl.dpa_in_system_mem = false;
+        vfio_cxl_fmws_in_use = false;
         trace_vfio_cxl_put_device(vdev->vbasedev.name);
     }
     if (vdev->cxl.region.mem) {
@@ -3506,10 +3508,9 @@ static bool vfio_cxl_derive_hdm_info(VFIODevice *vbasedev, VFIOCXL *cxl,
  * setup_locked_hdm - machine_done notifier that programs HDM decoder 0 with
  * the FMWS base address so the guest can access DPA through a stable GPA.
  *
- * Uses cxl->fmws_base (set by the optional cxl-fmws-base device property) if
- * non-zero; otherwise falls back to the cxl_fmws_base global captured by
- * cxl_fmws_set_memmap() during machine memory-map init.  If neither is set,
- * the notifier warns and returns without programming anything.
+ * Uses cxl_fmws_base captured by cxl_fmws_set_memmap() during machine
+ * memory-map init. If no CFMWS window was placed, the notifier warns and
+ * returns without programming anything.
  */
 static void setup_locked_hdm(Notifier *notifier, void *data)
 {
@@ -3537,6 +3538,12 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
     if (cxl->region.size > cxl_fmws_size) {
         warn_report("vfio-cxl %s: DPA size 0x%"PRIx64" exceeds CFMWS size 0x%"PRIx64,
                     region->vbasedev->name, cxl->region.size, cxl_fmws_size);
+        return;
+    }
+
+    if (vfio_cxl_fmws_in_use) {
+        warn_report("vfio-cxl %s: CXL FMWS base already used",
+                    region->vbasedev->name);
         return;
     }
 
@@ -3585,6 +3592,7 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
                                         cxl->region.mem, 1);
     memory_region_transaction_commit();
     cxl->dpa_in_system_mem = true;
+    vfio_cxl_fmws_in_use = true;
 }
 
 static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
