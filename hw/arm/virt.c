@@ -229,8 +229,8 @@ static const MemMapEntry base_memmap[] = {
  * has been disabled or doesn't fit into the PA space. However, the PA space
  * for the region won't be reserved in these circumstances with compact layout.
  *
- * Note that the highmem-mmio-size property will update the high PCIE MMIO size
- * field in this array.
+ * Note that the highmem-mmio-size property will update the high PCIe and CXL
+ * MMIO size fields in this array.
  */
 static MemMapEntry extended_memmap[] = {
     /* Additional 64 MB redist region (can contain up to 512 redistributors) */
@@ -2788,6 +2788,7 @@ static void virt_set_highmem_mmio_size(Object *obj, Visitor *v,
     }
 
     extended_memmap[VIRT_HIGH_PCIE_MMIO].size = size;
+    extended_memmap[VIRT_HIGH_CXL_MMIO].size = size;
 }
 
 static char *virt_get_msi(Object *obj, Error **errp)
@@ -3609,7 +3610,7 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                    NULL, NULL);
     object_class_property_set_description(oc, "highmem-mmio-size",
                                           "Set the high memory region size "
-                                          "for PCI MMIO");
+                                          "for PCIe and CXL MMIO");
 
     object_class_property_add(oc, "virtio-mmio-transports", "uint8",
                                    virt_get_virtio_transports,
