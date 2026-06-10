@@ -1,3 +1,22 @@
+qemu (1:11.0.0+nvidia-unstable3-1) noble; urgency=medium
+
+  * NVIDIA: VR: SAUCE: hw/arm/virt: Resize CXL high MMIO with PCIe
+  * NVIDIA: VR: SAUCE: vfio-cxl: Reserve FMWS before setup
+  * NVIDIA: VR: SAUCE: vfio-cxl: Reject duplicate FMWS users
+  * NVIDIA: VR: SAUCE: vfio-cxl: Tighten FMWS placement
+  * NVIDIA: VR: SAUCE: vfio/listener: Skip DMA mapping for VFIO-owned RAM-device regions
+  * NVIDIA: VR: SAUCE: hw/arm/smmu-common: Allow pxb-cxl as SMMUv3 primary bus
+  * NVIDIA: VR: SAUCE: hw/vfio+cxl: Program HDM decoder 0 at machine_done for firmware-committed devices
+  * NVIDIA: VR: SAUCE: hw/vfio/pci: Wire CXL component-register BAR with COMP_REGS overlay
+  * NVIDIA: VR: SAUCE: hw/vfio/pci: Add CXL Type-2 device detection and region setup
+  * NVIDIA: VR: SAUCE: hw/vfio/region: Add vfio_region_setup_with_ops() for custom region ops
+  * NVIDIA: VR: SAUCE: linux-headers: Update vfio.h for CXL Type-2 device passthrough
+  * NVIDIA: VR: SAUCE: cxl: Add preserve_config to pxb-cxl OSC method
+  * NVIDIA: VR: SAUCE: hw/arm/virt: Add CXL FMWS PA window for device memory
+  * NVIDIA: SAUCE: WAR: hw/vfio: Retry dma_map to bypass PFNMAP
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 10 Jun 2026 09:44:50 -0500
+
 qemu (1:11.0.0+nvidia-unstable2-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: fix: add python3-wheel build dependency
