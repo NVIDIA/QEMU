@@ -1036,6 +1036,32 @@ struct iommu_viommu_tegra241_cmdqv {
 };
 
 /**
+ * enum iommu_viommu_arm_realm_vsmmuv3_flags - Flags for ARM SMMUv3 Realm
+ * @IOMMU_VIOMMU_ARM_REALM_SMMUV3_FLAGS_VSMMU: Indicates whether the Realm has
+ *                                             a guest-visible VSMMU instance
+ */
+enum iommu_viommu_arm_realm_vsmmuv3_flags {
+	IOMMU_VIOMMU_ARM_REALM_SMMUV3_FLAGS_VSMMU = 1 << 0,
+};
+
+/**
+ * struct iommu_viommu_arm_realm_vsmmuv3 - ARM Realm VSMMUv3 parameters
+ *                                         (IOMMU_VIOMMU_TYPE_ARM_REALM_SMMUV3)
+ * @flags: Combination of enum iommu_viommu_arm_realm_vsmmuv3_flags
+ * @reg_base: MMIO base address of the VSMMU in the guest VM
+ * @reg_top: MMIO top address of the VSMMU in the guest VM
+ * @aidr: AIDR register value of the VSMMU in the guest VM
+ * @idr: IDR register values of the VSMMU in the guest VM
+ */
+struct iommu_viommu_arm_realm_vsmmuv3 {
+	__aligned_u64 flags;
+	__aligned_le64 reg_base;
+	__aligned_le64 reg_top;
+	__aligned_le64 aidr;
+	__aligned_le64 idr[7];
+};
+
+/**
  * struct iommu_viommu_alloc - ioctl(IOMMU_VIOMMU_ALLOC)
  * @size: sizeof(struct iommu_viommu_alloc)
  * @flags: Must be 0
