@@ -1634,20 +1634,21 @@ int kvm_arch_fixup_msi_route(struct kvm_irq_routing_entry *route,
     MemoryRegionSection mrs;
     MemoryRegion *mr;
 
-    if (as == &address_space_memory) {
-        return 0;
-    }
-
     /*
      * We do have an IOMMU address space, but for some vIOMMU implementations
      * (e.g. accelerated SMMUv3) the translation tables are programmed into
      * the physical SMMUv3 in the host (nested S1=guest, S2=host). QEMU cannot
      * walk these tables in a safe way, so in that case we obtain the MSI
      * doorbell GPA directly from the vIOMMU backend and ignore the gIOVA
-     * @address.
+     * @address.  For such devices pci_device_iommu_address_space() returns
+     * &address_space_memory, so this check must precede the early-exit below.
      */
     if (pci_device_iommu_msi_direct_gpa(dev, &doorbell_gpa)) {
         goto set_doorbell;
+    }
+
+    if (as == &address_space_memory) {
+        return 0;
     }
 
     /* MSI doorbell address is translated by an IOMMU */
