@@ -42,6 +42,14 @@
 #define STE1_MASK     (STE1_ETS | STE1_S1STALLD | STE1_S1CSH | STE1_S1COR | \
                        STE1_S1CIR | STE1_S1DSS)
 
+/*
+ * The root region aliases the global system memory, and shared_as_sysmem
+ * provides a shared Address Space referencing it. This Address Space is used
+ * by all vfio-pci devices behind all accelerated SMMUv3 instances within a VM.
+ */
+static MemoryRegion root, sysmem;
+static AddressSpace *shared_as_sysmem;
+
 static bool
 smmuv3_accel_check_hw_compatible(SMMUv3State *s,
                                  struct iommu_hw_info_arm_smmuv3 *info,
@@ -734,20 +742,23 @@ static AddressSpace *smmuv3_accel_find_add_as(PCIBus *bus, void *opaque,
     }
 
     /*
-     * We return the system address for vfio-pci devices(with iommufd as
-     * backend) so that the VFIO core can set up Stage-2 (S2) mappings for
-     * guest RAM. This is needed because, in the accelerated SMMUv3 case,
-     * the host SMMUv3 runs in nested (S1 + S2)  mode where the guest
-     * manages its own S1 page tables while the host manages S2.
+     * In the accelerated mode, a vfio-pci device attached via the iommufd
+     * backend must remain in the system address space. Such a device is
+     * always translated by its physical SMMU (using either a stage-2-only
+     * STE or a nested STE), where the parent stage-2 page table is allocated
+     * by the VFIO core to back the system address space.
      *
-     * We are using the global &address_space_memory here, as this will ensure
-     * same system address space pointer for all devices behind the accelerated
-     * SMMUv3s in a VM. That way VFIO/iommufd can reuse a single IOAS ID in
-     * iommufd_cdev_attach(), allowing the Stage-2 page tables to be shared
-     * within the VM instead of duplicating them for every SMMUv3 instance.
+     * Return the shared_as_sysmem aliased to the global system memory in this
+     * case. Sharing address_space_memory also allows devices under different
+     * vSMMU instances in the same VM to reuse a single nesting parent HWPT in
+     * the VFIO core.
+     *
+     * For non-endpoint emulated devices such as PCIe root ports and bridges,
+     * which may use the normal emulated translation path and software IOTLBs,
+     * return the SMMU's IOMMU address space.
      */
     if (vfio_pci) {
-        return &address_space_memory;
+        return shared_as_sysmem;
     } else {
         return &sdev->as;
     }
@@ -848,11 +859,29 @@ void smmuv3_accel_attach_bypass_hwpt(SMMUv3State *s)
     }
 }
 
+static void smmuv3_accel_as_init(SMMUv3State *s)
+{
+
+    if (shared_as_sysmem) {
+        return;
+    }
+
+    memory_region_init(&root, OBJECT(s), "root", UINT64_MAX);
+    memory_region_init_alias(&sysmem, OBJECT(s), "smmuv3-accel-sysmem",
+                             get_system_memory(), 0,
+                             memory_region_size(get_system_memory()));
+    memory_region_add_subregion(&root, 0, &sysmem);
+
+    shared_as_sysmem = g_new0(AddressSpace, 1);
+    address_space_init(shared_as_sysmem, &root, "smmuv3-accel-as-sysmem");
+}
+
 void smmuv3_accel_init(SMMUv3State *s)
 {
     SMMUState *bs = ARM_SMMU(s);
 
     bs->iommu_ops = &smmuv3_accel_ops;
     s->s_accel = g_new0(SMMUv3AccelState, 1);
+    smmuv3_accel_as_init(s);
     qemu_mutex_init(&s->s_accel->event_thread_mutex);
 }
