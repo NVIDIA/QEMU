@@ -1,3 +1,11 @@
+qemu (1:10.1.0+nvidia-unstable12-1) noble; urgency=medium
+
+  * hw/vfio/iommufd: Control dirty tracking for nesting parent HWPT
+  * NVIDIA: SAUCE: hw/arm/smmuv3-accel: Use shared system address space
+  * Revert "NVIDIA: VR: SAUCE: vfio/listener: Skip DMA mapping for VFIO-owned RAM-device regions"
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Mon, 22 Jun 2026 17:30:15 -0500
+
 qemu (1:10.1.0+nvidia-unstable11-1) noble; urgency=medium
 
   * hw/vfio/iommufd: Control dirty tracking for nesting parent HWPT
