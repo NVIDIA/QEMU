@@ -189,6 +189,10 @@ iommufd_cdev_fail_attach_existing_container(const char *msg) " %s"
 iommufd_cdev_alloc_ioas(int iommufd, int ioas_id) " [iommufd=%d] new IOMMUFD container with ioasid=%d"
 iommufd_cdev_device_info(char *name, int devfd, int num_irqs, int num_regions, int flags) " %s (%d) num_irqs=%d num_regions=%d flags=%d"
 iommufd_cdev_pci_hot_reset_dep_devices(int domain, int bus, int slot, int function, int dev_id) "\t%04x:%02x:%02x.%x devid %d"
+iommufd_tsm_op_failed(uint32_t rid, uint32_t op, int err) " rid 0x%04x op %u failed, errno=%d"
+iommufd_tsm_guest_request_failed(uint32_t vdevice_id, uint32_t scope, int err) " vdevice_id %u scope %u failed, errno=%d"
+iommufd_tsm_guest_request_bad_residue(uint32_t vdevice_id, int residue, uint32_t resp_len) " vdevice_id %u returned invalid residue %d for a %u-byte response"
+iommufd_tsm_dev_memmap(uint32_t rid, uint64_t gpa_base, uint64_t gpa_top, uint64_t pa_base, bool ok) " rid 0x%04x [0x%"PRIx64", 0x%"PRIx64") pa 0x%"PRIx64" accepted=%d"
 
 # cpr-iommufd.c
 vfio_cpr_find_device(uint32_t ioas_id, int devid, uint32_t hwpt_id) "ioas_id %u, devid %d, hwpt_id %u"
