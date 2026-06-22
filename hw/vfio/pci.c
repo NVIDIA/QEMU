@@ -23,6 +23,7 @@
 #include <linux/vfio.h>
 #include <sys/ioctl.h>
 
+#include "hw/core/boards.h"
 #include "hw/core/hw-error.h"
 #include "hw/core/iommu.h"
 #include "hw/cxl/cxl_component.h"
@@ -58,6 +59,11 @@ static KVMRouteChange vfio_route_change;
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
 static void vfio_msi_disable_common(VFIOPCIDevice *vdev);
+#ifdef CONFIG_IOMMUFD
+static bool vfio_register_bdf(PCIDevice *pci_dev, bool require_running,
+                              Error **errp);
+static void vfio_register_bdf_deferred(PCIDevice *pci_dev);
+#endif
 
 /* Create new or reuse existing eventfd */
 static bool vfio_notifier_init(VFIOPCIDevice *vdev, EventNotifier *e,
@@ -1399,6 +1405,11 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
     VFIODevice *vbasedev = &vdev->vbasedev;
     uint32_t emu_bits = 0, emu_val = 0, phys_val = 0, val;
 
+#ifdef CONFIG_IOMMUFD
+    /* Attempt registering device info to kernel. No-op if done already */
+    vfio_register_bdf_deferred(pdev);
+#endif
+
     memcpy(&emu_bits, vdev->emulated_config_bits + addr, len);
     emu_bits = le32_to_cpu(emu_bits);
 
@@ -1435,6 +1446,11 @@ void vfio_pci_write_config(PCIDevice *pdev,
     int ret;
 
     trace_vfio_pci_write_config(vdev->vbasedev.name, addr, val, len);
+
+#ifdef CONFIG_IOMMUFD
+    /* Attempt registering device info to kernel. No-op if done already */
+    vfio_register_bdf_deferred(pdev);
+#endif
 
     /* Write everything to VFIO, let it filter out what we can't write */
     ret = vfio_pci_config_space_write(vdev, addr, len, &val_le);
@@ -3253,6 +3269,19 @@ bool vfio_pci_populate_device(VFIOPCIDevice *vdev, Error **errp)
 
 void vfio_pci_put_device(VFIOPCIDevice *vdev)
 {
+#ifdef CONFIG_IOMMUFD
+    /*
+     * Only TYPE_VFIO_PCI installs this handler (see vfio_pci_init()).  Sibling
+     * subclasses of TYPE_VFIO_PCI_DEVICE such as TYPE_VFIO_USER_PCI have their
+     * own instance_init and share this teardown path, so ->vmstate may be NULL
+     * here.  vfio_user_pci_realize() also calls us on its error path, before
+     * vfio_user_pci_finalize() calls us again, so clear the pointer too.
+     */
+    if (vdev->vmstate) {
+        qemu_del_vm_change_state_handler(vdev->vmstate);
+        vdev->vmstate = NULL;
+    }
+#endif
     vfio_display_finalize(vdev);
     vfio_bars_finalize(vdev);
 
@@ -4075,6 +4104,23 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
 
     trace_vfio_mdev(vbasedev->name, vbasedev->mdev);
 
+#ifdef CONFIG_IOMMUFD
+    if (vbasedev->iommufd_vdevice && !vbasedev->iommufd) {
+        error_setg(errp, "iommufd-vdevice requires an iommufd backend");
+        goto error;
+    }
+    if (vbasedev->iommufd_vdevice &&
+        !machine_has_assigned_device_memory(current_machine)) {
+        error_setg(errp, "iommufd-vdevice requires an Arm Realm with "
+                   "RME device-assignment support");
+        goto error;
+    }
+    if (vbasedev->iommufd_vdevice && vbasedev->mdev) {
+        error_setg(errp, "iommufd-vdevice is not supported for mdevs");
+        goto error;
+    }
+#endif
+
     if (vbasedev->ram_block_discard_allowed && !vbasedev->mdev) {
         error_setg(errp, "x-balloon-allowed only potentially compatible "
                    "with mdev devices");
@@ -4170,6 +4216,17 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
             goto out_deregister;
         }
     }
+
+#ifdef CONFIG_IOMMUFD
+    /*
+     * Register while realize can still propagate failure if the guest-visible
+     * BDF is already stable. Devices behind an unnumbered bridge are deferred
+     * until the guest assigns the secondary bus number.
+     */
+    if (!vfio_register_bdf(pdev, false, errp)) {
+        goto out_deregister;
+    }
+#endif
 
     vfio_pci_register_err_notifier(vdev);
     vfio_pci_register_req_notifier(vdev);
@@ -4275,6 +4332,91 @@ post_reset:
     vfio_pci_post_reset(vdev);
 }
 
+#ifdef CONFIG_IOMMUFD
+static bool vfio_register_bdf(PCIDevice *pci_dev, bool require_running,
+                              Error **errp)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(pci_dev);
+    PCIBus *bus = pci_get_bus(pci_dev);
+
+    /*
+     * The root-bus number is fixed before realize. A secondary bus can remain
+     * zero until the guest programs its bridge, so defer registration there.
+     */
+    if (!vdev->vbasedev.iommufd_vdevice) {
+        return true;
+    }
+    if (vdev->has_info_set) {
+        uint32_t current_rid = pci_get_bdf(pci_dev);
+
+        if (vdev->vbasedev.vdevice_rid != current_rid) {
+            error_setg(errp,
+                       "guest BDF for IOMMUFD vdevice %s changed "
+                       "from %02x:%02x.%x to %02x:%02x.%x",
+                       vdev->vbasedev.name,
+                       PCI_BUS_NUM(vdev->vbasedev.vdevice_rid),
+                       PCI_SLOT(vdev->vbasedev.vdevice_rid),
+                       PCI_FUNC(vdev->vbasedev.vdevice_rid),
+                       PCI_BUS_NUM(current_rid), PCI_SLOT(current_rid),
+                       PCI_FUNC(current_rid));
+            return false;
+        }
+        return true;
+    }
+    if ((require_running && !vdev->is_running) ||
+        (!pci_bus_is_root(bus) &&
+         (pci_bus_num(bus) == 0))) {
+        return true;
+    }
+
+    if (iommufd_vdevice_register(&vdev->vbasedev, errp)) {
+        return false;
+    }
+
+    vdev->has_info_set = true;
+    return true;
+}
+
+static void vfio_register_bdf_deferred(PCIDevice *pci_dev)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(pci_dev);
+    Error *err = NULL;
+
+    /* Config accesses also occur inside realize, before failure can unwind. */
+    if (!DEVICE(pci_dev)->realized || vdev->info_set_failed) {
+        return;
+    }
+
+    if (!vfio_register_bdf(pci_dev, true, &err)) {
+        /*
+         * The requested vDevice mode cannot operate without registration.
+         * Latch only while the asynchronous VM-stop request is pending, so
+         * repeated config accesses cannot reissue the ioctl or flood the log.
+         */
+        vdev->info_set_failed = true;
+        error_reportf_err(err, "Failed to register IOMMUFD vdevice for %s: ",
+                          vdev->vbasedev.name);
+        qemu_system_vmstop_request_prepare();
+        qemu_system_vmstop_request(RUN_STATE_INTERNAL_ERROR);
+    }
+}
+
+static void vfio_register_bdf_notifier(void *opaque, bool running,
+                                       RunState state)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(opaque);
+
+    vdev->is_running = running;
+    if (!running) {
+        /* The asynchronous stop has consumed the deferred-failure latch. */
+        vdev->info_set_failed = false;
+        return;
+    }
+
+    vfio_register_bdf_deferred(opaque);
+}
+#endif
+
 static void vfio_pci_init(Object *obj)
 {
     PCIDevice *pci_dev = PCI_DEVICE(obj);
@@ -4288,6 +4430,12 @@ static void vfio_pci_init(Object *obj)
     vdev->host.bus = ~0U;
     vdev->host.slot = ~0U;
     vdev->host.function = ~0U;
+
+#ifdef CONFIG_IOMMUFD
+    vdev->is_running = runstate_is_running();
+    vdev->has_info_set = false;
+    vdev->info_set_failed = false;
+#endif
 
     vfio_device_init(vbasedev, VFIO_DEVICE_TYPE_PCI, &vfio_pci_ops,
                      DEVICE(vdev), false);
@@ -4304,6 +4452,11 @@ static void vfio_pci_init(Object *obj)
      * may be lost.
      */
     pci_dev->cap_present |= QEMU_PCI_SKIP_RESET_ON_CPR;
+
+#ifdef CONFIG_IOMMUFD
+    vdev->vmstate = qemu_add_vm_change_state_handler_prio(
+        vfio_register_bdf_notifier, obj, 10);
+#endif
 }
 
 static void vfio_pci_device_class_init(ObjectClass *klass, const void *data)
@@ -4401,6 +4554,8 @@ static const Property vfio_pci_properties[] = {
 #ifdef CONFIG_IOMMUFD
     DEFINE_PROP_LINK("iommufd", VFIOPCIDevice, vbasedev.iommufd,
                      TYPE_IOMMUFD_BACKEND, IOMMUFDBackend *),
+    DEFINE_PROP_BOOL("iommufd-vdevice", VFIOPCIDevice, vbasedev.iommufd_vdevice,
+                     false),
 #endif
     DEFINE_PROP_BOOL("skip-vsc-check", VFIOPCIDevice, skip_vsc_check, true),
     DEFINE_PROP_UINT16("x-vpasid-cap-offset", VFIOPCIDevice,
@@ -4530,6 +4685,10 @@ static void vfio_pci_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, /* 9.0 */
                                           "iommufd",
                                           "Set host IOMMUFD backend device");
+    object_class_property_set_description(klass, /* 10.0 */
+                                          "iommufd-vdevice",
+                                          "Register the device as an IOMMUFD "
+                                          "vDevice");
 #endif
     object_class_property_set_description(klass, /* 9.1 */
                                           "x-device-dirty-page-tracking",

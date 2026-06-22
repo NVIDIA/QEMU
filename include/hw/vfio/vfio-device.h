@@ -85,6 +85,9 @@ typedef struct VFIODevice {
     bool iommu_dirty_tracking;
     HostIOMMUDevice *hiod;
     int devid;
+    uint32_t vdevice_id;
+    uint32_t vdevice_rid;
+    bool iommufd_vdevice;
     IOMMUFDBackend *iommufd;
     VFIOIOASHwpt *hwpt;
     QLIST_ENTRY(VFIODevice) hwpt_next;
@@ -170,6 +173,9 @@ VFIODevice *vfio_get_vfio_device(Object *obj);
 
 typedef QLIST_HEAD(VFIODeviceList, VFIODevice) VFIODeviceList;
 extern VFIODeviceList vfio_device_list;
+
+/* Caller must hold the BQL while using the returned device. */
+VFIODevice *vfio_find_bdf(uint32_t rid);
 
 #ifdef CONFIG_LINUX
 /*

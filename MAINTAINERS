@@ -475,6 +475,7 @@ ARM KVM CPUs
 M: Peter Maydell <peter.maydell@linaro.org>
 L: qemu-arm@nongnu.org
 S: Supported
+F: include/hw/arm/rme-da.h
 F: target/arm/kvm.c
 F: target/arm/kvm-rme.c
 F: tests/functional/aarch64/test_kvm.py
