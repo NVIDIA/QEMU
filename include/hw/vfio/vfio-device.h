@@ -85,6 +85,8 @@ typedef struct VFIODevice {
     bool iommu_dirty_tracking;
     HostIOMMUDevice *hiod;
     int devid;
+    int vdevice_id;
+    bool iommufd_vdevice;
     IOMMUFDBackend *iommufd;
     VFIOIOASHwpt *hwpt;
     QLIST_ENTRY(VFIODevice) hwpt_next;
@@ -170,6 +172,8 @@ VFIODevice *vfio_get_vfio_device(Object *obj);
 
 typedef QLIST_HEAD(VFIODeviceList, VFIODevice) VFIODeviceList;
 extern VFIODeviceList vfio_device_list;
+
+VFIODevice *vfio_find_bdf(uint64_t sbdf);
 
 #ifdef CONFIG_LINUX
 /*

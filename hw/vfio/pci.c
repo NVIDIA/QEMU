@@ -58,6 +58,7 @@ static KVMRouteChange vfio_route_change;
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
 static void vfio_msi_disable_common(VFIOPCIDevice *vdev);
+static void vfio_register_bdf(PCIDevice *pci_dev);
 
 /* Create new or reuse existing eventfd */
 static bool vfio_notifier_init(VFIOPCIDevice *vdev, EventNotifier *e,
@@ -1399,6 +1400,9 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
     VFIODevice *vbasedev = &vdev->vbasedev;
     uint32_t emu_bits = 0, emu_val = 0, phys_val = 0, val;
 
+    /* Attempt registering device info to kernel. No-op if done already */
+    vfio_register_bdf(pdev);
+
     memcpy(&emu_bits, vdev->emulated_config_bits + addr, len);
     emu_bits = le32_to_cpu(emu_bits);
 
@@ -1435,6 +1439,9 @@ void vfio_pci_write_config(PCIDevice *pdev,
     int ret;
 
     trace_vfio_pci_write_config(vdev->vbasedev.name, addr, val, len);
+
+    /* Attempt registering device info to kernel. No-op if done already */
+    vfio_register_bdf(pdev);
 
     /* Write everything to VFIO, let it filter out what we can't write */
     ret = vfio_pci_config_space_write(vdev, addr, len, &val_le);
@@ -3253,6 +3260,7 @@ bool vfio_pci_populate_device(VFIOPCIDevice *vdev, Error **errp)
 
 void vfio_pci_put_device(VFIOPCIDevice *vdev)
 {
+    qemu_del_vm_change_state_handler(vdev->vmstate);
     vfio_display_finalize(vdev);
     vfio_bars_finalize(vdev);
 
@@ -4275,6 +4283,43 @@ post_reset:
     vfio_pci_post_reset(vdev);
 }
 
+static void vfio_register_bdf(PCIDevice *pci_dev)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(pci_dev);
+    PCIBus *bus = pci_get_bus(pci_dev);
+    Error *err = NULL;
+
+    /* Already registered, or bus identifier is not yet assigned. Skip. */
+    if (vdev->has_info_set ||
+        !vdev->vbasedev.iommufd_vdevice ||
+        !vdev->is_running ||
+        (!pci_bus_is_root(bus) &&
+         (pci_bus_num(bus) == 0))) {
+        return;
+    }
+
+    vdev->has_info_set = true;
+
+    if (iommufd_vdevice_register(&vdev->vbasedev, &err)) {
+        error_reportf_err(err, "Failed to register IOMMUFD vdevice for %s: ",
+                          vdev->vbasedev.name);
+    }
+}
+
+static void vfio_register_bdf_notifier(void *opaque, bool running,
+                                       RunState state)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(opaque);
+
+    if (!running) {
+        return;
+    }
+
+    vdev->is_running = true;
+
+    vfio_register_bdf(opaque);
+}
+
 static void vfio_pci_init(Object *obj)
 {
     PCIDevice *pci_dev = PCI_DEVICE(obj);
@@ -4288,6 +4333,9 @@ static void vfio_pci_init(Object *obj)
     vdev->host.bus = ~0U;
     vdev->host.slot = ~0U;
     vdev->host.function = ~0U;
+
+    vdev->is_running = false;
+    vdev->has_info_set = false;
 
     vfio_device_init(vbasedev, VFIO_DEVICE_TYPE_PCI, &vfio_pci_ops,
                      DEVICE(vdev), false);
@@ -4304,6 +4352,9 @@ static void vfio_pci_init(Object *obj)
      * may be lost.
      */
     pci_dev->cap_present |= QEMU_PCI_SKIP_RESET_ON_CPR;
+
+    vdev->vmstate = qemu_add_vm_change_state_handler_prio(
+        vfio_register_bdf_notifier, obj, 10);
 }
 
 static void vfio_pci_device_class_init(ObjectClass *klass, const void *data)
@@ -4401,6 +4452,8 @@ static const Property vfio_pci_properties[] = {
 #ifdef CONFIG_IOMMUFD
     DEFINE_PROP_LINK("iommufd", VFIOPCIDevice, vbasedev.iommufd,
                      TYPE_IOMMUFD_BACKEND, IOMMUFDBackend *),
+    DEFINE_PROP_BOOL("iommufd-vdevice", VFIOPCIDevice, vbasedev.iommufd_vdevice,
+                     false),
 #endif
     DEFINE_PROP_BOOL("skip-vsc-check", VFIOPCIDevice, skip_vsc_check, true),
     DEFINE_PROP_UINT16("x-vpasid-cap-offset", VFIOPCIDevice,
@@ -4530,6 +4583,9 @@ static void vfio_pci_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, /* 9.0 */
                                           "iommufd",
                                           "Set host IOMMUFD backend device");
+    object_class_property_set_description(klass, /* 10.0 */
+                                          "iommufd-vdevice",
+                                          "Register the device with IOMMUFD VDEVICE");
 #endif
     object_class_property_set_description(klass, /* 9.1 */
                                           "x-device-dirty-page-tracking",

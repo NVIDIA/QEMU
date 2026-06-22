@@ -76,6 +76,24 @@ static bool vfio_log_sync_needed(const VFIOContainer *bcontainer)
     return true;
 }
 
+VFIODevice *vfio_find_bdf(uint64_t sbdf)
+{
+    VFIOPCIDevice *pcidev;
+    VFIODevice *vbasedev;
+
+    QLIST_FOREACH(vbasedev, &vfio_device_list, global_next) {
+        if (vbasedev->type != VFIO_DEVICE_TYPE_PCI) {
+            continue;
+        }
+        pcidev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+        if (((uint64_t)pci_get_bdf(&pcidev->parent_obj)) == sbdf) {
+            return vbasedev;
+        }
+    }
+
+    return NULL;
+}
+
 static bool vfio_listener_skipped_section(MemoryRegionSection *section,
                                           bool bypass_ro)
 {

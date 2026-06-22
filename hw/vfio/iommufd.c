@@ -21,6 +21,7 @@
 #include "qapi/error.h"
 #include "system/iommufd.h"
 #include "hw/core/qdev.h"
+#include "system/kvm.h"
 #include "hw/vfio/vfio-cpr.h"
 #include "system/reset.h"
 #include "qemu/cutils.h"
@@ -30,9 +31,255 @@
 #include "vfio-iommufd.h"
 #include "vfio-helpers.h"
 #include "vfio-listener.h"
+#include "linux-headers/linux/arm-smccc.h"
+#include "linux-headers/linux/tsm.h"
 
 #define TYPE_HOST_IOMMU_DEVICE_IOMMUFD_VFIO             \
             TYPE_HOST_IOMMU_DEVICE_IOMMUFD "-vfio"
+
+/*
+ * Arm SMMUv3 stream-table-entry bits used to build a stage-1 bypass STE for
+ * the nested (VIOMMU) domain in the RME device-assignment flow.
+ */
+#define VFIO_STRTAB_STE_0_V          (1UL << 0)
+#define VFIO_STRTAB_STE_0_CFG_BYPASS 4
+
+int iommufd_tsm_bind(unsigned long vdev_id)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct iommu_vdevice_tsm_op tsm_op;
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    tsm_op.size = sizeof(struct iommu_vdevice_tsm_op);
+    tsm_op.flags = 0;
+    tsm_op.op = IOMMU_VDEVICE_TSM_BIND;
+    tsm_op.vdevice_id = vbasedev->vdevice_id;
+
+    if (ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_OP, &tsm_op)) {
+        warn_report("Failed to TSM bind vdevice: %d", errno);
+        return -errno;
+    }
+
+    return 0;
+}
+
+int iommufd_tsm_unbind(unsigned long vdev_id)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct iommu_vdevice_tsm_op tsm_op;
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    tsm_op.size = sizeof(struct iommu_vdevice_tsm_op);
+    tsm_op.flags = 0;
+    tsm_op.op = IOMMU_VDEVICE_TSM_UNBIND;
+    tsm_op.vdevice_id = vbasedev->vdevice_id;
+
+    if (ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_OP, &tsm_op)) {
+        warn_report("Failed to TSM unbind vdevice: %d", errno);
+        return -errno;
+    }
+
+    return 0;
+}
+
+static int iommufd_tsm_guest_request(VFIODevice *vbasedev,
+                                     uint32_t vdevice_id, uint32_t scope,
+                                     void *req, uint32_t req_len,
+                                     void *resp, uint32_t resp_len,
+                                     uint32_t *actual_resp_len)
+{
+    struct iommu_vdevice_tsm_guest_request guest_req = {
+        .size = sizeof(guest_req),
+        .vdevice_id = vdevice_id,
+        .scope = scope,
+        .req_uptr = (uintptr_t)req,
+        .req_len = req_len,
+        .resp_uptr = (uintptr_t)resp,
+        .resp_len = resp_len,
+    };
+    int ret;
+
+    ret = ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_GUEST_REQUEST,
+                &guest_req);
+    if (ret < 0) {
+        warn_report("IOMMU_VDEVICE_TSM_GUEST_REQUEST failed: %d", errno);
+        return -errno;
+    }
+
+    /* return value is the residue */
+    if (actual_resp_len) {
+        *actual_resp_len = resp_len - ret;
+    }
+
+    return 0;
+}
+
+int iommufd_tsm_da_set_tdi_state_run(unsigned int vdev_id)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct arm64_vdev_set_tdi_state_guest_req req = {
+        .req_type = __RHI_DA_VDEV_SET_TDI_STATE,
+        .tdi_state = RHI_DA_TDI_CONFIG_RUN,
+    };
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    return iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                     PCI_TSM_REQ_STATE_CHANGE,
+                                     &req, sizeof(req),
+                                     NULL, 0, NULL);
+}
+
+int iommufd_tsm_get_da_object_size(unsigned int vdev_id,
+       unsigned int object_type,
+       unsigned int *object_size)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct arm64_vdev_object_size_guest_req req = {
+        .req_type = __RHI_DA_OBJECT_SIZE,
+        .object_type = object_type,
+    };
+    uint32_t resp_len = 0;
+    int ret;
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    ret = iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                    PCI_TSM_REQ_INFO,
+                                    &req, sizeof(req),
+                                    object_size, sizeof(*object_size),
+                                    &resp_len);
+    if (ret) {
+        return ret;
+    }
+    if (resp_len != sizeof(int)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+int iommufd_tsm_da_object_read(unsigned int vdev_id,
+       unsigned int object_type,
+       unsigned long offset,
+       void *buf,
+       unsigned long max_len,
+       unsigned int *resp_len)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct arm64_vdev_object_read_guest_req req = {
+        .req_type = __RHI_DA_OBJECT_READ,
+        .object_type = object_type,
+        .offset = offset,
+    };
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    return iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                     PCI_TSM_REQ_INFO,
+                                     &req, sizeof(req),
+                                     buf, max_len, resp_len);
+}
+
+int iommufd_tsm_da_get_interface_report(unsigned int vdev_id)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    __u32 req_type;
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    req_type = __RHI_DA_VDEV_UPDATE_INTERFACE_REPORT;
+    return iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                     PCI_TSM_REQ_INFO,
+                                     &req_type, sizeof(req_type),
+                                     NULL, 0, NULL);
+}
+
+int iommufd_tsm_da_get_measurement(unsigned int vdev_id,
+       struct rhi_vdev_measurement_params *param)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct arm64_vdev_device_measurement_guest_req req = {
+        .req_type = __RHI_DA_VDEV_UPDATE_MEASUREMENTS,
+        .flags = param->flags,
+        .nonce = (uintptr_t)&param->nonce[0],
+    };
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+        return -ENODEV;
+    }
+
+    return iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                     PCI_TSM_REQ_INFO,
+                                     &req, sizeof(req),
+                                     NULL, 0, NULL);
+}
+
+bool iommufd_tsm_dev_memmap_exit(unsigned long vdev_id,
+    unsigned long gpa_base, unsigned long gpa_top,
+    unsigned long pa_base)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    struct arm64_vdev_device_memmap_guest_req req = {
+        .req_type = __REC_DA_VDEV_MAP,
+        .gpa_base = gpa_base,
+        .gpa_top = gpa_top,
+        .pa_base = pa_base,
+    };
+    uint64_t range_size = gpa_top - gpa_base;
+    bool ok;
+
+    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+            return false;
+    }
+
+    /*
+     * Mark the IPA window PRIVATE before the iommufd guest-request reaches
+     * the host TSM/iommufd and the kernel installs ASSIGNED-DEV S2 entries
+     * via realm_dev_mem_map(). This is the VDEV-side equivalent of the
+     * RIPAS-change handshake used for RAM (rec_exit_ripas_change ->
+     * KVM_EXIT_MEMORY_FAULT -> kvm_convert_memory) and gives the kernel's
+     * realm_clamp_order() the neighbour signal it needs to refuse a 2 MiB
+     * unprotected coalescing over VDEV-locked PAs.
+     *
+     * Set the attribute *before* the iommufd call: the
+     * kvm_arch_post_set_memory_attributes() callback sweeps away any stale
+     * NS S2 entries on those gfns (KVM_FILTER_SHARED) before the DEV
+     * mapping lands, closing the race against other vCPUs faulting on the
+     * unprotected alias in the window between VDEV_MAP exit and the host
+     * actually installing the DEV S2.
+     */
+    if (kvm_set_memory_attributes_private(gpa_base, range_size)) {
+        return false;
+    }
+
+    ok = iommufd_tsm_guest_request(vbasedev, vbasedev->vdevice_id,
+                                   PCI_TSM_REQ_STATE_CHANGE,
+                                   &req, sizeof(req),
+                                   NULL, 0, NULL) == 0;
+    if (!ok) {
+        /*
+         * Roll back the attribute change so the realm doesn't get stuck
+         * with PRIVATE-locked gfns that have no backing DEV mapping.
+         */
+        kvm_set_memory_attributes_shared(gpa_base, range_size);
+    }
+
+    return ok;
+}
 
 static int iommufd_cdev_map(const VFIOContainer *bcontainer, hwaddr iova,
                             uint64_t size, void *vaddr, bool readonly,
@@ -328,6 +575,44 @@ static int iommufd_cdev_attach_ioas_hwpt(VFIODevice *vbasedev, uint32_t id,
     return 0;
 }
 
+int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
+{
+    IOMMUFDBackend *iommufd = vbasedev->iommufd;
+    struct iommu_vdevice_alloc alloc_vdev;
+    VFIOPCIDevice *vdev;
+    int ret;
+
+    if (vbasedev->type != VFIO_DEVICE_TYPE_PCI) {
+        error_setg(errp, "vdevice registration is only supported for PCI");
+        return -EINVAL;
+    }
+
+    vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+
+    alloc_vdev.size = sizeof(alloc_vdev);
+    alloc_vdev.viommu_id = vbasedev->hwpt->viommu_id;
+    alloc_vdev.dev_id = vbasedev->devid;
+    /* Guest-visible RID: segment (0) in bits [31:16], BDF in bits [15:0]. */
+    alloc_vdev.virt_id = pci_get_bdf(&vdev->parent_obj);
+
+    if (ioctl(iommufd->fd, IOMMU_VDEVICE_ALLOC, &alloc_vdev)) {
+        ret = -errno;
+        error_setg_errno(errp, errno, "failed to allocate vdevice");
+        return ret;
+    }
+
+    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev,
+                                        vbasedev->hwpt->nested_hwpt_id, errp);
+    if (ret) {
+        iommufd_backend_free_id(iommufd, alloc_vdev.out_vdevice_id);
+        return ret;
+    }
+
+    vbasedev->vdevice_id = alloc_vdev.out_vdevice_id;
+
+    return 0;
+}
+
 static bool iommufd_cdev_detach_ioas_hwpt(VFIODevice *vbasedev, Error **errp)
 {
     int iommufd = vbasedev->iommufd->fd;
@@ -343,6 +628,77 @@ static bool iommufd_cdev_detach_ioas_hwpt(VFIODevice *vbasedev, Error **errp)
 
     trace_iommufd_cdev_detach_ioas_hwpt(iommufd, vbasedev->name);
     return true;
+}
+
+/*
+ * Allocate the nested-translation topology used for RME device assignment: a
+ * stage-2 nesting-parent HWPT, a VIOMMU on top of it, and a stage-1 bypass
+ * HWPT nested under the VIOMMU. Returns the parent VFIOIOASHwpt (with
+ * nested_hwpt_id populated) on success, or NULL with @errp set on failure.
+ */
+static VFIOIOASHwpt *
+iommufd_cdev_alloc_viommu_hwpt(VFIODevice *vbasedev,
+                               VFIOIOMMUFDContainer *container,
+                               Error **errp)
+{
+    IOMMUFDBackend *iommufd = vbasedev->iommufd;
+    struct iommu_hwpt_arm_smmuv3 bypass_ste = {
+        .ste = {
+            VFIO_STRTAB_STE_0_V | (VFIO_STRTAB_STE_0_CFG_BYPASS << 1),
+            0,
+        },
+    };
+    struct iommu_viommu_alloc alloc_viommu = {
+        .size = sizeof(alloc_viommu),
+        .flags = 0,
+        .type = IOMMU_VIOMMU_TYPE_ARM_REALM_SMMUV3,
+        .dev_id = vbasedev->devid,
+    };
+    VFIOIOASHwpt *hwpt;
+    uint32_t hwpt_id;
+    int ret;
+
+    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
+                                    container->ioas_id,
+                                    IOMMU_HWPT_ALLOC_NEST_PARENT,
+                                    IOMMU_HWPT_DATA_NONE, 0, NULL,
+                                    &hwpt_id, errp)) {
+        return NULL;
+    }
+
+    hwpt = g_malloc0(sizeof(*hwpt));
+    hwpt->hwpt_id = hwpt_id;
+    hwpt->hwpt_flags = IOMMU_HWPT_ALLOC_NEST_PARENT;
+    QLIST_INIT(&hwpt->device_list);
+
+    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt->hwpt_id, errp);
+    if (ret) {
+        goto err_free;
+    }
+
+    alloc_viommu.hwpt_id = hwpt->hwpt_id;
+    if (ioctl(iommufd->fd, IOMMU_VIOMMU_ALLOC, &alloc_viommu)) {
+        error_setg_errno(errp, errno, "failed to allocate VIOMMU");
+        goto err_free;
+    }
+
+    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
+                                    alloc_viommu.out_viommu_id, 0,
+                                    IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                    sizeof(bypass_ste), &bypass_ste,
+                                    &hwpt_id, errp)) {
+        goto err_free;
+    }
+
+    hwpt->viommu_id = alloc_viommu.out_viommu_id;
+    hwpt->nested_hwpt_id = hwpt_id;
+
+    return hwpt;
+
+err_free:
+    iommufd_backend_free_id(container->be, hwpt->hwpt_id);
+    g_free(hwpt);
+    return NULL;
 }
 
 static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
@@ -393,67 +749,75 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
         }
     }
 
-    /*
-     * This is quite early and VFIO Migration state isn't yet fully
-     * initialized, thus rely only on IOMMU hardware capabilities as to
-     * whether IOMMU dirty tracking is going to be requested. Later
-     * vfio_migration_realize() may decide to use VF dirty tracking
-     * instead.
-     */
-    if (!iommufd_backend_get_device_info(vbasedev->iommufd, vbasedev->devid,
-                                         &type, &caps, sizeof(caps), &hw_caps,
-                                         NULL, errp)) {
-        return false;
-    }
-
-    viommu_nesting = vfio_device_get_viommu_flags_want_nesting(vbasedev);
-    viommu_nesting_dirty =
-        vfio_device_get_viommu_flags_want_nesting_dirty(vbasedev);
-
-    if (hw_caps & IOMMU_HW_CAP_DIRTY_TRACKING) {
-        if (!viommu_nesting || viommu_nesting_dirty) {
-            flags |= IOMMU_HWPT_ALLOC_DIRTY_TRACKING;
+    if (vbasedev->iommufd_vdevice) {
+        hwpt = iommufd_cdev_alloc_viommu_hwpt(vbasedev, container, errp);
+        if (!hwpt) {
+            return false;
         }
-    }
-
-    /*
-     * If vIOMMU requests VFIO's cooperation to create nesting parent HWPT,
-     * force to create it so that it could be reused by vIOMMU to create
-     * nested HWPT.
-     */
-    if (viommu_nesting) {
-        flags |= IOMMU_HWPT_ALLOC_NEST_PARENT;
-
-        if (vfio_device_get_host_iommu_quirk_bypass_ro(vbasedev, type,
-                                                       &caps, sizeof(caps))) {
-            bcontainer->bypass_ro = true;
+    } else {
+        /*
+         * This is quite early and VFIO Migration state isn't yet fully
+         * initialized, thus rely only on IOMMU hardware capabilities as to
+         * whether IOMMU dirty tracking is going to be requested. Later
+         * vfio_migration_realize() may decide to use VF dirty tracking
+         * instead.
+         */
+        if (!iommufd_backend_get_device_info(vbasedev->iommufd,
+                                             vbasedev->devid, &type, &caps,
+                                             sizeof(caps), &hw_caps, NULL,
+                                             errp)) {
+            return false;
         }
-    }
 
-    if (cpr_is_incoming()) {
-        hwpt_id = vbasedev->cpr.hwpt_id;
-        goto skip_alloc;
-    }
+        viommu_nesting = vfio_device_get_viommu_flags_want_nesting(vbasedev);
+        viommu_nesting_dirty =
+            vfio_device_get_viommu_flags_want_nesting_dirty(vbasedev);
 
-    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
-                                    container->ioas_id, flags,
-                                    IOMMU_HWPT_DATA_NONE, 0, NULL,
-                                    &hwpt_id, errp)) {
-        return false;
-    }
+        if (hw_caps & IOMMU_HW_CAP_DIRTY_TRACKING) {
+            if (!viommu_nesting || viommu_nesting_dirty) {
+                flags |= IOMMU_HWPT_ALLOC_DIRTY_TRACKING;
+            }
+        }
 
-    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt_id, errp);
-    if (ret) {
-        iommufd_backend_free_id(container->be, hwpt_id);
-        return false;
-    }
+        /*
+         * If vIOMMU requests VFIO's cooperation to create nesting parent HWPT,
+         * force to create it so that it could be reused by vIOMMU to create
+         * nested HWPT.
+         */
+        if (viommu_nesting) {
+            flags |= IOMMU_HWPT_ALLOC_NEST_PARENT;
+
+            if (vfio_device_get_host_iommu_quirk_bypass_ro(vbasedev, type,
+                                                           &caps,
+                                                           sizeof(caps))) {
+                bcontainer->bypass_ro = true;
+            }
+        }
+
+        if (cpr_is_incoming()) {
+            hwpt_id = vbasedev->cpr.hwpt_id;
+            goto skip_alloc;
+        }
+
+        if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
+                                        container->ioas_id, flags,
+                                        IOMMU_HWPT_DATA_NONE, 0, NULL,
+                                        &hwpt_id, errp)) {
+            return false;
+        }
+
+        ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt_id, errp);
+        if (ret) {
+            iommufd_backend_free_id(container->be, hwpt_id);
+            return false;
+        }
 
 skip_alloc:
-    hwpt = g_malloc0(sizeof(*hwpt));
-    hwpt->hwpt_id = hwpt_id;
-    hwpt->hwpt_flags = flags;
-    QLIST_INIT(&hwpt->device_list);
-
+        hwpt = g_malloc0(sizeof(*hwpt));
+        hwpt->hwpt_id = hwpt_id;
+        hwpt->hwpt_flags = flags;
+        QLIST_INIT(&hwpt->device_list);
+    }
     vbasedev->hwpt = hwpt;
     vbasedev->cpr.hwpt_id = hwpt->hwpt_id;
     vbasedev->iommu_dirty_tracking = iommufd_hwpt_dirty_tracking(hwpt);
@@ -479,6 +843,17 @@ static void iommufd_cdev_autodomains_put(VFIODevice *vbasedev,
 
     if (QLIST_EMPTY(&hwpt->device_list)) {
         QLIST_REMOVE(hwpt, next);
+        /*
+         * Tear down the RME device-assignment nested topology (if any) in the
+         * reverse order it was allocated: stage-1 bypass HWPT, then the VIOMMU,
+         * then the stage-2 nesting-parent HWPT below.
+         */
+        if (hwpt->nested_hwpt_id) {
+            iommufd_backend_free_id(container->be, hwpt->nested_hwpt_id);
+        }
+        if (hwpt->viommu_id) {
+            iommufd_backend_free_id(container->be, hwpt->viommu_id);
+        }
         iommufd_backend_free_id(container->be, hwpt->hwpt_id);
         g_free(hwpt);
     }
@@ -507,10 +882,18 @@ static void iommufd_cdev_detach_container(VFIODevice *vbasedev,
         error_report_err(err);
     }
 
+    /*
+     * Destroy the VDEVICE before the VIOMMU it belongs to (freed in
+     * iommufd_cdev_autodomains_put() below), as required by the iommufd UAPI.
+     */
+    if (vbasedev->iommufd_vdevice && vbasedev->vdevice_id) {
+        iommufd_backend_free_id(container->be, vbasedev->vdevice_id);
+        vbasedev->vdevice_id = 0;
+    }
+
     if (vbasedev->hwpt) {
         iommufd_cdev_autodomains_put(vbasedev, container);
     }
-
 }
 
 static void iommufd_cdev_container_destroy(VFIOIOMMUFDContainer *container)
