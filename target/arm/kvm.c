@@ -18,6 +18,7 @@
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "qemu/units.h"
 #include "qom/object.h"
 #include "qapi/error.h"
 #include "system/system.h"
@@ -41,8 +42,10 @@
 #include "qemu/log.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/ghes.h"
+#include "hw/arm/rme-da.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
+#include "system/iommufd.h"
 
 QEMU_BUILD_BUG_ON(QEMU_KVM_ARM_VM_TYPE_REALM != KVM_VM_TYPE_ARM_REALM);
 
@@ -604,6 +607,60 @@ int kvm_arch_get_default_type(MachineState *ms)
     return fixed_ipa ? 0 : size;
 }
 
+/*
+ * RHI device-assignment hypercalls live in the SMCCC Standard Hypervisor
+ * range and must be forwarded to userspace. Each entry covers a block of
+ * consecutive function IDs (.nr_functions is the count of IDs starting at
+ * .base): RHI_DA_FEATURES/OBJECT_SIZE/OBJECT_READ (0x4B..0x4D) and
+ * RHI_DA_VDEV_GET_MEASUREMENTS/GET_INTERFACE_REPORT/SET_TDI_STATE
+ * (0x52..0x54).
+ */
+static struct kvm_smccc_filter rhi_da_smccc_filters[] = {
+    {
+        .base         = RHI_DA_VDEV_GET_MEASUREMENTS,
+        .nr_functions = 0x3,
+        .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
+    },
+    {
+        .base         = RHI_DA_FEATURES,
+        .nr_functions = 0x3,
+        .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
+    },
+};
+
+/*
+ * Forward the RHI device-assignment hypercalls to userspace. Only needed for
+ * realms with assigned devices; the filter is inert for other guests, which
+ * never issue these function IDs.
+ */
+static bool kvm_arm_install_rhi_da_filter(KVMState *s)
+{
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VM_SMCCC_CTRL,
+        .attr  = KVM_ARM_VM_SMCCC_FILTER,
+    };
+    bool installed = true;
+    unsigned int i;
+
+    if (kvm_vm_ioctl(s, KVM_HAS_DEVICE_ATTR, &attr)) {
+        warn_report("KVM SMCCC filter not supported; "
+                    "RME device assignment will not work");
+        return false;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(rhi_da_smccc_filters); i++) {
+        attr.addr = (uintptr_t)&rhi_da_smccc_filters[i];
+
+        if (kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr)) {
+            warn_report("Failed to install RHI device-assignment "
+                        "SMCCC filter");
+            installed = false;
+        }
+    }
+
+    return installed;
+}
+
 int kvm_arch_init(MachineState *ms, KVMState *s)
 {
     Error *local_err = NULL;
@@ -624,9 +681,9 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     /* Initialize confidential guest (Realm) if needed */
     if (ms->cgs) {
         ret = confidential_guest_kvm_init(ms->cgs, &local_err);
-            if (ret < 0) {
-                error_report_err(local_err);
-                return ret;
+        if (ret < 0) {
+            error_report_err(local_err);
+            return ret;
         }
     }
 
@@ -691,6 +748,11 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     max_hw_bps = kvm_vm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_BPS);
     hw_breakpoints = g_array_sized_new(true, true,
                                        sizeof(HWBreakpoint), max_hw_bps);
+
+    if (ms->cgs && !kvm_arm_install_rhi_da_filter(s)) {
+        /* CPU-only Realms remain usable, but device assignment cannot. */
+        ms->cgs->assigned_device_memory = false;
+    }
 
     return ret;
 }
@@ -1738,6 +1800,454 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/*
+ * The RHI device-assignment arguments below all come straight from guest
+ * registers, so every one of them has to be validated before use.
+ *
+ * A vDevice is named by a 32-bit Routing ID (segment:BDF).  Reject anything
+ * wider instead of silently truncating, which would otherwise let a guest
+ * address a device it did not name.
+ */
+static bool rhi_da_get_rid(uint64_t reg, uint32_t *rid)
+{
+    if (reg > UINT32_MAX) {
+        return false;
+    }
+    *rid = reg;
+    return true;
+}
+
+/*
+ * The address space RHI buffer IPAs are resolved in.
+ *
+ * The guest hands over an IPA, and for a buffer the host has to read or write
+ * that IPA carries the "shared" top bit.  The Realm DMA address space strips
+ * that bit and targets the host-visible RAM alias, and passes canonical
+ * addresses through unchanged, so both spellings of the same page work.
+ */
+static AddressSpace *rhi_guest_buffer_as(void)
+{
+    return kvm_arm_rme_get_dma_as() ?: &address_space_memory;
+}
+
+static bool rhi_guest_buffer_is_ram(AddressSpace *as, hwaddr addr,
+                                    hwaddr size, bool is_write)
+{
+    MemoryRegion *mr;
+    hwaddr xlat, len;
+
+    if (!size || size - 1 > HWADDR_MAX - addr) {
+        return false;
+    }
+
+    RCU_READ_LOCK_GUARD();
+    while (size > 0) {
+        len = size;
+        mr = address_space_translate(as, addr, &xlat, &len, is_write,
+                                     MEMTXATTRS_UNSPECIFIED);
+        if (!len || !memory_region_is_ram(mr)) {
+            return false;
+        }
+        size -= len;
+        addr += len;
+    }
+
+    return true;
+}
+
+/*
+ * Map a guest buffer passed to an RHI hypercall.
+ *
+ * Refuse anything that is not plain RAM: these buffers are only ever guest
+ * memory, and letting one land on an emulated device would turn a TSM
+ * response into arbitrary MMIO writes.
+ *
+ * Returns the host address of the whole range, or NULL.  On success the
+ * caller must release it with rhi_unmap_guest_buffer() and the same @len.
+ */
+static void *rhi_map_guest_buffer(uint64_t ipa, hwaddr len, bool is_write)
+{
+    AddressSpace *as = rhi_guest_buffer_as();
+    hwaddr mapped = len;
+    void *hva;
+
+    if (!rhi_guest_buffer_is_ram(as, ipa, len, is_write)) {
+        return NULL;
+    }
+
+    hva = address_space_map(as, ipa, &mapped, is_write, MEMTXATTRS_UNSPECIFIED);
+    if (!hva) {
+        return NULL;
+    }
+    if (mapped != len) {
+        address_space_unmap(as, hva, mapped, is_write, 0);
+        return NULL;
+    }
+
+    return hva;
+}
+
+static void rhi_unmap_guest_buffer(void *hva, hwaddr len, bool is_write,
+                                   hwaddr access_len)
+{
+    address_space_unmap(rhi_guest_buffer_as(), hva, len, is_write, access_len);
+}
+
+/* Number of GP registers carrying SMCCC arguments (x0-x5) / results (x0-x3). */
+#define SMCCC_NUM_ARG_REGS 6
+#define SMCCC_NUM_RES_REGS 4
+
+/*
+ * A forwarded SMCCC call.
+ *
+ * @in holds the guest's x0-x5, captured before any result is produced, and
+ * @out holds x0-x3 as they will be written back.  Keeping the two apart
+ * matters: x1-x3 are both argument and result registers, so a handler that
+ * wrote its status into the vCPU's registers directly would clobber arguments
+ * it had not read yet.
+ */
+typedef struct SmcccCall {
+    uint64_t fn;
+    uint64_t in[SMCCC_NUM_ARG_REGS];
+    uint64_t out[SMCCC_NUM_RES_REGS];
+} SmcccCall;
+
+static int handle_da_vdev_set_tdi_state(SmcccCall *call)
+{
+    uint64_t target_state = call->in[2];
+    int ret = -EINVAL;
+    uint32_t guest_rid;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    if (target_state == RHI_DA_TDI_CONFIG_LOCKED) {
+        ret = iommufd_tsm_bind(guest_rid);
+    } else if (target_state == RHI_DA_TDI_CONFIG_UNLOCKED) {
+        ret = iommufd_tsm_unbind(guest_rid);
+    } else if (target_state == RHI_DA_TDI_CONFIG_RUN) {
+        ret = iommufd_tsm_da_set_tdi_state_run(guest_rid);
+    }
+
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    }
+
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_features(SmcccCall *call)
+{
+    call->out[0] = RHI_DA_BASE_FEATURE;
+
+    return 0;
+}
+
+/* Match the maximum object size accepted by the RME-DA guest ABI. */
+#define RME_DA_OBJECT_MAX_SIZE (16 * MiB)
+
+static int handle_da_object_size(SmcccCall *call)
+{
+    uint64_t object_type = call->in[2];
+    uint32_t object_size;
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+    if (object_type > UINT32_MAX) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        return 0;
+    }
+
+    ret = iommufd_tsm_get_da_object_size(guest_rid, object_type, &object_size);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+        call->out[1] = object_size;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else if (ret == -EINVAL) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    } else {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    }
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_object_read(SmcccCall *call)
+{
+    uint64_t object_type = call->in[2];
+    uint64_t guest_ipa = call->in[3];
+    uint64_t max_len = call->in[4];
+    uint64_t offset = call->in[5];
+    g_autofree uint8_t *object_data = NULL;
+    uint32_t object_size;
+    uint32_t copy_len;
+    uint32_t resp_len = 0;
+    uint32_t guest_rid;
+    void *hva;
+    hwaddr written = 0;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+    if (object_type > UINT32_MAX) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        return 0;
+    }
+
+    if (!max_len || max_len > RME_DA_OBJECT_MAX_SIZE) {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+        return 0;
+    }
+
+    ret = iommufd_tsm_get_da_object_size(guest_rid, object_type,
+                                         &object_size);
+    if (ret) {
+        if (ret == -ENODEV) {
+            call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        } else if (ret == -EINVAL) {
+            call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        } else {
+            call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+        }
+        return 0;
+    }
+    if (!object_size || object_size > RME_DA_OBJECT_MAX_SIZE) {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+        return 0;
+    }
+    if (offset >= object_size) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OFFSET;
+        return 0;
+    }
+
+    copy_len = MIN(max_len, object_size - offset);
+    hva = rhi_map_guest_buffer(guest_ipa, copy_len, true);
+    if (!hva) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+
+    object_data = g_try_malloc0(object_size);
+    if (!object_data) {
+        call->out[0] = RHI_DA_ERROR_DEVICE;
+        goto out_unmap;
+    }
+
+    /*
+     * Fetch from offset zero into a QEMU-owned buffer. The target kernel's
+     * cached-object helper does not validate a nonzero offset before adding
+     * it to the source pointer, so never pass guest-controlled offsets to it.
+     */
+    ret = iommufd_tsm_da_object_read(guest_rid, object_type, 0, object_data,
+                                     object_size, &resp_len);
+    if (!ret && resp_len == object_size) {
+        memcpy(hva, object_data + offset, copy_len);
+        call->out[0] = RHI_DA_SUCCESS;
+        call->out[1] = copy_len;
+        written = copy_len;
+    } else if (!ret) {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    } else if (ret == -EFAULT) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else if (ret == -EINVAL) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    } else {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    }
+
+out_unmap:
+    rhi_unmap_guest_buffer(hva, copy_len, true, written);
+    return 0;
+}
+
+static int handle_da_get_interface_report(SmcccCall *call)
+{
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    ret = iommufd_tsm_da_get_interface_report(guest_rid);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+    }
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_get_measurements(SmcccCall *call)
+{
+    struct rhi_vdev_measurement_params *param_hva;
+    const hwaddr len = sizeof(*param_hva);
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    param_hva = rhi_map_guest_buffer(call->in[2], len, false);
+    if (!param_hva) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+
+    /*
+     * The kernel copies the nonce while servicing the ioctl. A concurrent
+     * guest update can only change the nonce selected by that same guest.
+     */
+    ret = iommufd_tsm_da_get_measurement(guest_rid, param_hva);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -EFAULT) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+    }
+
+    /* Read-only mapping of the guest parameter block; nothing to flush back. */
+    rhi_unmap_guest_buffer(param_hva, len, false, 0);
+    return 0;
+}
+
+static int handle_std_hyp_call(SmcccCall *call)
+{
+    /*
+     * SMCCC leaves x1-x3 as result registers.  Start from zero so that a
+     * handler which only produces a status code does not echo the guest's own
+     * arguments back to it.
+     */
+    memset(call->out, 0, sizeof(call->out));
+
+    switch (call->fn) {
+    case RHI_DA_FEATURES:
+        return handle_da_features(call);
+    case RHI_DA_OBJECT_SIZE:
+        return handle_da_object_size(call);
+    case RHI_DA_OBJECT_READ:
+        return handle_da_object_read(call);
+    case RHI_DA_VDEV_GET_INTERFACE_REPORT:
+        return handle_da_get_interface_report(call);
+    case RHI_DA_VDEV_GET_MEASUREMENTS:
+        return handle_da_get_measurements(call);
+    case RHI_DA_VDEV_SET_TDI_STATE:
+        return handle_da_vdev_set_tdi_state(call);
+    default:
+        /*
+         * The SMCCC filter installed by kvm_arm_install_rhi_da_filter()
+         * should keep this unreachable, but never leave the function ID
+         * itself sitting in x0 as if it were a result.
+         */
+        qemu_log_mask(LOG_UNIMP, "%s: unhandled SMCCC function 0x%" PRIx64 "\n",
+                      __func__, call->fn);
+        call->out[0] = (uint64_t)SMCCC_RET_NOT_SUPPORTED;
+        return 0;
+    }
+}
+
+static int handle_arm64_tio_exit(struct kvm_run *kvm_run)
+{
+    uint64_t gpa_base, gpa_top, pa_base;
+    uint32_t rid;
+    bool accepted;
+
+    if (kvm_run->cca_exit.nr != RMI_EXIT_VDEV_MAP) {
+        error_report("unsupported KVM_EXIT_ARM64_TIO operation 0x%" PRIx64,
+                     (uint64_t)kvm_run->cca_exit.nr);
+        return -EINVAL;
+    }
+
+    gpa_base = kvm_run->cca_exit.gpa_base;
+    gpa_top = kvm_run->cca_exit.gpa_top;
+    pa_base = kvm_run->cca_exit.pa_base;
+
+    if (kvm_run->cca_exit.vdev_id > UINT32_MAX) {
+        accepted = false;
+    } else {
+        rid = kvm_run->cca_exit.vdev_id;
+        accepted = iommufd_tsm_dev_memmap_exit(rid, gpa_base, gpa_top,
+                                               pa_base);
+    }
+
+    /* KVM treats response as a boolean and constructs the RMM flag itself. */
+    kvm_run->cca_exit.response = accepted ? 0 : 1;
+    return 0;
+}
+
+#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
+                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
+
+/*
+ * SMCCC Standard Hypervisor (ARM_SMCCC_OWNER_STANDARD_HYP) call forwarded to
+ * userspace by the filter installed in kvm_arm_install_rhi_da_filter().
+ *
+ * KVM does not sync the GP registers on a hypercall exit, so read the
+ * registers carrying the SMCCC arguments before dispatch and write the
+ * results back afterwards.
+ *
+ * TODO: replace this with first-class SMCCC register handling.
+ */
+static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
+{
+    SmcccCall call = { .fn = run->hypercall.nr };
+    int ret;
+    int i;
+
+    for (i = 0; i < SMCCC_NUM_ARG_REGS; i++) {
+        ret = kvm_get_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]), &call.in[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    /*
+     * RHI dispatch looks up and operates on VFIO devices.  The global VFIO
+     * device list and device lifetime are protected by the BQL, which is not
+     * held while kvm_cpu_exec() handles architecture-specific exits.
+     */
+    bql_lock();
+    ret = handle_std_hyp_call(&call);
+    bql_unlock();
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < SMCCC_NUM_RES_REGS; i++) {
+        ret = kvm_set_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]), &call.out[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -1754,11 +2264,24 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
         break;
+    case KVM_EXIT_ARM64_TIO:
+        /*
+         * See the VFIO device-lifetime comment in
+         * kvm_arm_handle_hypercall().
+         */
+        bql_lock();
+        ret = handle_arm64_tio_exit(run);
+        bql_unlock();
+        break;
+    case KVM_EXIT_HYPERCALL:
+        ret = kvm_arm_handle_hypercall(cs, run);
+        break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: un-handled exit reason %d\n",
                       __func__, run->exit_reason);
         break;
     }
+
     return ret;
 }
 
@@ -2278,9 +2801,6 @@ static void kvm_inject_arm_sea(CPUState *c)
 
     arm_cpu_do_interrupt(c);
 }
-
-#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
-                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
 
 #define AARCH64_SIMD_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U128 | \
                  KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
