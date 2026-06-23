@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia-unstable4-1) noble; urgency=medium
+
+  * Revert "NVIDIA: VR: SAUCE: vfio/listener: Skip DMA mapping for VFIO-owned RAM-device regions"
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Tue, 23 Jun 2026 09:36:11 -0500
+
 qemu (1:11.0.0+nvidia-unstable3-1) noble; urgency=medium
 
   * NVIDIA: VR: SAUCE: hw/arm/virt: Resize CXL high MMIO with PCIe
