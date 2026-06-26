@@ -3431,36 +3431,244 @@ static bool vfio_cxl_derive_hdm_info(VFIODevice *vbasedev, VFIOCXL *cxl,
 }
 
 /*
- * setup_locked_hdm - machine_done notifier that programs HDM decoder 0 with
- * the FMWS base address so the guest can access DPA through a stable GPA.
+ * vfio_cxl_find_fmws_base - count the CXL Fixed Memory Windows that target this
+ * device's pxb-cxl host bridge, and report the unique window base.
  *
- * Uses cxl->fmws_base (set by the optional cxl-fmws-base device property) if
- * non-zero; otherwise falls back to the cxl_fmws_base global captured by
- * cxl_fmws_set_memmap() during machine memory-map init.  If neither is set,
- * the notifier warns and returns without programming anything.
+ * Returns the number of matching CFMWS:
+ *   0  -> no window targets this device,
+ *   1  -> exactly one window does; base_out/size_out hold its base and size,
+ *   >1 -> the host bridge is listed in several windows (ambiguous topology).
+ * The total number of CFMWS in the machine is reported via *nwindows_out (for
+ * diagnostics in the caller's error messages). For the matched window, its
+ * target count is reported via *ntargets_out (so the caller can reject
+ * interleaved windows) and its size via *size_out (so the caller can reject a
+ * device DPA region larger than the window). The supported scope is one
+ * VFIO-CXL device per single-target CFMWS. The caller MUST treat any result
+ * other than a unique single-target match as an error rather than guessing a
+ * base -- guessing (e.g. by window index, or by falling back to the first/only
+ * window) can place the endpoint under the wrong host bridge and recreate the
+ * overlap / region-attach failure this code exists to prevent.
+ *
+ * Match against fw->targets[] (the target *names*, populated when the window is
+ * created) rather than fw->target_hbs[] (the resolved pointers): target_hbs[] is
+ * filled in by cxl_fmws_link_targets(), which on the ARM virt machine runs from
+ * virt_machine_done() -- another machine_done notifier that may execute *after*
+ * this one, leaving target_hbs[] NULL here. Resolving the name on demand is
+ * independent of notifier order.
  */
-static void setup_locked_hdm(Notifier *notifier, void *data)
+static int vfio_cxl_find_fmws_base(PCIDevice *pdev, hwaddr *base_out,
+                                   uint64_t *size_out, int *nwindows_out,
+                                   int *ntargets_out)
 {
-    VFIOCXL *cxl = container_of(notifier, VFIOCXL, machine_done);
+    GSList *list = cxl_fmws_get_all_sorted();
+    PCIBus *root_bus = pci_device_root_bus(pdev);
+    PCIDevice *pxb = root_bus ? root_bus->parent_dev : NULL;
+    GSList *iter;
+    hwaddr base = 0;
+    uint64_t size = 0;
+    int match_count = 0;
+    int matched_ntargets = 0;
+
+    if (nwindows_out) {
+        *nwindows_out = g_slist_length(list);
+    }
+
+    /*
+     * The device's CXL host bridge is the parent of its root bus: for a
+     * pxb-cxl, pci_device_root_bus() lands on the pxb-cxl's own root bus (its
+     * PCI_BUS_IS_ROOT bus), whose parent_dev is the PXBCXLDev -- and only a
+     * pxb-cxl can appear as a CFMWS target. The supported scope is a directly
+     * attached endpoint (no CXL switch), so no ancestor walk is needed. Count
+     * every window that targets this host bridge so the caller can reject
+     * ambiguous topologies.
+     */
+    if (!pxb || !object_dynamic_cast(OBJECT(pxb), TYPE_PXB_CXL_DEV)) {
+        goto out;
+    }
+
+    for (iter = list; iter; iter = iter->next) {
+        CXLFixedWindow *fw = CXL_FMW(iter->data);
+        int i;
+
+        for (i = 0; i < fw->num_targets; i++) {
+            bool ambiguous = false;
+            Object *t = object_resolve_path_type(fw->targets[i],
+                                                 TYPE_PXB_CXL_DEV, &ambiguous);
+            if (t && !ambiguous && t == OBJECT(pxb)) {
+                base = fw->base;
+                size = fw->size;
+                matched_ntargets = fw->num_targets;
+                match_count++;
+                break; /* count each window at most once */
+            }
+        }
+    }
+
+out:
+    g_slist_free(list);
+
+    if (base_out) {
+        *base_out = base;
+    }
+    if (size_out) {
+        *size_out = size;
+    }
+    if (ntargets_out) {
+        *ntargets_out = matched_ntargets;
+    }
+    return match_count;
+}
+
+/*
+ * CFMWS bases already claimed by a VFIO-CXL endpoint. Because distinct windows
+ * get distinct bases (cxl_fmws_set_memmap()) and only single-target windows are
+ * accepted, a base is claimed by at most one pxb-cxl -- so a repeat claim means
+ * a second endpoint sits under the same host bridge, which this RFC does not
+ * support (it would need per-endpoint decoder/window allocation).
+ *
+ * This is process-lifetime state populated once from the machine_done notifier,
+ * which suits the current vfio-pci-nohotplug scope. TODO: when CXL device
+ * hot-unplug is supported, release the claimed base in the CXL teardown path
+ * (alongside the machine_done notifier removal in vfio_pci_put_device()).
+ */
+static GArray *vfio_cxl_used_fmws_bases;
+
+static bool vfio_cxl_claim_fmws_base(hwaddr base)
+{
+    guint i;
+
+    if (!vfio_cxl_used_fmws_bases) {
+        vfio_cxl_used_fmws_bases = g_array_new(false, false, sizeof(hwaddr));
+    }
+    for (i = 0; i < vfio_cxl_used_fmws_bases->len; i++) {
+        if (g_array_index(vfio_cxl_used_fmws_bases, hwaddr, i) == base) {
+            return false;
+        }
+    }
+    g_array_append_val(vfio_cxl_used_fmws_bases, base);
+    return true;
+}
+
+/*
+ * vfio_cxl_program_locked_hdm - select this device's CFMWS, validate it, program
+ * HDM decoder 0 with the window base, and map the DPA region into guest RAM at
+ * that base so the guest reaches DPA through a stable GPA.
+ *
+ * Requires a *unique, single-target* CFMWS whose base is assigned and whose size
+ * covers the device's DPA region. Any other case -- no matching window (even on
+ * a single-window machine), the host bridge listed in several windows, an
+ * interleaved (multi-target) window, an unassigned base (window did not fit the
+ * PA space), a window smaller than the DPA, or a window already claimed by
+ * another passthrough endpoint (a second endpoint under the same pxb-cxl) -- is
+ * unsupported and fails via errp, rather than guessing (which could place the
+ * device under the wrong window or expose DPA outside the advertised CFMWS).
+ * Supported scope: one VFIO-CXL device per single-target CFMWS. Returns true on
+ * success.
+ */
+static bool vfio_cxl_program_locked_hdm(VFIOCXL *cxl, Error **errp)
+{
     VFIORegion *region = &cxl->comp_regs_region;
     MemoryRegion *sys_mem = get_system_memory();
     uint64_t hdm_base = cxl->hdm_decoder_offset;
+    const char *name = region->vbasedev->name;
     uint32_t base_lo, base_hi, ctrl;
 
     if (!cxl->fmws_base) {
-        cxl->fmws_base = cxl_fmws_base;
-        if (!cxl->fmws_base) {
-            warn_report("vfio-cxl %s: CXL FMWS base not available",
-                        region->vbasedev->name);
-            return;
+        VFIOPCIDevice *vdev = container_of(cxl, VFIOPCIDevice, cxl);
+        hwaddr base = 0;
+        uint64_t fmws_size = 0;
+        int nwindows = 0;
+        int ntargets = 0;
+        int matches = vfio_cxl_find_fmws_base(&vdev->pdev, &base, &fmws_size,
+                                              &nwindows, &ntargets);
+
+        if (matches == 1 && ntargets == 1) {
+            /*
+             * Exactly one single-target CFMWS targets this device's pxb-cxl:
+             * the supported case. Validate it before programming.
+             */
+            if (!base) {
+                /*
+                 * cxl_fmws_set_memmap() leaves fw->base 0 when the window does
+                 * not fit the guest PA space; report that specific cause.
+                 */
+                error_setg(errp, "vfio-cxl: %s: matched CXL fixed memory window "
+                           "has no assigned base (it did not fit in the guest "
+                           "physical address space); reduce the CFMWS size or "
+                           "increase the guest PA space", name);
+                return false;
+            }
+            if (cxl->dpa_size > fmws_size) {
+                /*
+                 * Mapping the full DPA region at the window base would expose
+                 * DPA beyond the CFMWS range advertised to the guest (CEDT),
+                 * breaking the one-device-per-window contract.
+                 */
+                error_setg(errp, "vfio-cxl: %s: device DPA size 0x%" PRIx64
+                           " exceeds matched CFMWS size 0x%" PRIx64
+                           "; enlarge the CFMWS to cover the device memory",
+                           name, cxl->dpa_size, fmws_size);
+                return false;
+            }
+            if (!vfio_cxl_claim_fmws_base(base)) {
+                /*
+                 * Another passthrough endpoint already uses this window, i.e. a
+                 * second VFIO-CXL endpoint sits under the same pxb-cxl. That
+                 * needs per-endpoint decoder/window allocation and is out of
+                 * scope for this RFC -- fail closed instead of overlapping them.
+                 */
+                error_setg(errp, "vfio-cxl: %s: CFMWS at 0x%" PRIx64 " is already "
+                           "assigned to another passthrough endpoint; only one "
+                           "VFIO-CXL endpoint per single-target CFMWS (pxb-cxl) "
+                           "is supported", name, base);
+                return false;
+            }
+            cxl->fmws_base = base;
+        } else if (matches == 1) {
+            /*
+             * The matching window interleaves several host bridges. The DPA
+             * region is mapped flat (1:1) at the window base, which ignores
+             * interleave ways/granularity, so an interleaved window would be
+             * mapped incorrectly. Only single-target CFMWS are supported.
+             */
+            error_setg(errp, "vfio-cxl: %s: its CXL fixed memory window "
+                       "interleaves %d targets; interleaved CFMWS are not "
+                       "supported for VFIO-CXL passthrough (use a single-target "
+                       "CFMWS per device)", name, ntargets);
+            return false;
+        } else if (matches > 1) {
+            /*
+             * The host bridge is listed in more than one CFMWS, so we cannot
+             * tell which window the endpoint belongs to. Guessing (e.g. by
+             * window index) risks the overlap / region-attach failure this
+             * code exists to prevent.
+             */
+            error_setg(errp, "vfio-cxl: %s: host bridge is targeted by %d CXL "
+                       "fixed memory windows; ambiguous CFMWS topology is not "
+                       "supported (use one single-target CFMWS per VFIO-CXL "
+                       "device)", name, matches);
+            return false;
+        } else {
+            /*
+             * matches == 0: no CFMWS targets this device's pxb-cxl host bridge.
+             * CFMWS targets are explicit topology (cxl-fmw.N.targets.M), so a
+             * non-match is a configuration error -- do NOT guess a base, even
+             * when the machine has a single window: the sole window may target
+             * a different pxb-cxl, and mapping the endpoint there would place
+             * its DPA under the wrong host bridge.
+             */
+            error_setg(errp, "vfio-cxl: %s: no CXL fixed memory window targets "
+                       "this device's pxb-cxl host bridge (%d windows present); "
+                       "configure a single-target CFMWS for this device",
+                       name, nwindows);
+            return false;
         }
     }
 
     if (!read_region(region, &ctrl,
                      hdm_base + CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-        error_report("vfio-cxl: %s failed to read HDM decoder 0 CTRL",
-                     region->vbasedev->name);
-        return;
+        error_setg(errp, "vfio-cxl: %s: failed to read HDM decoder 0 CTRL", name);
+        return false;
     }
 
     /*
@@ -3474,7 +3682,9 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
         ctrl &= ~CXL_HDM_CTRL_COMMIT_LOCK;
         if (!write_region(region, &ctrl,
                           hdm_base + CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-            return;
+            error_setg(errp, "vfio-cxl: %s: failed to clear HDM decoder 0 "
+                       "COMMIT_LOCK", name);
+            return false;
         }
     }
 
@@ -3488,18 +3698,35 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
                       CXL_HDM_DECODER0_BASE_HIGH_OFFSET(0)) ||
         !write_region(region, &ctrl, hdm_base +
                       CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-        error_report("vfio-cxl: %s failed to program HDM decoder 0",
-                     region->vbasedev->name);
-        return;
+        error_setg(errp, "vfio-cxl: %s: failed to program HDM decoder 0", name);
+        return false;
     }
 
-    trace_vfio_cxl_locked_hdm(/* name */ region->vbasedev->name,
-                              cxl->fmws_base, base_lo, base_hi, ctrl);
+    trace_vfio_cxl_locked_hdm(name, cxl->fmws_base, base_lo, base_hi, ctrl);
 
     memory_region_transaction_begin();
     memory_region_add_subregion(sys_mem, cxl->fmws_base, cxl->region.mem);
     memory_region_transaction_commit();
     cxl->dpa_in_system_mem = true;
+    return true;
+}
+
+/*
+ * setup_locked_hdm - machine_done notifier wrapper around
+ * vfio_cxl_program_locked_hdm(). Invalid CXL/VFIO topology must fail fast: this
+ * runs before guest execution, and merely returning on error would boot a
+ * device whose HDM decoder was never programmed and whose DPA was never mapped.
+ * Abort QEMU startup instead so the misconfiguration is caught up front.
+ */
+static void setup_locked_hdm(Notifier *notifier, void *data)
+{
+    VFIOCXL *cxl = container_of(notifier, VFIOCXL, machine_done);
+    Error *local_err = NULL;
+
+    if (!vfio_cxl_program_locked_hdm(cxl, &local_err)) {
+        error_report_err(local_err);
+        exit(EXIT_FAILURE);
+    }
 }
 
 static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
@@ -3515,6 +3742,24 @@ static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
 
     if (!(vbasedev->flags & VFIO_DEVICE_FLAGS_CXL)) {
         return true;
+    }
+
+    /*
+     * VFIO-CXL setup programs HDM decoder 0 from a machine_done notifier. When
+     * the machine is already running (a post-boot hot-add),
+     * qemu_add_machine_init_done_notifier() invokes the notifier synchronously,
+     * and a fatal CXL topology error there calls exit() -- which would kill the
+     * running guest instead of failing the device_add. The firmware-committed
+     * CFMWS/HDM model is a boot-time construct anyway (the fixed memory windows
+     * are fixed at machine init), so refuse to hot-add a VFIO-CXL device and let
+     * device_add fail cleanly. (vfio-pci-nohotplug already sets
+     * dc->hotpluggable = false; this also covers the hotpluggable vfio-pci.)
+     */
+    if (DEVICE(vdev)->hotplugged) {
+        error_setg(errp, "vfio-cxl: %s: hot-plug of a VFIO-CXL device is not "
+                   "supported; its CXL fixed memory window and HDM decoder are "
+                   "established at machine startup", vbasedev->name);
+        return false;
     }
 
     info = vfio_get_device_info(vbasedev->fd);
