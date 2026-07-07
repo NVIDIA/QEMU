@@ -54,7 +54,7 @@
 
 /* Protected by BQL */
 static KVMRouteChange vfio_route_change;
-static bool vfio_cxl_fmws_reserved;
+static bool vfio_cxl_fmws_in_use;
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
@@ -3268,11 +3268,8 @@ void vfio_pci_put_device(VFIOPCIDevice *vdev)
     if (vdev->cxl.dpa_in_system_mem) {
         memory_region_del_subregion(get_system_memory(), vdev->cxl.region.mem);
         vdev->cxl.dpa_in_system_mem = false;
+        vfio_cxl_fmws_in_use = false;
         trace_vfio_cxl_put_device(vdev->vbasedev.name);
-    }
-    if (vdev->cxl.fmws_reserved) {
-        vfio_cxl_fmws_reserved = false;
-        vdev->cxl.fmws_reserved = false;
     }
     if (vdev->cxl.region.mem) {
         vfio_region_exit(&vdev->cxl.region);
@@ -3544,6 +3541,12 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
         return;
     }
 
+    if (vfio_cxl_fmws_in_use) {
+        warn_report("vfio-cxl %s: CXL FMWS base already used",
+                    region->vbasedev->name);
+        return;
+    }
+
     if (!read_region(region, &ctrl,
                      hdm_base + CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
         error_report("vfio-cxl: %s failed to read HDM decoder 0 CTRL",
@@ -3589,6 +3592,7 @@ static void setup_locked_hdm(Notifier *notifier, void *data)
                                         cxl->region.mem, 1);
     memory_region_transaction_commit();
     cxl->dpa_in_system_mem = true;
+    vfio_cxl_fmws_in_use = true;
 }
 
 static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
@@ -3683,14 +3687,6 @@ static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
     trace_vfio_cxl_setup_params(vbasedev->name, cxl->hdm_regs_bar_index,
                                  cxl->hdm_regs_offset, cxl->hdm_regs_size,
                                  cxl->dpa_size);
-
-    if (vfio_cxl_fmws_reserved) {
-        error_setg(errp, "vfio-cxl: CXL FMWS base is already reserved");
-        return false;
-    }
-
-    vfio_cxl_fmws_reserved = true;
-    cxl->fmws_reserved = true;
 
     /*
      * Only pre-program the HDM decoder if the kernel reported the device as
