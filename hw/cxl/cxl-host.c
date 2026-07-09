@@ -432,22 +432,10 @@ void cxl_fmws_update_mmio(void)
     object_child_foreach_recursive(object_get_root(), cxl_fmws_mmio_map, NULL);
 }
 
-/*
- * GPA base of the first CXL Fixed Memory Window region placed in the memory
- * map by cxl_fmws_set_memmap(). Set once at machine memory-map init time.
- */
-hwaddr cxl_fmws_base;
-uint64_t cxl_fmws_size;
-unsigned int cxl_fmws_count;
-
 hwaddr cxl_fmws_set_memmap(hwaddr base, hwaddr max_addr)
 {
     GSList *cfmws_list, *iter;
     CXLFixedWindow *fw;
-
-    cxl_fmws_base = 0;
-    cxl_fmws_size = 0;
-    cxl_fmws_count = 0;
 
     cfmws_list = cxl_fmws_get_all_sorted();
     for (iter = cfmws_list; iter; iter = iter->next) {
@@ -456,11 +444,6 @@ hwaddr cxl_fmws_set_memmap(hwaddr base, hwaddr max_addr)
         if (base + fw->size <= max_addr) {
             fw->base = base;
             fw->placed = true;
-            cxl_fmws_count++;
-            if (!cxl_fmws_base) {
-                cxl_fmws_base = fw->base;
-                cxl_fmws_size = fw->size;
-            }
             base += fw->size;
         }
     }

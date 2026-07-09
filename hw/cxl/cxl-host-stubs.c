@@ -21,8 +21,4 @@ GSList *cxl_fmws_get_all_sorted(void)
     return NULL;
 }
 
-hwaddr cxl_fmws_base;
-uint64_t cxl_fmws_size;
-unsigned int cxl_fmws_count;
-
 const MemoryRegionOps cfmws_ops;
