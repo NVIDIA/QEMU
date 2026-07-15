@@ -1,3 +1,9 @@
+qemu (1:10.1.0+nvidia-unstable13-1) noble; urgency=medium
+
+  * NVIDIA: VR: SAUCE: hw/vfio+cxl: Program HDM decoder 0 with the per-device CFMWS base
+
+ -- Jiandi An <jan@nvidia.com>  Wed, 15 Jul 2026 06:53:23 -0500
+
 qemu (1:10.1.0+nvidia-unstable12-1) noble; urgency=medium
 
   * hw/vfio/iommufd: Control dirty tracking for nesting parent HWPT
