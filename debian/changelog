@@ -1,3 +1,10 @@
+qemu (1:11.0.0+nvidia-unstable5-1) noble; urgency=medium
+
+  * Refresh CMDQv series and SMMUv3 Resoplve AUTO Property series to their
+    upstream merged version.
+
+ -- Jiandi An <jan@nvidia.com>  Thu, 23 Jul 2026 05:39:05 -0500
+
 qemu (1:11.0.0+nvidia-unstable4-1) noble; urgency=medium
 
   * Revert "NVIDIA: VR: SAUCE: vfio/listener: Skip DMA mapping for VFIO-owned RAM-device regions"
