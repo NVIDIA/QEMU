@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia-unstable6-1) noble; urgency=medium
+
+  * Per-device CFMWS base for multi-GPU CXL passthrough
+
+ -- Jiandi An <jan@nvidia.com>  Thu, 23 Jul 2026 06:43:56 -0500
+
 qemu (1:11.0.0+nvidia-unstable5-1) noble; urgency=medium
 
   * Refresh CMDQv series and SMMUv3 Resoplve AUTO Property series to their
