@@ -784,6 +784,13 @@ static void acpi_dsdt_add_pci(Aml *scope, const MemMapEntry *memmap,
         .irq    = irq,
         .bus    = vms->bus,
         .pci_native_hotplug = !acpi_pcihp,
+        /*
+         * Always emit _DSM #5 so the guest preserves the boot-time PCI
+         * configuration.  Firmware-committed CXL HDM decoders and accel
+         * SMMUv3 RMR-based MSI mappings both depend on the OS not
+         * reassigning resources underneath them.
+         */
+        .preserve_config = true,
     };
 
     /*
