@@ -1,3 +1,10 @@
+qemu (1:11.0.0+nvidia4-1) noble; urgency=medium
+
+  * Refresh CMDQv series and SMmUv3 Resolve AUTO Property series to their
+    upstream merged version.
+
+ -- Jiandi An <jan@nvidia.com>  Sun, 26 Jul 2026 05:57:30 -0500
+
 qemu (1:11.0.0+nvidia3-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: WAR: hw/vfio: Retry dma_map to bypass PFNMAP
