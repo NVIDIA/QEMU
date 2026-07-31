@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia5-1) noble; urgency=medium
+
+  * Fix amd64 microvm configure failure for QEMU 11.0
+
+ -- Jiandi An <jan@nvidia.com>  Fri, 31 Jul 2026 11:48:06 -0500
+
 qemu (1:11.0.0+nvidia4-1) noble; urgency=medium
 
   * Refresh CMDQv series and SMmUv3 Resolve AUTO Property series to their
