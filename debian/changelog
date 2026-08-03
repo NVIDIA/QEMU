@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia-unstable7-1) noble; urgency=medium
+
+  * Fix amd64 microvm configure failure for QEMU 11.0
+
+ -- Jiandi An <jan@nvidia.com>  Mon, 03 Aug 2026 07:07:51 -0500
+
 qemu (1:11.0.0+nvidia-unstable6-1) noble; urgency=medium
 
   * Per-device CFMWS base for multi-GPU CXL passthrough
