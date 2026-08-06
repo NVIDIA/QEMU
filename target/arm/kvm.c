@@ -630,7 +630,19 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         return -EINVAL;
     }
 
-    if (kvm_vm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
+    /*
+     * KVM_CAP_ARM_NISV_TO_USER is not on the realm-ext-allowed list
+     * (kvm_realm_ext_allowed() rejects anything not relevant to
+     * confidential VMs), so KVM_ENABLE_CAP returns -EINVAL for a realm VM.
+     * The cap has no effect on realms anyway -- realm faults go through the
+     * RMM path, not the NISV-to-user path -- so skip the attempt instead of
+     * producing a spurious error_report.
+     *
+     * ms->cgs is the same realm test the series uses for the VM type and for
+     * the confidential_guest_kvm_init() call above; kvm_arm_rme_vm_type() was
+     * removed in RFC v2.
+     */
+    if (!ms->cgs && kvm_vm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_NISV_TO_USER, 0)) {
             error_report("Failed to enable KVM_CAP_ARM_NISV_TO_USER cap");
         } else {
