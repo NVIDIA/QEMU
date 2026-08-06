@@ -169,6 +169,41 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
                                                    rme_compare_ram_regions);
 }
 
+#define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
+
+/*
+ * Returns the KVM CCA capability number for the running kernel.
+ *
+ * The capability number is not stable: it shifts whenever other KVM
+ * capabilities land ahead of it, so the value in linux-headers only matches
+ * hosts built from the same snapshot. NVIDIA kernels export the live value
+ * as a module parameter; prefer it and fall back to the compile-time
+ * constant.
+ */
+static unsigned int kvm_arm_rme_get_cap(void)
+{
+    static unsigned int rme_cap;
+    static bool detected;
+
+    if (!detected) {
+        FILE *f;
+        int cap;
+
+        rme_cap = KVM_CAP_ARM_RMI;
+
+        f = fopen(KVM_CAP_ARM_RMI_SYSFS_PATH, "r");
+        if (f) {
+            if (fscanf(f, "%d", &cap) == 1 && cap > 0) {
+                rme_cap = cap;
+            }
+            fclose(f);
+        }
+        detected = true;
+    }
+
+    return rme_cap;
+}
+
 static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
 {
     KVMState *s = KVM_STATE(current_accel());
@@ -178,7 +213,7 @@ static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
         return 0;
     }
 
-    if (!kvm_vm_check_extension(s, KVM_CAP_ARM_RMI)) {
+    if (!kvm_vm_check_extension(s, kvm_arm_rme_get_cap())) {
         error_setg(errp, "VM doesn't support Realms");
         return -ENODEV;
     }
