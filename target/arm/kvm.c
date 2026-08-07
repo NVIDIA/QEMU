@@ -920,14 +920,14 @@ out:
 
 #define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
 
-static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
+static bool kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
 {
     int ret;
     uint64_t val, newval;
     CPUState *cs = CPU(cpu);
 
     if (!cpu->num_bps && !cpu->num_wps) {
-        return;
+        return true;
     }
 
     newval = cpu->isar.idregs[ID_AA64DFR0_EL1_IDX];
@@ -944,8 +944,9 @@ static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
     }
     ret = kvm_set_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &newval);
     if (ret) {
-        error_report("Failed to set KVM_REG_ARM_ID_AA64DFR0_EL1");
-        return;
+        error_report("Failed to set KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
     }
 
     /*
@@ -954,32 +955,59 @@ static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
      */
     ret = kvm_get_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &val);
     if (ret) {
-        error_report("Failed to get KVM_REG_ARM_ID_AA64DFR0_EL1");
-        return;
+        error_report("Failed to get KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
     }
 
     if (val != newval) {
         error_report("Failed to update KVM_REG_ARM_ID_AA64DFR0_EL1");
+        return false;
     }
+
+    return true;
 }
 
 #define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
 
-static void kvm_arm_configure_pmcr(ARMCPU *cpu)
+static bool kvm_arm_configure_pmcr(ARMCPU *cpu)
 {
+    unsigned int nr_counters = cpu->num_pmu_ctrs;
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VCPU_PMU_V3_CTRL,
+        .attr = KVM_ARM_VCPU_PMU_V3_SET_NR_COUNTERS,
+        .addr = (uintptr_t)&nr_counters,
+    };
     int ret;
     uint64_t val, newval;
     CPUState *cs = CPU(cpu);
 
     if (cpu->num_pmu_ctrs == -1) {
-        return;
+        return true;
+    }
+
+    /*
+     * Realms restrict which registers userspace may write. Prefer the PMU
+     * device attribute, which configures the VM-wide PMCR_EL0.N value without
+     * requiring a SET_ONE_REG allow-list entry. Fall back for older kernels.
+     */
+    ret = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, &attr);
+    if (!ret) {
+        ret = kvm_vcpu_ioctl(cs, KVM_SET_DEVICE_ATTR, &attr);
+        if (ret) {
+            error_report("Failed to set number of KVM PMU counters: %s",
+                         strerror(-ret));
+            return false;
+        }
+        return true;
     }
 
     newval = FIELD_DP64(cpu->isar.reset_pmcr_el0, PMCR, N, cpu->num_pmu_ctrs);
     ret = kvm_set_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &newval);
     if (ret) {
-        error_report("Failed to set KVM_REG_ARM_PMCR_EL0");
-        return;
+        error_report("Failed to set KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
     }
 
     /*
@@ -987,19 +1015,22 @@ static void kvm_arm_configure_pmcr(ARMCPU *cpu)
      */
     ret = kvm_get_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &val);
     if (ret) {
-        error_report("Failed to get KVM_REG_ARM_PMCR_EL0");
-        return;
+        error_report("Failed to get KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
     }
 
     if (val != newval) {
         error_report("Failed to update KVM_REG_ARM_PMCR_EL0");
+        return false;
     }
+
+    return true;
 }
 
-static void kvm_arm_configure_vcpu_regs(ARMCPU *cpu)
+static bool kvm_arm_configure_vcpu_regs(ARMCPU *cpu)
 {
-    kvm_arm_configure_aa64dfr0(cpu);
-    kvm_arm_configure_pmcr(cpu);
+    return kvm_arm_configure_aa64dfr0(cpu) && kvm_arm_configure_pmcr(cpu);
 }
 
 /**
@@ -1222,7 +1253,9 @@ void kvm_arm_reset_vcpu(ARMCPU *cpu)
     /*
      * Before loading the KVM values into CPUState, update the KVM configuration
      */
-    kvm_arm_configure_vcpu_regs(cpu);
+    if (!kvm_arm_configure_vcpu_regs(cpu)) {
+        abort();
+    }
 
     if (!write_kvmstate_to_list(cpu)) {
         fprintf(stderr, "write_kvmstate_to_list failed\n");
