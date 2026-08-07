@@ -54,6 +54,7 @@ struct RmeGuest {
     ConfidentialGuestSupport parent_obj;
     Notifier rom_load_notifier;
     GSList *ram_regions;
+    bool activated;
     uint8_t ipa_bits;
 
     RealmDmaRegion *dma_region;
@@ -69,37 +70,79 @@ static RmeGuest *rme_guest;
 static int rme_populate_range(const RmeRamRegion *region, bool measure,
                               Error **errp)
 {
-    int ret;
-    void *host_ua;
-    hwaddr size = region->size;
+    const hwaddr end = region->base + region->size;
     hwaddr base = region->base;
-    hwaddr start = QEMU_ALIGN_DOWN(base, RME_PAGE_SIZE);
-    hwaddr end = QEMU_ALIGN_UP(base + size, RME_PAGE_SIZE);
-    struct kvm_arm_rmi_populate populate_args;
 
-    host_ua = address_space_map(region->as, base, &size, false,
-                                MEMTXATTRS_UNSPECIFIED);
-
-    populate_args = (struct kvm_arm_rmi_populate) {
-        .base = start,
-        .size = end - start,
-        .source_uaddr = (uintptr_t)host_ua,
-        .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
-    };
-
-    while (populate_args.size > 0) {
-        ret = kvm_vm_ioctl(kvm_state, KVM_ARM_RMI_POPULATE, &populate_args, 0);
-        if (ret) {
-            error_setg_errno(errp, -ret,
-                "failed to populate realm [0x%"HWADDR_PRIx", 0x%"HWADDR_PRIx")",
-                start, end);
-            break;
-        }
+    if (!address_space_range_is_ram(region->as, region->base, region->size)) {
+        error_setg(errp,
+                   "cannot populate non-RAM Realm range "
+                   "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                   region->base, end);
+        return -EINVAL;
     }
 
-    address_space_unmap(region->as, host_ua, size, false, 0);
+    while (base < end) {
+        struct kvm_arm_rmi_populate populate_args;
+        hwaddr mapped_size = end - base;
+        void *host_ua;
+        int ret;
 
-    return ret;
+        host_ua = address_space_map(region->as, base, &mapped_size, false,
+                                    MEMTXATTRS_UNSPECIFIED);
+        if (!host_ua) {
+            error_setg(errp,
+                       "failed to map Realm range "
+                       "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                       base, end);
+            return -ENOMEM;
+        }
+        if (!QEMU_IS_ALIGNED(mapped_size, RME_PAGE_SIZE) ||
+            !QEMU_PTR_IS_ALIGNED(host_ua, RME_PAGE_SIZE)) {
+            error_setg(errp,
+                       "Realm range [0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx
+                       ") does not have a page-aligned host mapping",
+                       base, base + mapped_size);
+            address_space_unmap(region->as, host_ua, mapped_size, false, 0);
+            return -EINVAL;
+        }
+
+        populate_args = (struct kvm_arm_rmi_populate) {
+            .base = base,
+            .size = mapped_size,
+            .source_uaddr = (uintptr_t)host_ua,
+            .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
+        };
+
+        while (populate_args.size > 0) {
+            hwaddr size = populate_args.size;
+
+            ret = kvm_vm_ioctl(kvm_state, KVM_ARM_RMI_POPULATE,
+                               &populate_args, 0);
+            if (ret) {
+                error_setg_errno(errp, -ret,
+                    "failed to populate Realm "
+                    "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                    region->base, end);
+                address_space_unmap(region->as, host_ua, mapped_size,
+                                    false, 0);
+                return ret;
+            }
+            if (populate_args.size >= size) {
+                error_setg(errp,
+                           "KVM made no progress populating Realm range "
+                           "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                           region->base, end);
+                address_space_unmap(region->as, host_ua, mapped_size,
+                                    false, 0);
+                return -EIO;
+            }
+        }
+
+        address_space_unmap(region->as, host_ua, mapped_size, false, 0);
+        base += mapped_size;
+    }
+
+    return 0;
 }
 
 static void rme_populate_ram_region(gpointer data, gpointer err)
@@ -114,20 +157,75 @@ static void rme_populate_ram_region(gpointer data, gpointer err)
     rme_populate_range(region, /* measure */ true, errp);
 }
 
+static bool rme_coalesce_ram_regions(RmeGuest *guest, Error **errp)
+{
+    GSList *regions = g_steal_pointer(&guest->ram_regions);
+    GSList *result = NULL;
+    GSList **tail = &result;
+    RmeRamRegion *previous = NULL;
+
+    while (regions) {
+        GSList *node = regions;
+        RmeRamRegion *region = node->data;
+        hwaddr region_end = region->base + region->size;
+
+        regions = regions->next;
+        node->next = NULL;
+
+        if (previous && region->base < previous->base + previous->size) {
+            if (region->as != previous->as) {
+                error_setg(errp,
+                           "overlapping Realm ranges use different address "
+                           "spaces at GPA 0x%" HWADDR_PRIx,
+                           region->base);
+                g_slist_free_full(node, g_free);
+                g_slist_free_full(regions, g_free);
+                g_slist_free_full(result, g_free);
+                return false;
+            }
+            previous->size = MAX(previous->base + previous->size,
+                                 region_end) - previous->base;
+            g_free(region);
+            g_slist_free_1(node);
+            continue;
+        }
+
+        if (previous && region->base == previous->base + previous->size &&
+            region->as == previous->as) {
+            previous->size += region->size;
+            g_free(region);
+            g_slist_free_1(node);
+            continue;
+        }
+
+        *tail = node;
+        tail = &node->next;
+        previous = region;
+    }
+
+    guest->ram_regions = result;
+    return true;
+}
+
 static void rme_vm_state_change(void *opaque, bool running, RunState state)
 {
+    RmeGuest *guest = opaque;
     Error *errp = NULL;
 
-    if (!running) {
+    if (!running || guest->activated) {
         return;
     }
 
-    g_slist_foreach(rme_guest->ram_regions, rme_populate_ram_region, &errp);
-    g_slist_free_full(g_steal_pointer(&rme_guest->ram_regions), g_free);
+    if (rme_coalesce_ram_regions(guest, &errp)) {
+        g_slist_foreach(guest->ram_regions, rme_populate_ram_region, &errp);
+    }
+    g_slist_free_full(g_steal_pointer(&guest->ram_regions), g_free);
     if (errp) {
-        return;
+        error_report_err(errp);
+        exit(EXIT_FAILURE);
     }
 
+    guest->activated = true;
     kvm_mark_guest_state_protected();
 }
 
@@ -136,14 +234,18 @@ static gint rme_compare_ram_regions(gconstpointer a, gconstpointer b)
     const RmeRamRegion *ra = a;
     const RmeRamRegion *rb = b;
 
-    g_assert(ra->base != rb->base);
+    if (ra->base == rb->base) {
+        return 0;
+    }
     return ra->base < rb->base ? -1 : 1;
 }
 
 static void rme_rom_load_notify(Notifier *notifier, void *data)
 {
+    RmeGuest *guest = container_of(notifier, RmeGuest, rom_load_notifier);
     RmeRamRegion *region;
     RomLoaderNotifyData *rom = data;
+    hwaddr end;
 
     if (rom->addr == -1) {
         /*
@@ -153,10 +255,21 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
          */
         return;
     }
+    if (!rom->len) {
+        return;
+    }
+    if (rom->len > HWADDR_MAX - rom->addr ||
+        rom->addr + rom->len > HWADDR_MAX - (RME_PAGE_SIZE - 1)) {
+        error_report("Realm image at 0x%" HWADDR_PRIx " is too large",
+                     rom->addr);
+        exit(EXIT_FAILURE);
+    }
+
+    end = QEMU_ALIGN_UP(rom->addr + rom->len, RME_PAGE_SIZE);
 
     region = g_new0(RmeRamRegion, 1);
-    region->base = rom->addr;
-    region->size = rom->len;
+    region->base = QEMU_ALIGN_DOWN(rom->addr, RME_PAGE_SIZE);
+    region->size = end - region->base;
     region->as = rom->as;
 
     /*
@@ -164,9 +277,8 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
      * initialize and populate the RAM regions. To help a verifier
      * independently calculate the RIM, sort regions by GPA.
      */
-    rme_guest->ram_regions = g_slist_insert_sorted(rme_guest->ram_regions,
-                                                   region,
-                                                   rme_compare_ram_regions);
+    guest->ram_regions = g_slist_insert_sorted(guest->ram_regions, region,
+                                               rme_compare_ram_regions);
 }
 
 #define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
@@ -228,7 +340,7 @@ static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
      * The realm activation is done last, when the VM starts, after all images
      * have been loaded and all vcpus finalized.
      */
-    qemu_add_vm_change_state_handler(rme_vm_state_change, NULL);
+    qemu_add_vm_change_state_handler(rme_vm_state_change, rme_guest);
 
     cgs->require_guest_memfd = true;
     cgs->ready = true;

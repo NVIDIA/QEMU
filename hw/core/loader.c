@@ -1301,7 +1301,8 @@ static void rom_reset(void *unused)
 
         notify = (RomLoaderNotifyData) {
             .addr = rom->addr,
-            .len = rom->datasize,
+            /* Include zero-filled tails such as ELF PT_LOAD BSS. */
+            .len = rom->romsize,
             .as = rom->as,
         };
         notifier_list_notify(&rom_loader_notifier, &notify);
