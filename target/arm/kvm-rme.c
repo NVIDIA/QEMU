@@ -423,7 +423,9 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
                                                 IOMMUAccessFlags flag,
                                                 int iommu_idx)
 {
-    const hwaddr address_mask = MAKE_64BIT_MASK(0, rme_guest->ipa_bits - 1);
+    RmeGuest *guest = RME_GUEST(memory_region_owner(MEMORY_REGION(mr)));
+    const hwaddr shared_bit = 1ULL << (guest->ipa_bits - 1);
+    const hwaddr address_mask = shared_bit - 1;
     IOMMUTLBEntry entry = {
         .target_as = &address_space_memory,
         .iova = addr,
@@ -436,7 +438,7 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
          * address, preventing vhost from finding the correct memory region.
          */
         .addr_mask = 4 * KiB - 1,
-        .perm = IOMMU_RW,
+        .perm = addr & shared_bit ? IOMMU_RW : IOMMU_NONE,
     };
 
     return entry;

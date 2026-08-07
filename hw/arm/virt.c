@@ -2382,6 +2382,11 @@ static void machvirt_init(MachineState *machine)
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
 
+    if (virt_machine_is_confidential(vms) && vms->iommu != VIRT_IOMMU_NONE) {
+        error_report("guest IOMMUs are not supported for Realm VMs");
+        exit(EXIT_FAILURE);
+    }
+
     virt_flash_create(vms);
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
@@ -3272,6 +3277,13 @@ static void virt_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
                                             DeviceState *dev, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(hotplug_dev);
+
+    if (virt_machine_is_confidential(vms) &&
+        (object_dynamic_cast(OBJECT(dev), TYPE_VIRTIO_IOMMU_PCI) ||
+         object_dynamic_cast(OBJECT(dev), TYPE_ARM_SMMUV3))) {
+        error_setg(errp, "guest IOMMUs are not supported for Realm VMs");
+        return;
+    }
 
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         virt_memory_pre_plug(hotplug_dev, dev, errp);
