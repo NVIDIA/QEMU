@@ -222,8 +222,8 @@ static int read_sys_reg64(int fd, uint64_t *pret, uint64_t id)
 
 static bool kvm_arm_pauth_supported(void)
 {
-    return (kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
-            kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
+    return (kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
+            kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
 }
 
 
@@ -302,7 +302,7 @@ static bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
      * Ask for SVE if supported, so that we can query ID_AA64ZFR0,
      * which is otherwise RAZ.
      */
-    sve_supported = kvm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
+    sve_supported = kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
     if (sve_supported) {
         init.features[0] |= 1 << KVM_ARM_VCPU_SVE;
     }
@@ -2069,17 +2069,17 @@ void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
 
 bool kvm_arm_aarch32_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
 }
 
 bool kvm_arm_el2_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
 }
 
 bool kvm_arm_mte_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
 }
 
 QEMU_BUILD_BUG_ON(KVM_ARM64_SVE_VQ_MIN != 1);

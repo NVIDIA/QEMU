@@ -3546,7 +3546,7 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
      * must be 0.
      */
     if (fixed_ipa) {
-        return 0;
+        return vm_type;
     }
 
     return requested_pa_size | vm_type;
