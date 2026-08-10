@@ -1246,7 +1246,7 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
                                                  const char *firmware_filename)
 {
     ssize_t fw_size;
-    const char *fname;
+    g_autofree char *fname = NULL;
     AddressSpace *as = arm_boot_address_space(cpu, info);
 
     fname = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware_filename);
@@ -1260,8 +1260,7 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
      * firmware area in the Realm's address space is done in function
      * virt_confidential_firmware_init().
      */
-    fw_size = load_image_targphys_as(firmware_filename,
-                                     info->firmware_base,
+    fw_size = load_image_targphys_as(fname, info->firmware_base,
                                      info->firmware_max_size, as, NULL);
     if (fw_size <= 0) {
         error_report("could not load firmware '%s'", firmware_filename);
