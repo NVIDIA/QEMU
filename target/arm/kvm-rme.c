@@ -463,7 +463,12 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
          * address, preventing vhost from finding the correct memory region.
          */
         .addr_mask = 4 * KiB - 1,
-        .perm = addr & shared_bit ? IOMMU_RW : IOMMU_NONE,
+        /*
+         * Firmware can use the canonical IPA for a page that it has made
+         * shared with the RMM, while Linux DMA addresses carry shared_bit.
+         * Both forms refer to the same host-visible RAM alias.
+         */
+        .perm = IOMMU_RW,
     };
 
     return entry;
