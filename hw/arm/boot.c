@@ -1249,6 +1249,12 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
     g_autofree char *fname = NULL;
     AddressSpace *as = arm_boot_address_space(cpu, info);
 
+    if (!firmware_filename) {
+        error_report("a confidential Arm guest requires either a kernel "
+                     "or a firmware image");
+        exit(1);
+    }
+
     fname = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware_filename);
     if (!fname) {
         error_report("Could not find firmware image '%s'", firmware_filename);
