@@ -260,4 +260,12 @@ void kvm_arm_rme_vcpu_init(ARMCPU *cpu);
  */
 void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus);
 
+/**
+ * kvm_arm_rme_get_dma_as:
+ *
+ * Return the shared-IPA DMA address space for a Realm, or NULL for a
+ * non-Realm machine or before the Realm address space has been initialized.
+ */
+AddressSpace *kvm_arm_rme_get_dma_as(void);
+
 #endif

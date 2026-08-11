@@ -62,6 +62,7 @@
 #include "hw/pci-host/gpex.h"
 #include "hw/pci-bridge/pci_expander_bridge.h"
 #include "hw/virtio/virtio-pci.h"
+#include "hw/virtio/virtio-mmio.h"
 #include "hw/core/sysbus-fdt.h"
 #include "hw/core/platform-bus.h"
 #include "hw/core/qdev-properties.h"
@@ -1208,6 +1209,7 @@ static void create_gpio_devices(const VirtMachineState *vms, int gpio,
 
 static void create_virtio_devices(const VirtMachineState *vms)
 {
+    AddressSpace *dma_as = kvm_arm_rme_get_dma_as();
     int i;
     hwaddr size = vms->memmap[VIRT_MMIO].size;
     MachineState *ms = MACHINE(vms);
@@ -1242,9 +1244,18 @@ static void create_virtio_devices(const VirtMachineState *vms)
     for (i = 0; i < vms->virtio_transports; i++) {
         int irq = vms->irqmap[VIRT_MMIO] + i;
         hwaddr base = vms->memmap[VIRT_MMIO].base + i * size;
+        DeviceState *dev = qdev_new(TYPE_VIRTIO_MMIO);
+        SysBusDevice *s = SYS_BUS_DEVICE(dev);
 
-        sysbus_create_simple("virtio-mmio", base,
-                             qdev_get_gpio_in(vms->gic, irq));
+        if (dma_as) {
+            /* Legacy virtio-mmio cannot negotiate IOMMU_PLATFORM. */
+            qdev_prop_set_bit(dev, "force-legacy", false);
+            virtio_mmio_set_dma_as(dev, dma_as);
+        }
+
+        sysbus_realize_and_unref(s, &error_fatal);
+        sysbus_mmio_map(s, 0, base);
+        sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
     }
 
     /* We add dtb nodes in reverse order so that they appear in the finished
@@ -1742,10 +1753,9 @@ static void create_pcie(VirtMachineState *vms)
     vms->bus = pci->bus;
     if (vms->bus) {
         /*
-         * PCI devices cache their DMA address space when they are realized.
-         * Install the Realm DMA address-space selector before creating even
-         * the default NIC, otherwise those devices bypass the shared-IPA
-         * translation permanently.
+         * Some PCI devices query their IOMMU address space while they are
+         * realized. Install the Realm DMA address-space selector before
+         * creating even the default NIC so every endpoint sees it.
          */
         kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
         pci_init_nic_devices(pci->bus, mc->default_nic);
@@ -2726,7 +2736,8 @@ static void machvirt_init(MachineState *machine)
      */
     create_virtio_devices(vms);
 
-    vms->fw_cfg = create_fw_cfg(vms, &address_space_memory);
+    vms->fw_cfg = create_fw_cfg(vms, kvm_arm_rme_get_dma_as() ?:
+                                     &address_space_memory);
     rom_set_fw(vms->fw_cfg);
 
     create_platform_bus(vms);

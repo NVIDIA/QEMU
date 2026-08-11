@@ -46,6 +46,11 @@ void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
 {
 }
 
+AddressSpace *kvm_arm_rme_get_dma_as(void)
+{
+    return NULL;
+}
+
 /*
  * These functions should never actually be called without KVM support.
  */

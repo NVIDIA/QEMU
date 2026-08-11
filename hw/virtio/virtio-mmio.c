@@ -28,6 +28,7 @@
 #include "migration/qemu-file-types.h"
 #include "qemu/host-utils.h"
 #include "qemu/module.h"
+#include "system/address-spaces.h"
 #include "system/kvm.h"
 #include "system/replay.h"
 #include "hw/virtio/virtio-mmio.h"
@@ -761,6 +762,27 @@ static void virtio_mmio_pre_plugged(DeviceState *d, Error **errp)
     }
 }
 
+static AddressSpace *virtio_mmio_get_dma_as(DeviceState *d)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+
+    return proxy->dma_as ?: &address_space_memory;
+}
+
+static bool virtio_mmio_iommu_enabled(DeviceState *d)
+{
+    return virtio_mmio_get_dma_as(d) != &address_space_memory;
+}
+
+void virtio_mmio_set_dma_as(DeviceState *d, AddressSpace *dma_as)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+
+    assert(!d->realized);
+    assert(dma_as);
+    proxy->dma_as = dma_as;
+}
+
 /* virtio-mmio device */
 
 static const Property virtio_mmio_properties[] = {
@@ -868,6 +890,8 @@ static void virtio_mmio_bus_class_init(ObjectClass *klass, const void *data)
     k->ioeventfd_assign = virtio_mmio_ioeventfd_assign;
     k->pre_plugged = virtio_mmio_pre_plugged;
     k->vmstate_change = virtio_mmio_vmstate_change;
+    k->get_dma_as = virtio_mmio_get_dma_as;
+    k->iommu_enabled = virtio_mmio_iommu_enabled;
     k->has_variable_vring_alignment = true;
     bus_class->max_dev = 1;
     bus_class->get_dev_path = virtio_mmio_bus_get_dev_path;

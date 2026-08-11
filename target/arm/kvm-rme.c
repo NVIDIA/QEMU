@@ -432,6 +432,13 @@ void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
     pci_setup_iommu(pci_bus, &rme_dma_ops, guest);
 }
 
+AddressSpace *kvm_arm_rme_get_dma_as(void)
+{
+    RmeGuest *guest = rme_get_machine_guest();
+
+    return guest && guest->dma_region ? &guest->dma_as : NULL;
+}
+
 static void realm_dma_region_init(Object *obj)
 {
 }
