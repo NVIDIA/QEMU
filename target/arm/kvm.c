@@ -1569,6 +1569,10 @@ static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
 {
     ARMCPU *cpu = opaque;
 
+    if (kvm_guest_state_protected()) {
+        return;
+    }
+
     if (running) {
         if (cpu->kvm_adjvtime) {
             kvm_arm_put_virtual_time(cpu);

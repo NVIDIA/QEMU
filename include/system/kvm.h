@@ -553,6 +553,8 @@ bool kvm_dirty_ring_enabled(void);
 
 uint32_t kvm_dirty_ring_size(void);
 
+bool kvm_guest_state_protected(void);
+
 void kvm_mark_guest_state_protected(void);
 
 /**
