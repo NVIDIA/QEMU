@@ -3828,6 +3828,23 @@ static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
         return false;
     }
 
+    /*
+     * vfio_region_mmap() returns success without mapping anything when the
+     * kernel did not advertise VFIO_REGION_INFO_FLAG_MMAP: vfio_region_setup()
+     * leaves nr_mmaps at 0 and the mmap loop simply does not run.  The region
+     * would then stay a trap-and-emulate MemoryRegion, which is not RAM, so
+     * KVM would create no memslot for the GPA it gets mapped at and the guest
+     * could never validate the coherent range.  Reject that explicitly rather
+     * than failing much later inside the RMM device-map path.
+     */
+    if (!cxl->region.nr_mmaps) {
+        error_setg(errp, "vfio-cxl: DPA region for %s is not mmap-capable "
+                   "(kernel did not advertise VFIO_REGION_INFO_FLAG_MMAP); "
+                   "the coherent range cannot be backed by a KVM memslot",
+                   vbasedev->name);
+        return false;
+    }
+
     /* COMP_REGS region (HDM decoder shadow) */
     ret = vfio_device_get_region_info(vbasedev, cap->comp_regs_region_index,
                                       &comp_info);
