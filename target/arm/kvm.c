@@ -53,6 +53,9 @@ static bool cap_has_mp_state;
 static bool cap_has_inject_serror_esr;
 static bool cap_has_inject_ext_dabt;
 
+#define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
+#define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
+
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
  * by asking the host kernel)
@@ -829,8 +832,18 @@ static uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
  * cpreg list of arbitrary system registers, false if it is synchronized
  * by hand using code in kvm_arch_get/put_registers().
  */
-static bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx)
+static bool kvm_arm_reg_syncs_via_cpreg_list(ARMCPU *cpu, uint64_t regidx)
 {
+    /*
+     * Realm KVM exposes PMCR_EL0 so userspace can discover the counter
+     * count, but the Realm SET_ONE_REG allow-list does not permit writing
+     * it.  PMU configuration is handled explicitly through the PMU device
+     * attribute instead.
+     */
+    if (cpu->kvm_rme && regidx == KVM_REG_ARM_PMCR_EL0) {
+        return false;
+    }
+
     switch (regidx & KVM_REG_ARM_COPROC_MASK) {
     case KVM_REG_ARM_CORE:
     case KVM_REG_ARM64_SVE:
@@ -874,7 +887,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
     qsort(&rlp->reg, rlp->n, sizeof(rlp->reg[0]), compare_u64);
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
-        if (!kvm_arm_reg_syncs_via_cpreg_list(rlp->reg[i])) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, rlp->reg[i])) {
             continue;
         }
         switch (rlp->reg[i] & KVM_REG_SIZE_MASK) {
@@ -896,7 +909,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
         uint64_t regidx = rlp->reg[i];
-        if (!kvm_arm_reg_syncs_via_cpreg_list(regidx)) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, regidx)) {
             continue;
         }
         cpu->cpreg_indexes[arraylen] = regidx;
@@ -917,8 +930,6 @@ out:
     g_free(rlp);
     return ret;
 }
-
-#define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
 
 static bool kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
 {
@@ -967,8 +978,6 @@ static bool kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
 
     return true;
 }
-
-#define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
 
 static bool kvm_arm_configure_pmcr(ARMCPU *cpu)
 {
