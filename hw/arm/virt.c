@@ -1741,6 +1741,13 @@ static void create_pcie(VirtMachineState *vms)
     pci->bypass_iommu = vms->default_bus_bypass_iommu;
     vms->bus = pci->bus;
     if (vms->bus) {
+        /*
+         * PCI devices cache their DMA address space when they are realized.
+         * Install the Realm DMA address-space selector before creating even
+         * the default NIC, otherwise those devices bypass the shared-IPA
+         * translation permanently.
+         */
+        kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
         pci_init_nic_devices(pci->bus, mc->default_nic);
     }
 
@@ -2391,6 +2398,13 @@ static void machvirt_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
+    if (virt_machine_is_confidential(vms) &&
+        vms->default_bus_bypass_iommu) {
+        error_report("default-bus-bypass-iommu is not supported for Realm "
+                     "VMs");
+        exit(EXIT_FAILURE);
+    }
+
     virt_flash_create(vms);
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
@@ -2728,8 +2742,6 @@ static void machvirt_init(MachineState *machine)
                                arm_virt_nvdimm_acpi_dsmio,
                                vms->fw_cfg, OBJECT(vms));
     }
-
-    kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
 
     vms->bootinfo.ram_size = machine->ram_size;
     vms->bootinfo.board_id = -1;
