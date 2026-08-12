@@ -995,6 +995,11 @@ static bool kvm_arm_configure_pmcr(ARMCPU *cpu)
         return true;
     }
 
+    /* An explicit zero is already satisfied when this vCPU has no PMU. */
+    if (!cpu->has_pmu && cpu->num_pmu_ctrs == 0) {
+        return true;
+    }
+
     /*
      * Realms restrict which registers userspace may write. Prefer the PMU
      * device attribute, which configures the VM-wide PMCR_EL0.N value without
