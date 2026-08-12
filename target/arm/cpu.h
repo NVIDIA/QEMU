@@ -1168,6 +1168,13 @@ struct ArchCPU {
     uint8_t num_bps;
     uint8_t num_wps;
     int8_t num_pmu_ctrs;
+
+    /*
+     * Set once the above have been pushed to KVM.  They can only be applied
+     * before the VM runs, so kvm_arm_reset_vcpu() must not retry on a later
+     * reset.
+     */
+    bool kvm_vcpu_regs_configured;
 };
 
 typedef struct ARMCPUInfo {
