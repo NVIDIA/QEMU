@@ -173,7 +173,7 @@ VFIODevice *vfio_get_vfio_device(Object *obj);
 typedef QLIST_HEAD(VFIODeviceList, VFIODevice) VFIODeviceList;
 extern VFIODeviceList vfio_device_list;
 
-VFIODevice *vfio_find_bdf(uint64_t sbdf);
+VFIODevice *vfio_find_bdf(uint32_t rid);
 
 #ifdef CONFIG_LINUX
 /*

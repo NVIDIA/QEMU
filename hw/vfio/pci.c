@@ -4298,12 +4298,13 @@ static void vfio_register_bdf(PCIDevice *pci_dev)
         return;
     }
 
-    vdev->has_info_set = true;
-
     if (iommufd_vdevice_register(&vdev->vbasedev, &err)) {
         error_reportf_err(err, "Failed to register IOMMUFD vdevice for %s: ",
                           vdev->vbasedev.name);
+        return;
     }
+
+    vdev->has_info_set = true;
 }
 
 static void vfio_register_bdf_notifier(void *opaque, bool running,

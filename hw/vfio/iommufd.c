@@ -44,48 +44,43 @@
 #define VFIO_STRTAB_STE_0_V          (1UL << 0)
 #define VFIO_STRTAB_STE_0_CFG_BYPASS 4
 
-int iommufd_tsm_bind(unsigned long vdev_id)
+static bool iommufd_tsm_vdevice_is_registered(VFIODevice *vbasedev)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    return vbasedev && vbasedev->iommufd_vdevice && vbasedev->vdevice_id;
+}
+
+static int iommufd_tsm_op(uint32_t rid, uint32_t op)
+{
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct iommu_vdevice_tsm_op tsm_op;
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
     tsm_op.size = sizeof(struct iommu_vdevice_tsm_op);
     tsm_op.flags = 0;
-    tsm_op.op = IOMMU_VDEVICE_TSM_BIND;
+    tsm_op.op = op;
     tsm_op.vdevice_id = vbasedev->vdevice_id;
 
     if (ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_OP, &tsm_op)) {
-        warn_report("Failed to TSM bind vdevice: %d", errno);
-        return -errno;
+        int ret = -errno;
+
+        trace_iommufd_tsm_op_failed(rid, op, errno);
+        return ret;
     }
 
     return 0;
 }
 
-int iommufd_tsm_unbind(unsigned long vdev_id)
+int iommufd_tsm_bind(uint32_t rid)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
-    struct iommu_vdevice_tsm_op tsm_op;
+    return iommufd_tsm_op(rid, IOMMU_VDEVICE_TSM_BIND);
+}
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
-        return -ENODEV;
-    }
-
-    tsm_op.size = sizeof(struct iommu_vdevice_tsm_op);
-    tsm_op.flags = 0;
-    tsm_op.op = IOMMU_VDEVICE_TSM_UNBIND;
-    tsm_op.vdevice_id = vbasedev->vdevice_id;
-
-    if (ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_OP, &tsm_op)) {
-        warn_report("Failed to TSM unbind vdevice: %d", errno);
-        return -errno;
-    }
-
-    return 0;
+int iommufd_tsm_unbind(uint32_t rid)
+{
+    return iommufd_tsm_op(rid, IOMMU_VDEVICE_TSM_UNBIND);
 }
 
 static int iommufd_tsm_guest_request(VFIODevice *vbasedev,
@@ -108,11 +103,27 @@ static int iommufd_tsm_guest_request(VFIODevice *vbasedev,
     ret = ioctl(vbasedev->iommufd->fd, IOMMU_VDEVICE_TSM_GUEST_REQUEST,
                 &guest_req);
     if (ret < 0) {
-        warn_report("IOMMU_VDEVICE_TSM_GUEST_REQUEST failed: %d", errno);
-        return -errno;
+        int err = -errno;
+
+        /*
+         * These requests are issued on behalf of the guest, so a failure is
+         * not necessarily a host problem and must not be reportable at will
+         * by the guest.  Trace rather than warn_report().
+         */
+        trace_iommufd_tsm_guest_request_failed(vdevice_id, scope, errno);
+        return err;
     }
 
-    /* return value is the residue */
+    /*
+     * The return value is response residue when a response buffer is present,
+     * or unconsumed request bytes for a request-only operation.  Every caller
+     * requires the complete request to be consumed, and a response residue
+     * cannot exceed the supplied response buffer.
+     */
+    if ((uint32_t)ret > resp_len) {
+        trace_iommufd_tsm_guest_request_bad_residue(vdevice_id, ret, resp_len);
+        return -EIO;
+    }
     if (actual_resp_len) {
         *actual_resp_len = resp_len - ret;
     }
@@ -120,15 +131,15 @@ static int iommufd_tsm_guest_request(VFIODevice *vbasedev,
     return 0;
 }
 
-int iommufd_tsm_da_set_tdi_state_run(unsigned int vdev_id)
+int iommufd_tsm_da_set_tdi_state_run(uint32_t rid)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct arm64_vdev_set_tdi_state_guest_req req = {
         .req_type = __RHI_DA_VDEV_SET_TDI_STATE,
         .tdi_state = RHI_DA_TDI_CONFIG_RUN,
     };
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
@@ -138,11 +149,10 @@ int iommufd_tsm_da_set_tdi_state_run(unsigned int vdev_id)
                                      NULL, 0, NULL);
 }
 
-int iommufd_tsm_get_da_object_size(unsigned int vdev_id,
-       unsigned int object_type,
-       unsigned int *object_size)
+int iommufd_tsm_get_da_object_size(uint32_t rid, uint32_t object_type,
+                                   uint32_t *object_size)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct arm64_vdev_object_size_guest_req req = {
         .req_type = __RHI_DA_OBJECT_SIZE,
         .object_type = object_type,
@@ -150,7 +160,7 @@ int iommufd_tsm_get_da_object_size(unsigned int vdev_id,
     uint32_t resp_len = 0;
     int ret;
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
@@ -162,27 +172,24 @@ int iommufd_tsm_get_da_object_size(unsigned int vdev_id,
     if (ret) {
         return ret;
     }
-    if (resp_len != sizeof(int)) {
+    if (resp_len != sizeof(*object_size)) {
         return -EINVAL;
     }
     return 0;
 }
 
-int iommufd_tsm_da_object_read(unsigned int vdev_id,
-       unsigned int object_type,
-       unsigned long offset,
-       void *buf,
-       unsigned long max_len,
-       unsigned int *resp_len)
+int iommufd_tsm_da_object_read(uint32_t rid, uint32_t object_type,
+                               uint64_t offset, void *buf, uint32_t max_len,
+                               uint32_t *resp_len)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct arm64_vdev_object_read_guest_req req = {
         .req_type = __RHI_DA_OBJECT_READ,
         .object_type = object_type,
         .offset = offset,
     };
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
@@ -192,12 +199,12 @@ int iommufd_tsm_da_object_read(unsigned int vdev_id,
                                      buf, max_len, resp_len);
 }
 
-int iommufd_tsm_da_get_interface_report(unsigned int vdev_id)
+int iommufd_tsm_da_get_interface_report(uint32_t rid)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
-    __u32 req_type;
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
+    uint32_t req_type;
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
@@ -208,17 +215,17 @@ int iommufd_tsm_da_get_interface_report(unsigned int vdev_id)
                                      NULL, 0, NULL);
 }
 
-int iommufd_tsm_da_get_measurement(unsigned int vdev_id,
-       struct rhi_vdev_measurement_params *param)
+int iommufd_tsm_da_get_measurement(uint32_t rid,
+                                   struct rhi_vdev_measurement_params *param)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct arm64_vdev_device_measurement_guest_req req = {
         .req_type = __RHI_DA_VDEV_UPDATE_MEASUREMENTS,
         .flags = param->flags,
         .nonce = (uintptr_t)&param->nonce[0],
     };
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
         return -ENODEV;
     }
 
@@ -228,23 +235,26 @@ int iommufd_tsm_da_get_measurement(unsigned int vdev_id,
                                      NULL, 0, NULL);
 }
 
-bool iommufd_tsm_dev_memmap_exit(unsigned long vdev_id,
-    unsigned long gpa_base, unsigned long gpa_top,
-    unsigned long pa_base)
+bool iommufd_tsm_dev_memmap_exit(uint32_t rid, uint64_t gpa_base,
+                                 uint64_t gpa_top, uint64_t pa_base)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(vdev_id);
+    VFIODevice *vbasedev = vfio_find_bdf(rid);
     struct arm64_vdev_device_memmap_guest_req req = {
         .req_type = __REC_DA_VDEV_MAP,
         .gpa_base = gpa_base,
         .gpa_top = gpa_top,
         .pa_base = pa_base,
     };
-    uint64_t range_size = gpa_top - gpa_base;
+    uint64_t range_size;
     bool ok;
 
-    if (!vbasedev || !vbasedev->iommufd_vdevice) {
-            return false;
+    if (!iommufd_tsm_vdevice_is_registered(vbasedev)) {
+        return false;
     }
+    if (gpa_top <= gpa_base) {
+        return false;
+    }
+    range_size = gpa_top - gpa_base;
 
     /*
      * Mark the IPA window PRIVATE before the iommufd guest-request reaches
@@ -278,6 +288,7 @@ bool iommufd_tsm_dev_memmap_exit(unsigned long vdev_id,
         kvm_set_memory_attributes_shared(gpa_base, range_size);
     }
 
+    trace_iommufd_tsm_dev_memmap(rid, gpa_base, gpa_top, pa_base, ok);
     return ok;
 }
 
@@ -578,7 +589,11 @@ static int iommufd_cdev_attach_ioas_hwpt(VFIODevice *vbasedev, uint32_t id,
 int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
 {
     IOMMUFDBackend *iommufd = vbasedev->iommufd;
-    struct iommu_vdevice_alloc alloc_vdev;
+    struct iommu_vdevice_alloc alloc_vdev = {
+        .size = sizeof(alloc_vdev),
+        .viommu_id = vbasedev->hwpt->viommu_id,
+        .dev_id = vbasedev->devid,
+    };
     VFIOPCIDevice *vdev;
     int ret;
 
@@ -589,9 +604,6 @@ int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
 
     vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
 
-    alloc_vdev.size = sizeof(alloc_vdev);
-    alloc_vdev.viommu_id = vbasedev->hwpt->viommu_id;
-    alloc_vdev.dev_id = vbasedev->devid;
     /* Guest-visible RID: segment (0) in bits [31:16], BDF in bits [15:0]. */
     alloc_vdev.virt_id = pci_get_bdf(&vdev->parent_obj);
 
@@ -655,7 +667,10 @@ iommufd_cdev_alloc_viommu_hwpt(VFIODevice *vbasedev,
         .dev_id = vbasedev->devid,
     };
     VFIOIOASHwpt *hwpt;
+    Error *detach_err = NULL;
     uint32_t hwpt_id;
+    bool parent_attached = false;
+    bool viommu_allocated = false;
     int ret;
 
     if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
@@ -675,12 +690,14 @@ iommufd_cdev_alloc_viommu_hwpt(VFIODevice *vbasedev,
     if (ret) {
         goto err_free;
     }
+    parent_attached = true;
 
     alloc_viommu.hwpt_id = hwpt->hwpt_id;
     if (ioctl(iommufd->fd, IOMMU_VIOMMU_ALLOC, &alloc_viommu)) {
         error_setg_errno(errp, errno, "failed to allocate VIOMMU");
         goto err_free;
     }
+    viommu_allocated = true;
 
     if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
                                     alloc_viommu.out_viommu_id, 0,
@@ -696,6 +713,15 @@ iommufd_cdev_alloc_viommu_hwpt(VFIODevice *vbasedev,
     return hwpt;
 
 err_free:
+    if (viommu_allocated) {
+        iommufd_backend_free_id(container->be,
+                                alloc_viommu.out_viommu_id);
+    }
+    if (parent_attached &&
+        !iommufd_cdev_detach_ioas_hwpt(vbasedev, &detach_err)) {
+        error_reportf_err(detach_err,
+                          "failed to detach device while unwinding: ");
+    }
     iommufd_backend_free_id(container->be, hwpt->hwpt_id);
     g_free(hwpt);
     return NULL;
@@ -718,6 +744,13 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
 
     /* Try to find a domain */
     QLIST_FOREACH(hwpt, &container->hwpt_list, next) {
+        bool hwpt_has_vdevice = hwpt->viommu_id && hwpt->nested_hwpt_id;
+
+        /* Never mix regular devices and Realm vDevices in one HWPT. */
+        if (vbasedev->iommufd_vdevice != hwpt_has_vdevice) {
+            continue;
+        }
+
         if (!cpr_is_incoming()) {
             ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt->hwpt_id, errp);
         } else if (vbasedev->cpr.hwpt_id == hwpt->hwpt_id) {
@@ -764,8 +797,8 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
          */
         if (!iommufd_backend_get_device_info(vbasedev->iommufd,
                                              vbasedev->devid, &type, &caps,
-                                             sizeof(caps), &hw_caps, NULL,
-                                             errp)) {
+                                             sizeof(caps), &hw_caps,
+                                             NULL, errp)) {
             return false;
         }
 

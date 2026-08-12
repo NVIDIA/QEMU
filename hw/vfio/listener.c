@@ -76,7 +76,12 @@ static bool vfio_log_sync_needed(const VFIOContainer *bcontainer)
     return true;
 }
 
-VFIODevice *vfio_find_bdf(uint64_t sbdf)
+/*
+ * Look up an assigned PCI device by its guest-visible Routing ID: PCI segment
+ * in bits [31:16], BDF in bits [15:0].  Only segment 0 is modelled today, so
+ * anything above bit 15 never matches.
+ */
+VFIODevice *vfio_find_bdf(uint32_t rid)
 {
     VFIOPCIDevice *pcidev;
     VFIODevice *vbasedev;
@@ -86,7 +91,7 @@ VFIODevice *vfio_find_bdf(uint64_t sbdf)
             continue;
         }
         pcidev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
-        if (((uint64_t)pci_get_bdf(&pcidev->parent_obj)) == sbdf) {
+        if ((uint32_t)pci_get_bdf(&pcidev->parent_obj) == rid) {
             return vbasedev;
         }
     }
