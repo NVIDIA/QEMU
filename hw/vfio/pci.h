@@ -204,6 +204,7 @@ struct VFIOPCIDevice {
     bool skip_vsc_check;
     uint16_t vpasid_cap_offset;
     bool has_info_set;
+    bool info_set_failed;
     bool is_running;
     VFIODisplay *dpy;
     Notifier irqchip_change_notifier;
