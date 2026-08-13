@@ -1,3 +1,11 @@
+qemu (1:11.0.0+nvidia6-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: system/memory: Make ram device region directly accessible
+  * NVIDIA: SAUCE: system/memory: Use qemu_ram_move() for directly accessible regions
+  * NVIDIA: SAUCE: system/memory: Use memmove() for directly accessible regions
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Thu, 13 Aug 2026 18:21:03 -0500
+
 qemu (1:11.0.0+nvidia5-1) noble; urgency=medium
 
   * Fix amd64 microvm configure failure for QEMU 11.0
