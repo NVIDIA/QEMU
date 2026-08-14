@@ -3010,7 +3010,12 @@ static bool virt_get_dtb_randomness(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
-    return virt_dtb_randomness_enabled(vms);
+    /*
+     * Report the value the user set, not the effective one.  A confidential
+     * VM defaults to no randomness (see virt_dtb_randomness_enabled()), but
+     * a getter that did not round-trip its setter would be surprising.
+     */
+    return vms->dtb_randomness;
 }
 
 static void virt_set_dtb_randomness(Object *obj, bool value, Error **errp)
@@ -3535,7 +3540,7 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
 
     vm_type = (ms->cgs ? KVM_VM_TYPE_ARM_REALM : KVM_VM_TYPE_ARM_NORMAL);
 
-    if (vm_type) {
+    if (ms->cgs) {
         /*
          * With RME, the upper GPA bit differentiates Realm from NS memory.
          * Reserve the upper bit to ensure that highmem devices will fit.
