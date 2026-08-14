@@ -173,6 +173,7 @@ VFIODevice *vfio_get_vfio_device(Object *obj);
 typedef QLIST_HEAD(VFIODeviceList, VFIODevice) VFIODeviceList;
 extern VFIODeviceList vfio_device_list;
 
+/* Caller must hold the BQL while using the returned device. */
 VFIODevice *vfio_find_bdf(uint32_t rid);
 
 #ifdef CONFIG_LINUX

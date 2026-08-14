@@ -2149,7 +2149,14 @@ static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
         }
     }
 
+    /*
+     * RHI dispatch looks up and operates on VFIO devices.  The global VFIO
+     * device list and device lifetime are protected by the BQL, which is not
+     * held while kvm_cpu_exec() handles architecture-specific exits.
+     */
+    bql_lock();
     ret = handle_std_hyp_call(&call);
+    bql_unlock();
     if (ret) {
         return ret;
     }
@@ -2181,7 +2188,13 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                                        run->arm_nisv.fault_ipa);
         break;
     case KVM_EXIT_ARM64_TIO:
+        /*
+         * See the VFIO device-lifetime comment in
+         * kvm_arm_handle_hypercall().
+         */
+        bql_lock();
         ret = handle_arm64_tio_exit(run);
+        bql_unlock();
         break;
     case KVM_EXIT_HYPERCALL:
         ret = kvm_arm_handle_hypercall(cs, run);

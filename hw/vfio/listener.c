@@ -86,6 +86,9 @@ VFIODevice *vfio_find_bdf(uint32_t rid)
     VFIOPCIDevice *pcidev;
     VFIODevice *vbasedev;
 
+    /* vfio_device_list insertion and removal are protected by the BQL. */
+    assert(bql_locked());
+
     QLIST_FOREACH(vbasedev, &vfio_device_list, global_next) {
         if (vbasedev->type != VFIO_DEVICE_TYPE_PCI) {
             continue;
