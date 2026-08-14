@@ -2100,26 +2100,30 @@ static int handle_std_hyp_call(SmcccCall *call)
 
 static int handle_arm64_tio_exit(struct kvm_run *kvm_run)
 {
-    if (kvm_run->cca_exit.nr == RMI_EXIT_VDEV_MAP) {
-        uint64_t gpa_base, gpa_top, pa_base;
-        uint32_t rid;
-        bool accepted;
+    uint64_t gpa_base, gpa_top, pa_base;
+    uint32_t rid;
+    bool accepted;
 
-        gpa_base = kvm_run->cca_exit.gpa_base;
-        gpa_top = kvm_run->cca_exit.gpa_top;
-        pa_base = kvm_run->cca_exit.pa_base;
-
-        if (kvm_run->cca_exit.vdev_id > UINT32_MAX) {
-            accepted = false;
-        } else {
-            rid = kvm_run->cca_exit.vdev_id;
-            accepted = iommufd_tsm_dev_memmap_exit(rid, gpa_base, gpa_top,
-                                                   pa_base);
-        }
-
-        kvm_run->cca_exit.response =
-            accepted ? 0 : REC_ENTER_FLAG_DEV_MEM_RESPONSE_REJECT;
+    if (kvm_run->cca_exit.nr != RMI_EXIT_VDEV_MAP) {
+        error_report("unsupported KVM_EXIT_ARM64_TIO operation 0x%" PRIx64,
+                     (uint64_t)kvm_run->cca_exit.nr);
+        return -EINVAL;
     }
+
+    gpa_base = kvm_run->cca_exit.gpa_base;
+    gpa_top = kvm_run->cca_exit.gpa_top;
+    pa_base = kvm_run->cca_exit.pa_base;
+
+    if (kvm_run->cca_exit.vdev_id > UINT32_MAX) {
+        accepted = false;
+    } else {
+        rid = kvm_run->cca_exit.vdev_id;
+        accepted = iommufd_tsm_dev_memmap_exit(rid, gpa_base, gpa_top,
+                                               pa_base);
+    }
+
+    kvm_run->cca_exit.response =
+        accepted ? 0 : REC_ENTER_FLAG_DEV_MEM_RESPONSE_REJECT;
     return 0;
 }
 
