@@ -303,7 +303,12 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
  * hosts built from the same snapshot. NVIDIA kernels export the live value
  * as a module parameter; prefer it and fall back to the compile-time
  * constant.
+ *
+ * FIXME: this is a downstream-only workaround and must be dropped before the
+ * series is posted upstream, where KVM_CAP_ARM_RMI will have a fixed value.
  */
+#define KVM_CAP_ARM_RMI_MAX 4095
+
 static unsigned int kvm_arm_rme_get_cap(void)
 {
     static unsigned int rme_cap;
@@ -317,8 +322,17 @@ static unsigned int kvm_arm_rme_get_cap(void)
 
         f = fopen(KVM_CAP_ARM_RMI_SYSFS_PATH, "r");
         if (f) {
-            if (fscanf(f, "%d", &cap) == 1 && cap > 0) {
+            /*
+             * Bound the value: a garbage module parameter would otherwise
+             * turn into a wild KVM_CHECK_EXTENSION argument.
+             */
+            if (fscanf(f, "%d", &cap) == 1 &&
+                cap > 0 && cap <= KVM_CAP_ARM_RMI_MAX) {
                 rme_cap = cap;
+            } else {
+                warn_report("ignoring out-of-range %s, falling back to "
+                            "KVM_CAP_ARM_RMI=%d",
+                            KVM_CAP_ARM_RMI_SYSFS_PATH, KVM_CAP_ARM_RMI);
             }
             fclose(f);
         }
