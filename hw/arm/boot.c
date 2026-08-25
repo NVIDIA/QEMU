@@ -582,12 +582,40 @@ int arm_load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
     Error *err = NULL;
 
     if (binfo->dtb_filename && binfo->confidential) {
+        g_autofree char *filename = NULL;
+        int64_t file_size;
+
         /*
          * If the user is providing a DTB for a confidential VM, it is already
          * tailored to this configuration and measured. Load it as is, without
          * any modification.
          */
-        return rom_add_file_fixed_as(binfo->dtb_filename, addr, -1, as);
+        filename = qemu_find_file(QEMU_FILE_TYPE_DTB, binfo->dtb_filename);
+        if (!filename) {
+            fprintf(stderr, "Couldn't open dtb file %s\n",
+                    binfo->dtb_filename);
+            goto fail;
+        }
+
+        file_size = get_image_size(filename, &err);
+        if (file_size <= 0 || file_size > INT_MAX) {
+            if (err) {
+                error_report_err(err);
+                err = NULL;
+            } else {
+                error_report("Invalid DTB file size for %s", filename);
+            }
+            goto fail;
+        }
+
+        if (addr_limit > addr && file_size > addr_limit - addr) {
+            return 0;
+        }
+
+        if (rom_add_file_fixed_as(filename, addr, -1, as) < 0) {
+            goto fail;
+        }
+        return file_size;
     } else if (binfo->dtb_filename) {
         char *filename;
         filename = qemu_find_file(QEMU_FILE_TYPE_DTB, binfo->dtb_filename);
@@ -1246,8 +1274,14 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
                                                  const char *firmware_filename)
 {
     ssize_t fw_size;
-    const char *fname;
+    g_autofree char *fname = NULL;
     AddressSpace *as = arm_boot_address_space(cpu, info);
+
+    if (!firmware_filename) {
+        error_report("a confidential Arm guest requires either a kernel "
+                     "or a firmware image");
+        exit(1);
+    }
 
     fname = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware_filename);
     if (!fname) {
@@ -1260,8 +1294,7 @@ static void arm_setup_confidential_firmware_boot(ARMCPU *cpu,
      * firmware area in the Realm's address space is done in function
      * virt_confidential_firmware_init().
      */
-    fw_size = load_image_targphys_as(firmware_filename,
-                                     info->firmware_base,
+    fw_size = load_image_targphys_as(fname, info->firmware_base,
                                      info->firmware_max_size, as, NULL);
     if (fw_size <= 0) {
         error_report("could not load firmware '%s'", firmware_filename);
