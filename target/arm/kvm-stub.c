@@ -42,7 +42,7 @@ bool kvm_arm_el2_supported(void)
     return false;
 }
 
-void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
+void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus)
 {
 }
 

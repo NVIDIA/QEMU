@@ -177,6 +177,7 @@ struct VirtMachineState {
     int psci_conduit;
     uint8_t virtio_transports;
     hwaddr highest_gpa;
+    uint8_t rme_ipa_bits;
     DeviceState *gic;
     DeviceState *acpi_dev;
     Notifier powerdown_notifier;

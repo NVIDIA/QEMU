@@ -269,14 +269,14 @@ bool kvm_arm_rme_available(void);
 void kvm_arm_rme_vcpu_init(ARMCPU *cpu);
 
 /**
- * kvm_arm_rme_setup_gpa
- * @highest_gpa: highest address of the lower half of the guest address space
+ * kvm_arm_rme_init_gpa_space
+ * @ipa_bits: size of the full Realm IPA space, including the shared bit
  * @pci_bus: The main PCI bus, for which PCI queries DMA address spaces
  *
  * Setup the guest-physical address space for a Realm. Install a memory region
  * and notifier to manage the shared upper half of the address space.
  */
-void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus);
+void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus);
 
 /**
  * kvm_arm_rme_get_dma_as:

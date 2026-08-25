@@ -51,17 +51,36 @@ typedef struct {
     uint8_t *data;
 } RmeRamRegion;
 
+typedef struct RealmRamDiscardListener {
+    RmeGuest *guest;
+    MemoryRegion *mr;
+    hwaddr offset_within_address_space;
+    RamDiscardManager *rdm;
+    uint64_t granularity;
+    RamDiscardListener listener;
+    QLIST_ENTRY(RealmRamDiscardListener) next;
+} RealmRamDiscardListener;
+
 struct RmeGuest {
     ConfidentialGuestSupport parent_obj;
     Notifier rom_load_notifier;
     VMChangeStateEntry *vm_state_handler;
+    Error *migration_blocker;
     GSList *ram_regions;
     bool rom_load_notifier_registered;
     bool activated;
     uint8_t ipa_bits;
 
-    RealmDmaRegion *dma_region;
-    AddressSpace dma_as;
+    RealmDmaRegion dma_region;
+    QLIST_HEAD(, RealmRamDiscardListener) ram_discard_list;
+    /*
+     * Lock order: ram_discard_lock nests outside RamBlockAttributes::lock.
+     * RamDiscardManager callbacks must not acquire ram_discard_lock.
+     */
+    QemuMutex ram_discard_lock;
+    MemoryListener memory_listener;
+    bool memory_listener_registered;
+    AddressSpace *dma_as;
 };
 
 OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(RmeGuest, rme_guest, RME_GUEST,
@@ -435,15 +454,15 @@ bool kvm_arm_rme_available(void)
 static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
 {
     RmeGuest *guest = RME_GUEST(cgs);
-    static Error *rme_mig_blocker;
 
     if (!kvm_arm_rme_available()) {
         error_setg(errp, "VM doesn't support Realms");
         return -ENODEV;
     }
 
-    error_setg(&rme_mig_blocker, "RME: migration is not implemented");
-    migrate_add_blocker(&rme_mig_blocker, &error_fatal);
+    error_setg(&guest->migration_blocker,
+               "RME: migration is not implemented");
+    migrate_add_blocker(&guest->migration_blocker, &error_fatal);
 
     guest->rom_load_notifier.notify = rme_rom_load_notify;
     rom_add_load_notifier(&guest->rom_load_notifier);
@@ -471,28 +490,185 @@ void kvm_arm_rme_vcpu_init(ARMCPU *cpu)
     cpu->kvm_rme = true;
 }
 
+static bool rme_guest_can_be_deleted(UserCreatable *uc)
+{
+    MachineState *machine = MACHINE(qdev_get_machine());
+
+    /* The unparent hook tears down state that an active machine still uses. */
+    return machine->cgs != CONFIDENTIAL_GUEST_SUPPORT(uc);
+}
+
+static void rme_guest_unparent(Object *obj);
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     ConfidentialGuestSupportClass *klass = CONFIDENTIAL_GUEST_SUPPORT_CLASS(oc);
+    UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
+    oc->unparent = rme_guest_unparent;
     klass->kvm_init = kvm_arm_rme_init;
+    ucc->can_be_deleted = rme_guest_can_be_deleted;
 }
 
 static void rme_guest_init(Object *obj)
 {
+    RmeGuest *guest = RME_GUEST(obj);
+
+    QLIST_INIT(&guest->ram_discard_list);
+    qemu_mutex_init(&guest->ram_discard_lock);
+}
+
+static void rme_guest_cleanup(RmeGuest *guest)
+{
+    if (guest->rom_load_notifier_registered) {
+        notifier_remove(&guest->rom_load_notifier);
+        guest->rom_load_notifier_registered = false;
+    }
+    if (guest->vm_state_handler) {
+        qemu_del_vm_change_state_handler(guest->vm_state_handler);
+        guest->vm_state_handler = NULL;
+    }
+    if (guest->memory_listener_registered) {
+        memory_listener_unregister(&guest->memory_listener);
+        guest->memory_listener_registered = false;
+    }
+    g_clear_pointer(&guest->dma_as, address_space_destroy_free);
+    migrate_del_blocker(&guest->migration_blocker);
+}
+
+static void rme_guest_unparent(Object *obj)
+{
+    /*
+     * dma_as references the RmeGuest through its root MemoryRegion owner.
+     * Break that reference before the objects container drops its reference;
+     * waiting until instance_finalize() would leave a reference cycle.
+     */
+    rme_guest_cleanup(RME_GUEST(obj));
 }
 
 static void rme_guest_finalize(Object *obj)
 {
     RmeGuest *guest = RME_GUEST(obj);
 
-    if (guest->rom_load_notifier_registered) {
-        notifier_remove(&guest->rom_load_notifier);
-    }
-    if (guest->vm_state_handler) {
-        qemu_del_vm_change_state_handler(guest->vm_state_handler);
-    }
+    /* Also cover objects destroyed after only partial initialization. */
+    rme_guest_cleanup(guest);
+    assert(QLIST_EMPTY(&guest->ram_discard_list));
+    qemu_mutex_destroy(&guest->ram_discard_lock);
     g_slist_free_full(guest->ram_regions, rme_ram_region_free);
+}
+
+static void rme_dma_notify_section(RmeGuest *guest,
+                                   MemoryRegionSection *section,
+                                   uint64_t granularity, bool populate,
+                                   IOMMUNotifier *notifier)
+{
+    const hwaddr shared_bit = 1ULL << (guest->ipa_bits - 1);
+    const hwaddr end = section->offset_within_address_space +
+                       int128_get64(section->size);
+    hwaddr gpa, next;
+    IOMMUTLBEvent event = {
+        .type = populate ? IOMMU_NOTIFIER_MAP : IOMMU_NOTIFIER_UNMAP,
+        .entry = {
+            .target_as = &address_space_memory,
+            .perm = populate ? IOMMU_RW : IOMMU_NONE,
+            .addr_mask = granularity - 1,
+        },
+    };
+
+    assert(guest->dma_as);
+    assert(end <= shared_bit);
+
+    for (gpa = section->offset_within_address_space; gpa < end; gpa = next) {
+        next = ROUND_UP(gpa + 1, granularity);
+        next = MIN(next, end);
+
+        event.entry.translated_addr = gpa;
+
+        /* Devices must use the shared-bit alias produced by the DMA API. */
+        event.entry.iova = gpa | shared_bit;
+        if (notifier) {
+            memory_region_notify_iommu_one(notifier, &event);
+        } else {
+            memory_region_notify_iommu(IOMMU_MEMORY_REGION(&guest->dma_region),
+                                       0, event);
+        }
+    }
+}
+
+static int rme_ram_discard_notify(RamDiscardListener *rdl,
+                                  MemoryRegionSection *section,
+                                  bool populate)
+{
+    RealmRamDiscardListener *rrdl =
+        container_of(rdl, RealmRamDiscardListener, listener);
+
+    rme_dma_notify_section(rrdl->guest, section, rrdl->granularity,
+                           populate, NULL);
+    return 0;
+}
+
+static int rme_ram_discard_notify_populate(RamDiscardListener *rdl,
+                                           MemoryRegionSection *section)
+{
+    return rme_ram_discard_notify(rdl, section, true);
+}
+
+static void rme_ram_discard_notify_discard(RamDiscardListener *rdl,
+                                           MemoryRegionSection *section)
+{
+    rme_ram_discard_notify(rdl, section, false);
+}
+
+static void rme_listener_region_add(MemoryListener *listener,
+                                    MemoryRegionSection *section)
+{
+    RmeGuest *guest = container_of(listener, RmeGuest, memory_listener);
+    RamDiscardManager *rdm = memory_region_get_ram_discard_manager(section->mr);
+    RealmRamDiscardListener *rrdl;
+
+    if (!rdm) {
+        return;
+    }
+
+    rrdl = g_new0(RealmRamDiscardListener, 1);
+    rrdl->guest = guest;
+    rrdl->mr = section->mr;
+    rrdl->offset_within_address_space = section->offset_within_address_space;
+    rrdl->rdm = rdm;
+    rrdl->granularity =
+        ram_discard_manager_get_min_granularity(rdm, section->mr);
+
+    ram_discard_listener_init(&rrdl->listener,
+                              rme_ram_discard_notify_populate,
+                              rme_ram_discard_notify_discard);
+    ram_discard_manager_register_listener(rdm, &rrdl->listener, section);
+
+    qemu_mutex_lock(&guest->ram_discard_lock);
+    QLIST_INSERT_HEAD(&guest->ram_discard_list, rrdl, next);
+    qemu_mutex_unlock(&guest->ram_discard_lock);
+}
+
+static void rme_listener_region_del(MemoryListener *listener,
+                                    MemoryRegionSection *section)
+{
+    RmeGuest *guest = container_of(listener, RmeGuest, memory_listener);
+    RealmRamDiscardListener *rrdl = NULL;
+
+    qemu_mutex_lock(&guest->ram_discard_lock);
+    QLIST_FOREACH(rrdl, &guest->ram_discard_list, next) {
+        if (rrdl->mr == section->mr &&
+            rrdl->offset_within_address_space ==
+                section->offset_within_address_space) {
+            QLIST_REMOVE(rrdl, next);
+            break;
+        }
+    }
+    qemu_mutex_unlock(&guest->ram_discard_lock);
+
+    if (rrdl) {
+        ram_discard_manager_unregister_listener(rrdl->rdm, &rrdl->listener);
+        g_free(rrdl);
+    }
 }
 
 static AddressSpace *rme_dma_get_address_space(PCIBus *bus, void *opaque,
@@ -500,51 +676,128 @@ static AddressSpace *rme_dma_get_address_space(PCIBus *bus, void *opaque,
 {
     RmeGuest *guest = opaque;
 
-    return &guest->dma_as;
+    return guest->dma_as;
 }
 
 static const PCIIOMMUOps rme_dma_ops = {
     .get_address_space = rme_dma_get_address_space,
 };
 
-void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
+void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus)
 {
     RmeGuest *guest = rme_get_machine_guest();
-    RealmDmaRegion *dma_region;
-    const unsigned int ipa_bits = 64 - clz64(highest_gpa) + 1;
 
-    if (!guest) {
+    if (!guest || !ipa_bits) {
         return;
     }
 
     assert(ipa_bits < 64);
+    assert(!guest->dma_as);
 
     /*
      * Setup a DMA translation from the shared top half of the guest-physical
      * address space to our merged view of RAM.
      */
-    dma_region = g_new0(RealmDmaRegion, 1);
-
-    memory_region_init_iommu(dma_region, sizeof(*dma_region),
+    memory_region_init_iommu(&guest->dma_region, sizeof(guest->dma_region),
                              TYPE_REALM_DMA_REGION, OBJECT(guest),
                              "realm-dma-region", 1ULL << ipa_bits);
-    address_space_init(&guest->dma_as, MEMORY_REGION(dma_region),
+    guest->dma_as = g_new0(AddressSpace, 1);
+    address_space_init(guest->dma_as, MEMORY_REGION(&guest->dma_region),
                        TYPE_REALM_DMA_REGION);
-    guest->dma_region = dma_region;
     guest->ipa_bits = ipa_bits;
 
     pci_setup_iommu(pci_bus, &rme_dma_ops, guest);
+
+    guest->memory_listener = (MemoryListener) {
+        .name = "rme",
+        .region_add = rme_listener_region_add,
+        .region_del = rme_listener_region_del,
+    };
+    memory_listener_register(&guest->memory_listener, &address_space_memory);
+    guest->memory_listener_registered = true;
 }
 
 AddressSpace *kvm_arm_rme_get_dma_as(void)
 {
     RmeGuest *guest = rme_get_machine_guest();
 
-    return guest && guest->dma_region ? &guest->dma_as : NULL;
+    return guest ? guest->dma_as : NULL;
 }
 
 static void realm_dma_region_init(Object *obj)
 {
+}
+
+static bool realm_dma_access_allowed(RmeGuest *guest, hwaddr gpa)
+{
+    RealmRamDiscardListener *rrdl;
+    MemoryRegionSection section = { 0 };
+    MemoryRegion *target;
+    hwaddr target_offset;
+    hwaddr len = 1;
+    bool shared = false;
+    bool tracked = false;
+
+    /*
+     * IOMMU translations can run without the BQL. Use the listener cache
+     * instead of walking the global address-space topology and keep each
+     * listener alive while its RamDiscardManager is queried.
+     */
+    qemu_mutex_lock(&guest->ram_discard_lock);
+    QLIST_FOREACH(rrdl, &guest->ram_discard_list, next) {
+        const MemoryRegionSection *registered = rrdl->listener.section;
+        const hwaddr as_start = registered->offset_within_address_space;
+        const hwaddr region_start = registered->offset_within_region;
+        const uint64_t registered_size = int128_get64(registered->size);
+        const uint64_t granularity = rrdl->granularity;
+        uint64_t granule_offset;
+        hwaddr translated;
+
+        if (gpa < as_start || gpa - as_start >= registered_size) {
+            continue;
+        }
+        if (!granularity || gpa - as_start > HWADDR_MAX - region_start) {
+            continue;
+        }
+
+        translated = region_start + (gpa - as_start);
+        granule_offset = translated / granularity * granularity;
+
+        /* RamDiscardManager queries operate on complete tracking granules. */
+        if (granule_offset < region_start ||
+            granule_offset - region_start > registered_size ||
+            granularity >
+                registered_size - (granule_offset - region_start)) {
+            continue;
+        }
+
+        section.mr = registered->mr;
+        section.offset_within_address_space =
+            as_start + (granule_offset - region_start);
+        section.offset_within_region = granule_offset;
+        section.size = int128_make64(granularity);
+        shared = ram_discard_manager_is_populated(rrdl->rdm, &section);
+        tracked = true;
+        break;
+    }
+    qemu_mutex_unlock(&guest->ram_discard_lock);
+
+    if (tracked) {
+        return shared;
+    }
+
+    /*
+     * PCI DMA also carries interrupt writes to MMIO targets such as the GIC
+     * ITS doorbell. The shared/private state applies only to RAM, so let the
+     * target MemoryRegion validate non-RAM accesses. Absence from the cache
+     * still fails closed for RAM, deliberately disallowing peer DMA to a
+     * VFIO BAR through the Realm DMA address space.
+     *
+     * IOMMU translations run under either the BQL or an RCU read lock.
+     */
+    target = address_space_translate(&address_space_memory, gpa, &target_offset,
+                                     &len, false, MEMTXATTRS_UNSPECIFIED);
+    return !memory_region_is_ram(target);
 }
 
 static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
@@ -555,10 +808,11 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
     RmeGuest *guest = RME_GUEST(memory_region_owner(MEMORY_REGION(mr)));
     const hwaddr shared_bit = 1ULL << (guest->ipa_bits - 1);
     const hwaddr address_mask = shared_bit - 1;
+    const hwaddr translated_addr = addr & address_mask;
     IOMMUTLBEntry entry = {
         .target_as = &address_space_memory,
         .iova = addr,
-        .translated_addr = addr & address_mask,
+        .translated_addr = translated_addr,
         /*
          * Somewhat arbitrary granule for users that need one, such as
          * address_space_get_iotlb_entry(). Should be relatively large to
@@ -570,17 +824,62 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
         /*
          * Firmware can use the canonical IPA for a page that it has made
          * shared with the RMM, while Linux DMA addresses carry shared_bit.
-         * Both forms refer to the same host-visible RAM alias.
+         * Accept both spellings for RAM only while the RAM discard manager
+         * records the page as shared. Permit non-RAM transactions such as
+         * PCI interrupt writes, while RAM without a discard manager remains
+         * inaccessible.
          */
-        .perm = IOMMU_RW,
+        .perm = realm_dma_access_allowed(guest, translated_addr) ?
+                IOMMU_RW : IOMMU_NONE,
     };
 
     return entry;
 }
 
+typedef struct RealmDmaReplayData {
+    RmeGuest *guest;
+    IOMMUNotifier *notifier;
+    uint64_t granularity;
+} RealmDmaReplayData;
+
+static int realm_dma_replay_populated(MemoryRegionSection *section,
+                                      void *opaque)
+{
+    RealmDmaReplayData *data = opaque;
+
+    rme_dma_notify_section(data->guest, section, data->granularity, true,
+                           data->notifier);
+    return 0;
+}
+
 static void realm_dma_region_replay(IOMMUMemoryRegion *mr, IOMMUNotifier *n)
 {
-    /* Nothing is shared at boot */
+    RmeGuest *guest = RME_GUEST(memory_region_owner(MEMORY_REGION(mr)));
+    RealmRamDiscardListener *rrdl;
+
+    if (!(n->notifier_flags & IOMMU_NOTIFIER_MAP)) {
+        return;
+    }
+
+    qemu_mutex_lock(&guest->ram_discard_lock);
+    QLIST_FOREACH(rrdl, &guest->ram_discard_list, next) {
+        RealmDmaReplayData data = {
+            .guest = guest,
+            .notifier = n,
+            .granularity = rrdl->granularity,
+        };
+
+        /*
+         * RamBlockAttributes serializes this callback with bitmap changes and
+         * their MAP/UNMAP notifications. This ensures that a discard UNMAP
+         * cannot be overtaken by a stale replay MAP.
+         */
+        ram_discard_manager_replay_populated(rrdl->rdm,
+                                             rrdl->listener.section,
+                                             realm_dma_replay_populated,
+                                             &data);
+    }
+    qemu_mutex_unlock(&guest->ram_discard_lock);
 }
 
 static void realm_dma_region_finalize(Object *obj)
