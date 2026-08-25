@@ -44,6 +44,8 @@
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
 
+QEMU_BUILD_BUG_ON(QEMU_KVM_ARM_VM_TYPE_REALM != KVM_VM_TYPE_ARM_REALM);
+
 const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_INFO(DEVICE_CTRL),
     KVM_CAP_LAST_INFO

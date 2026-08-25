@@ -95,8 +95,6 @@
 #include "hw/cxl/cxl_host.h"
 #include "qemu/guest-random.h"
 
-#include <linux/kvm.h>
-
 static GlobalProperty arm_virt_compat_defaults[] = {
     { TYPE_VIRTIO_IOMMU_PCI, "aw-bits", "48" },
 };
@@ -1302,23 +1300,11 @@ static PFlashCFI01 *virt_flash_create1(VirtMachineState *vms,
 
 static void virt_flash_create(VirtMachineState *vms)
 {
-    /*
-     * For Realms, the firmware image is placed directly in the guest's
-     * RAM area.  The association between the final location in the
-     * guest's RAM and the system memory is done in function
-     * virt_confidential_firmware_init().
-     */
-    if (virt_machine_is_confidential(vms)) {
-        return;
-    }
-
     vms->flash[0] = virt_flash_create1(vms, "virt.flash0", "pflash0");
     vms->flash[1] = virt_flash_create1(vms, "virt.flash1", "pflash1");
 }
 
-static void virt_flash_map1(PFlashCFI01 *flash,
-                            hwaddr base, hwaddr size,
-                            MemoryRegion *sysmem)
+static void virt_flash_realize1(PFlashCFI01 *flash, hwaddr size)
 {
     DeviceState *dev = DEVICE(flash);
 
@@ -1326,10 +1312,18 @@ static void virt_flash_map1(PFlashCFI01 *flash,
     assert(size / VIRT_FLASH_SECTOR_SIZE <= UINT32_MAX);
     qdev_prop_set_uint32(dev, "num-blocks", size / VIRT_FLASH_SECTOR_SIZE);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+}
+
+static void virt_flash_map1(PFlashCFI01 *flash,
+                            hwaddr base, hwaddr size,
+                            MemoryRegion *sysmem)
+{
+    SysBusDevice *sbd = SYS_BUS_DEVICE(flash);
+
+    virt_flash_realize1(flash, size);
 
     memory_region_add_subregion(sysmem, base,
-                                sysbus_mmio_get_region(SYS_BUS_DEVICE(dev),
-                                                       0));
+                                sysbus_mmio_get_region(sbd, 0));
 }
 
 static void virt_flash_map(VirtMachineState *vms,
@@ -1447,6 +1441,19 @@ static bool virt_firmware_init(VirtMachineState *vms,
      * private. Create a RAM region and load the firmware image there.
      */
     if (virt_machine_is_confidential(vms)) {
+        hwaddr flashsize = vms->memmap[VIRT_FLASH].size / 2;
+
+        for (i = 0; i < ARRAY_SIZE(vms->flash); i++) {
+            if (pflash_cfi01_get_blk(vms->flash[i]) ||
+                drive_get(IF_PFLASH, 0, i)) {
+                error_report("pflash is not supported for Realm VMs; "
+                             "use -bios to provide Realm firmware");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        virt_flash_realize1(vms->flash[0], flashsize);
+        virt_flash_realize1(vms->flash[1], flashsize);
         return virt_confidential_firmware_init(vms, sysmem);
     }
 
@@ -2395,7 +2402,10 @@ static void machvirt_init(MachineState *machine)
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
 
-    virt_flash_create(vms);
+    if (virt_machine_is_confidential(vms) && !kvm_enabled()) {
+        error_report("Realm VMs require KVM acceleration");
+        exit(EXIT_FAILURE);
+    }
 
     possible_cpus = mc->possible_cpu_arch_ids(machine);
 
@@ -2991,7 +3001,12 @@ static bool virt_get_dtb_randomness(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
-    return virt_dtb_randomness_enabled(vms);
+    /*
+     * Report the value the user set, not the effective one.  A confidential
+     * VM defaults to no randomness (see virt_dtb_randomness_enabled()), but
+     * a getter that did not round-trip its setter would be surprising.
+     */
+    return vms->dtb_randomness;
 }
 
 static void virt_set_dtb_randomness(Object *obj, bool value, Error **errp)
@@ -3521,9 +3536,10 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
     bool fixed_ipa;
     int vm_type;
 
-    vm_type = (ms->cgs ? KVM_VM_TYPE_ARM_REALM : KVM_VM_TYPE_ARM_NORMAL);
+    vm_type = (ms->cgs ? QEMU_KVM_ARM_VM_TYPE_REALM :
+                         QEMU_KVM_ARM_VM_TYPE_NORMAL);
 
-    if (vm_type) {
+    if (ms->cgs) {
         /*
          * With RME, the upper GPA bit differentiates Realm from NS memory.
          * Reserve the upper bit to ensure that highmem devices will fit.
@@ -3873,6 +3889,9 @@ static void virt_instance_init(Object *obj)
     vms->irqmap = a15irqmap;
 
     vms->virtio_transports = NUM_VIRTIO_TRANSPORTS;
+
+    /* Machine properties must exist before machine options are parsed. */
+    virt_flash_create(vms);
 
     vms->oem_id = g_strndup(ACPI_BUILD_APPNAME6, 6);
     vms->oem_table_id = g_strndup(ACPI_BUILD_APPNAME8, 8);
