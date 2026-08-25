@@ -3552,12 +3552,12 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
         return -1;
     }
     /*
-     * We return the requested PA log size, unless KVM only supports
-     * the implicit legacy 40b IPA setting, in which case the kvm_type
-     * must be 0.
+     * Return the requested PA log size unless KVM only supports the implicit
+     * legacy 40-bit IPA setting. In that case, leave the IPA-size bits clear
+     * while preserving the Realm VM-type field.
      */
     if (fixed_ipa) {
-        return 0;
+        return vm_type;
     }
 
     return requested_pa_size | vm_type;

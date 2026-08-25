@@ -694,10 +694,16 @@ static void arm_cpu_set_num_wps(Object *obj, Visitor *v, const char *name,
         return;
     }
 
+    if (cpu->kvm_vcpu_regs_configured) {
+        error_setg(errp, "cannot change the number of watchpoints after "
+                   "KVM vCPU register configuration");
+        return;
+    }
+
     if (val < 2 || val > max_wps) {
         error_setg(errp, "invalid number of watchpoints");
         return;
-   }
+    }
 
     cpu->num_wps = val;
 }
@@ -729,9 +735,15 @@ static void arm_cpu_set_num_bps(Object *obj, Visitor *v, const char *name,
         return;
     }
 
+    if (cpu->kvm_vcpu_regs_configured) {
+        error_setg(errp, "cannot change the number of breakpoints after "
+                   "KVM vCPU register configuration");
+        return;
+    }
+
     if (val < 2 || val > max_bps) {
         error_setg(errp, "invalid number of breakpoints");
-       return;
+        return;
     }
 
     cpu->num_bps = val;
@@ -763,6 +775,12 @@ static void arm_cpu_set_num_pmu_ctrs(Object *obj, Visitor *v, const char *name,
         return;
     }
 
+    if (cpu->kvm_vcpu_regs_configured) {
+        error_setg(errp, "cannot change the number of PMU counters after "
+                   "KVM vCPU register configuration");
+        return;
+    }
+
     if (val > max_ctrs) {
         error_setg(errp, "invalid number of PMU counters");
         return;
@@ -773,14 +791,11 @@ static void arm_cpu_set_num_pmu_ctrs(Object *obj, Visitor *v, const char *name,
 
 static void aarch64_add_kvm_writable_properties(Object *obj)
 {
-    ARMCPU *cpu = ARM_CPU(obj);
-
     object_property_add(obj, "num-breakpoints", "uint8", arm_cpu_get_num_bps,
                         arm_cpu_set_num_bps, NULL, NULL);
     object_property_add(obj, "num-watchpoints", "uint8", arm_cpu_get_num_wps,
                         arm_cpu_set_num_wps, NULL, NULL);
 
-    cpu->num_pmu_ctrs = -1;
     object_property_add(obj, "num-pmu-counters", "uint8",
                         arm_cpu_get_num_pmu_ctrs, arm_cpu_set_num_pmu_ctrs,
                         NULL, NULL);
