@@ -53,6 +53,9 @@ static bool cap_has_mp_state;
 static bool cap_has_inject_serror_esr;
 static bool cap_has_inject_ext_dabt;
 
+#define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
+#define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
+
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
  * by asking the host kernel)
@@ -126,6 +129,12 @@ bool kvm_arm_create_scratch_host_vcpu(int *fdarray,
         vmfd = ioctl(kvmfd, KVM_CREATE_VM, max_vm_pa_size | vm_type);
     } while (vmfd == -1 && errno == EINTR);
     if (vmfd < 0) {
+        if (errno == EINVAL && max_vm_pa_size &&
+            (vm_type & KVM_VM_TYPE_ARM_MASK) == KVM_VM_TYPE_ARM_REALM) {
+            error_report("KVM rejected a scratch Realm VM with a %d-bit IPA; "
+                         "the requested size may exceed the RMM S2SZ limit",
+                         max_vm_pa_size);
+        }
         goto err;
     }
 
@@ -222,8 +231,8 @@ static int read_sys_reg64(int fd, uint64_t *pret, uint64_t id)
 
 static bool kvm_arm_pauth_supported(void)
 {
-    return (kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
-            kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
+    return (kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
+            kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
 }
 
 
@@ -302,7 +311,7 @@ static bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
      * Ask for SVE if supported, so that we can query ID_AA64ZFR0,
      * which is otherwise RAZ.
      */
-    sve_supported = kvm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
+    sve_supported = kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
     if (sve_supported) {
         init.features[0] |= 1 << KVM_ARM_VCPU_SVE;
     }
@@ -630,7 +639,19 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         return -EINVAL;
     }
 
-    if (kvm_vm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
+    /*
+     * KVM_CAP_ARM_NISV_TO_USER is not on the realm-ext-allowed list
+     * (kvm_realm_ext_allowed() rejects anything not relevant to
+     * confidential VMs), so KVM_ENABLE_CAP returns -EINVAL for a realm VM.
+     * The cap has no effect on realms anyway -- realm faults go through the
+     * RMM path, not the NISV-to-user path -- so skip the attempt instead of
+     * producing a spurious error_report.
+     *
+     * ms->cgs is the same realm test the series uses for the VM type and for
+     * the confidential_guest_kvm_init() call above; kvm_arm_rme_vm_type() was
+     * removed in RFC v2.
+     */
+    if (!ms->cgs && kvm_vm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_NISV_TO_USER, 0)) {
             error_report("Failed to enable KVM_CAP_ARM_NISV_TO_USER cap");
         } else {
@@ -817,8 +838,18 @@ static uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
  * cpreg list of arbitrary system registers, false if it is synchronized
  * by hand using code in kvm_arch_get/put_registers().
  */
-static bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx)
+static bool kvm_arm_reg_syncs_via_cpreg_list(ARMCPU *cpu, uint64_t regidx)
 {
+    /*
+     * Realm KVM exposes PMCR_EL0 so userspace can discover the counter
+     * count, but the Realm SET_ONE_REG allow-list does not permit writing
+     * it.  PMU configuration is handled explicitly through the PMU device
+     * attribute instead.
+     */
+    if (cpu->kvm_rme && regidx == KVM_REG_ARM_PMCR_EL0) {
+        return false;
+    }
+
     switch (regidx & KVM_REG_ARM_COPROC_MASK) {
     case KVM_REG_ARM_CORE:
     case KVM_REG_ARM64_SVE:
@@ -862,7 +893,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
     qsort(&rlp->reg, rlp->n, sizeof(rlp->reg[0]), compare_u64);
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
-        if (!kvm_arm_reg_syncs_via_cpreg_list(rlp->reg[i])) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, rlp->reg[i])) {
             continue;
         }
         switch (rlp->reg[i] & KVM_REG_SIZE_MASK) {
@@ -884,7 +915,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
         uint64_t regidx = rlp->reg[i];
-        if (!kvm_arm_reg_syncs_via_cpreg_list(regidx)) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, regidx)) {
             continue;
         }
         cpu->cpreg_indexes[arraylen] = regidx;
@@ -906,16 +937,14 @@ out:
     return ret;
 }
 
-#define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
-
-static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
+static bool kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
 {
     int ret;
     uint64_t val, newval;
     CPUState *cs = CPU(cpu);
 
     if (!cpu->num_bps && !cpu->num_wps) {
-        return;
+        return true;
     }
 
     newval = cpu->isar.idregs[ID_AA64DFR0_EL1_IDX];
@@ -932,8 +961,9 @@ static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
     }
     ret = kvm_set_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &newval);
     if (ret) {
-        error_report("Failed to set KVM_REG_ARM_ID_AA64DFR0_EL1");
-        return;
+        error_report("Failed to set KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
     }
 
     /*
@@ -942,32 +972,62 @@ static void kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
      */
     ret = kvm_get_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &val);
     if (ret) {
-        error_report("Failed to get KVM_REG_ARM_ID_AA64DFR0_EL1");
-        return;
+        error_report("Failed to get KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
     }
 
     if (val != newval) {
         error_report("Failed to update KVM_REG_ARM_ID_AA64DFR0_EL1");
+        return false;
     }
+
+    return true;
 }
 
-#define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
-
-static void kvm_arm_configure_pmcr(ARMCPU *cpu)
+static bool kvm_arm_configure_pmcr(ARMCPU *cpu)
 {
+    unsigned int nr_counters = cpu->num_pmu_ctrs;
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VCPU_PMU_V3_CTRL,
+        .attr = KVM_ARM_VCPU_PMU_V3_SET_NR_COUNTERS,
+        .addr = (uintptr_t)&nr_counters,
+    };
     int ret;
     uint64_t val, newval;
     CPUState *cs = CPU(cpu);
 
     if (cpu->num_pmu_ctrs == -1) {
-        return;
+        return true;
+    }
+
+    /* An explicit zero is already satisfied when this vCPU has no PMU. */
+    if (!cpu->has_pmu && cpu->num_pmu_ctrs == 0) {
+        return true;
+    }
+
+    /*
+     * Realms restrict which registers userspace may write. Prefer the PMU
+     * device attribute, which configures the VM-wide PMCR_EL0.N value without
+     * requiring a SET_ONE_REG allow-list entry. Fall back for older kernels.
+     */
+    ret = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, &attr);
+    if (!ret) {
+        ret = kvm_vcpu_ioctl(cs, KVM_SET_DEVICE_ATTR, &attr);
+        if (ret) {
+            error_report("Failed to set number of KVM PMU counters: %s",
+                         strerror(-ret));
+            return false;
+        }
+        return true;
     }
 
     newval = FIELD_DP64(cpu->isar.reset_pmcr_el0, PMCR, N, cpu->num_pmu_ctrs);
     ret = kvm_set_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &newval);
     if (ret) {
-        error_report("Failed to set KVM_REG_ARM_PMCR_EL0");
-        return;
+        error_report("Failed to set KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
     }
 
     /*
@@ -975,19 +1035,40 @@ static void kvm_arm_configure_pmcr(ARMCPU *cpu)
      */
     ret = kvm_get_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &val);
     if (ret) {
-        error_report("Failed to get KVM_REG_ARM_PMCR_EL0");
-        return;
+        error_report("Failed to get KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
     }
 
     if (val != newval) {
         error_report("Failed to update KVM_REG_ARM_PMCR_EL0");
+        return false;
     }
+
+    return true;
 }
 
-static void kvm_arm_configure_vcpu_regs(ARMCPU *cpu)
+/*
+ * Apply the user-requested overrides for the number of breakpoints,
+ * watchpoints and PMU counters.
+ *
+ * These settings are one-shot in KVM. ID register writes are rejected after
+ * the VM has run, while KVM_ARM_VCPU_PMU_V3_SET_NR_COUNTERS is rejected once
+ * KVM_ARM_VCPU_PMU_V3_INIT has created the PMU. kvm_arm_reset_vcpu() runs on
+ * every guest reset, so only configure them on the first one.
+ */
+static bool kvm_arm_configure_vcpu_regs(ARMCPU *cpu)
 {
-    kvm_arm_configure_aa64dfr0(cpu);
-    kvm_arm_configure_pmcr(cpu);
+    if (cpu->kvm_vcpu_regs_configured) {
+        return true;
+    }
+
+    if (!kvm_arm_configure_aa64dfr0(cpu) || !kvm_arm_configure_pmcr(cpu)) {
+        return false;
+    }
+
+    cpu->kvm_vcpu_regs_configured = true;
+    return true;
 }
 
 /**
@@ -1210,7 +1291,15 @@ void kvm_arm_reset_vcpu(ARMCPU *cpu)
     /*
      * Before loading the KVM values into CPUState, update the KVM configuration
      */
-    kvm_arm_configure_vcpu_regs(cpu);
+    if (!kvm_arm_configure_vcpu_regs(cpu)) {
+        /*
+         * The individual helpers have already reported what went wrong.  This
+         * is a configuration failure rather than an internal inconsistency,
+         * so exit cleanly instead of dumping core.
+         */
+        error_report("Failed to apply the requested vCPU configuration");
+        exit(1);
+    }
 
     if (!write_kvmstate_to_list(cpu)) {
         fprintf(stderr, "write_kvmstate_to_list failed\n");
@@ -2028,17 +2117,17 @@ void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
 
 bool kvm_arm_aarch32_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
 }
 
 bool kvm_arm_el2_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
 }
 
 bool kvm_arm_mte_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
 }
 
 QEMU_BUILD_BUG_ON(KVM_ARM64_SVE_VQ_MIN != 1);

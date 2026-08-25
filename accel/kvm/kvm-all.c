@@ -2701,6 +2701,14 @@ static int do_kvm_create_vm(KVMState *s, int type)
             error_printf("PPC KVM module is not loaded. Try modprobe kvm_%s.\n",
                          (type == 2) ? "pr" : "hv");
         }
+#elif defined(TARGET_AARCH64)
+        if (ret == -EINVAL &&
+            (type & KVM_VM_TYPE_ARM_MASK) == KVM_VM_TYPE_ARM_REALM &&
+            KVM_VM_TYPE_ARM_IPA_SIZE(type)) {
+            error_printf("The requested Realm IPA size (%u bits) may exceed "
+                         "the RMM S2SZ limit.\n",
+                         (unsigned int)KVM_VM_TYPE_ARM_IPA_SIZE(type));
+        }
 #endif
     }
 
