@@ -270,6 +270,12 @@ static bool virt_machine_is_confidential(VirtMachineState *vms)
     return MACHINE(vms)->cgs;
 }
 
+static bool virt_dtb_randomness_enabled(VirtMachineState *vms)
+{
+    return vms->dtb_randomness &&
+           (vms->dtb_randomness_set || !virt_machine_is_confidential(vms));
+}
+
 static void create_randomness(MachineState *ms, const char *node)
 {
     struct {
@@ -314,9 +320,7 @@ static void create_fdt(VirtMachineState *vms)
      * Including random data in the DTB causes random intial measurement on CCA,
      * so disable it for confidential VMs.
      */
-    if (vms->dtb_randomness == ON_OFF_AUTO_OFF ||
-        (vms->dtb_randomness == ON_OFF_AUTO_AUTO &&
-         virt_machine_is_confidential(vms))) {
+    if (!virt_dtb_randomness_enabled(vms)) {
         dtb_randomness = false;
     }
 
@@ -2983,21 +2987,19 @@ static void virt_set_virtio_transports(Object *obj, Visitor *v,
     vms->virtio_transports = transports;
 }
 
-static void virt_get_dtb_randomness(Object *obj, Visitor *v, const char *name,
-                                    void *opaque, Error **errp)
+static bool virt_get_dtb_randomness(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
-    OnOffAuto dtb_randomness = vms->dtb_randomness;
 
-    visit_type_OnOffAuto(v, name, &dtb_randomness, errp);
+    return virt_dtb_randomness_enabled(vms);
 }
 
-static void virt_set_dtb_randomness(Object *obj, Visitor *v, const char *name,
-                                    void *opaque, Error **errp)
+static void virt_set_dtb_randomness(Object *obj, bool value, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
-    visit_type_OnOffAuto(v, name, &vms->dtb_randomness, errp);
+    vms->dtb_randomness = value;
+    vms->dtb_randomness_set = true;
 }
 
 static char *virt_get_oem_id(Object *obj, Error **errp)
@@ -3785,16 +3787,16 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "Set MSI settings. "
                                           "Valid values are auto, gicv2m, its and off");
 
-    object_class_property_add(oc, "dtb-randomness", "OnOffAuto",
-                              virt_get_dtb_randomness, virt_set_dtb_randomness,
-                              NULL, NULL);
+    object_class_property_add_bool(oc, "dtb-randomness",
+                                   virt_get_dtb_randomness,
+                                   virt_set_dtb_randomness);
     object_class_property_set_description(oc, "dtb-randomness",
                                           "Set off to disable passing random or "
                                           "non-deterministic dtb nodes to guest");
 
-    object_class_property_add(oc, "dtb-kaslr-seed", "OnOffAuto",
-                              virt_get_dtb_randomness, virt_set_dtb_randomness,
-                              NULL, NULL);
+    object_class_property_add_bool(oc, "dtb-kaslr-seed",
+                                   virt_get_dtb_randomness,
+                                   virt_set_dtb_randomness);
     object_class_property_set_description(oc, "dtb-kaslr-seed",
                                           "Deprecated synonym of dtb-randomness");
 
@@ -3864,6 +3866,9 @@ static void virt_instance_init(Object *obj)
 
     /* MTE is disabled by default.  */
     vms->mte = false;
+
+    /* Supply kaslr-seed and rng-seed by default. */
+    vms->dtb_randomness = true;
 
     vms->irqmap = a15irqmap;
 
