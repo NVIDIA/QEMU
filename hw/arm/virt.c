@@ -62,6 +62,7 @@
 #include "hw/pci-host/gpex.h"
 #include "hw/pci-bridge/pci_expander_bridge.h"
 #include "hw/virtio/virtio-pci.h"
+#include "hw/virtio/virtio-mmio.h"
 #include "hw/core/sysbus-fdt.h"
 #include "hw/core/platform-bus.h"
 #include "hw/core/qdev-properties.h"
@@ -1206,6 +1207,7 @@ static void create_gpio_devices(const VirtMachineState *vms, int gpio,
 
 static void create_virtio_devices(const VirtMachineState *vms)
 {
+    AddressSpace *dma_as = kvm_arm_rme_get_dma_as();
     int i;
     hwaddr size = vms->memmap[VIRT_MMIO].size;
     MachineState *ms = MACHINE(vms);
@@ -1240,9 +1242,18 @@ static void create_virtio_devices(const VirtMachineState *vms)
     for (i = 0; i < vms->virtio_transports; i++) {
         int irq = vms->irqmap[VIRT_MMIO] + i;
         hwaddr base = vms->memmap[VIRT_MMIO].base + i * size;
+        DeviceState *dev = qdev_new(TYPE_VIRTIO_MMIO);
+        SysBusDevice *s = SYS_BUS_DEVICE(dev);
 
-        sysbus_create_simple("virtio-mmio", base,
-                             qdev_get_gpio_in(vms->gic, irq));
+        if (dma_as) {
+            /* Legacy virtio-mmio cannot negotiate IOMMU_PLATFORM. */
+            qdev_prop_set_bit(dev, "force-legacy", false);
+            virtio_mmio_set_dma_as(dev, dma_as);
+        }
+
+        sysbus_realize_and_unref(s, &error_fatal);
+        sysbus_mmio_map(s, 0, base);
+        sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
     }
 
     /* We add dtb nodes in reverse order so that they appear in the finished
@@ -1748,6 +1759,12 @@ static void create_pcie(VirtMachineState *vms)
     pci->bypass_iommu = vms->default_bus_bypass_iommu;
     vms->bus = pci->bus;
     if (vms->bus) {
+        /*
+         * Some PCI devices query their IOMMU address space while they are
+         * realized. Install the Realm DMA address-space selector before
+         * creating even the default NIC so every endpoint sees it.
+         */
+        kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
         pci_init_nic_devices(pci->bus, mc->default_nic);
     }
 
@@ -2407,6 +2424,18 @@ static void machvirt_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
+    if (virt_machine_is_confidential(vms) && vms->iommu != VIRT_IOMMU_NONE) {
+        error_report("guest IOMMUs are not supported for Realm VMs");
+        exit(EXIT_FAILURE);
+    }
+
+    if (virt_machine_is_confidential(vms) &&
+        vms->default_bus_bypass_iommu) {
+        error_report("default-bus-bypass-iommu is not supported for Realm "
+                     "VMs");
+        exit(EXIT_FAILURE);
+    }
+
     possible_cpus = mc->possible_cpu_arch_ids(machine);
 
     /*
@@ -2726,7 +2755,8 @@ static void machvirt_init(MachineState *machine)
      */
     create_virtio_devices(vms);
 
-    vms->fw_cfg = create_fw_cfg(vms, &address_space_memory);
+    vms->fw_cfg = create_fw_cfg(vms, kvm_arm_rme_get_dma_as() ?:
+                                     &address_space_memory);
     rom_set_fw(vms->fw_cfg);
 
     create_platform_bus(vms);
@@ -2742,8 +2772,6 @@ static void machvirt_init(MachineState *machine)
                                arm_virt_nvdimm_acpi_dsmio,
                                vms->fw_cfg, OBJECT(vms));
     }
-
-    kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
 
     vms->bootinfo.ram_size = machine->ram_size;
     vms->bootinfo.board_id = -1;
@@ -3312,6 +3340,13 @@ static void virt_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
                                             DeviceState *dev, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(hotplug_dev);
+
+    if (virt_machine_is_confidential(vms) &&
+        (object_dynamic_cast(OBJECT(dev), TYPE_VIRTIO_IOMMU_PCI) ||
+         object_dynamic_cast(OBJECT(dev), TYPE_ARM_SMMUV3))) {
+        error_setg(errp, "guest IOMMUs are not supported for Realm VMs");
+        return;
+    }
 
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         virt_memory_pre_plug(hotplug_dev, dev, errp);
