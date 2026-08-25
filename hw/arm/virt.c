@@ -1764,7 +1764,7 @@ static void create_pcie(VirtMachineState *vms)
          * realized. Install the Realm DMA address-space selector before
          * creating even the default NIC so every endpoint sees it.
          */
-        kvm_arm_rme_init_gpa_space(vms->highest_gpa, vms->bus);
+        kvm_arm_rme_init_gpa_space(vms->rme_ipa_bits, vms->bus);
         pci_init_nic_devices(pci->bus, mc->default_nic);
     }
 
@@ -3588,7 +3588,12 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
     /* we freeze the memory map to compute the highest gpa */
     virt_set_memmap(vms, max_vm_pa_size);
 
-    requested_pa_size = 64 - clz64(vms->highest_gpa) + rme_reserve_bit;
+    if (ms->cgs) {
+        /* Keep the Realm shared IPA bit stable across PCI layout changes. */
+        requested_pa_size = max_vm_pa_size + rme_reserve_bit;
+    } else {
+        requested_pa_size = 64 - clz64(vms->highest_gpa);
+    }
 
     /*
      * KVM requires the IPA size to be at least 32 bits.
@@ -3604,6 +3609,9 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
                      requested_pa_size, max_vm_pa_size + rme_reserve_bit);
         return -1;
     }
+
+    vms->rme_ipa_bits = ms->cgs ? requested_pa_size : 0;
+
     /*
      * Return the requested PA log size unless KVM only supports the implicit
      * legacy 40-bit IPA setting. In that case, leave the IPA-size bits clear
