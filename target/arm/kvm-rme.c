@@ -54,7 +54,9 @@ typedef struct {
 struct RmeGuest {
     ConfidentialGuestSupport parent_obj;
     Notifier rom_load_notifier;
+    VMChangeStateEntry *vm_state_handler;
     GSList *ram_regions;
+    bool rom_load_notifier_registered;
     bool activated;
     uint8_t ipa_bits;
 
@@ -66,7 +68,17 @@ OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(RmeGuest, rme_guest, RME_GUEST,
                                           CONFIDENTIAL_GUEST_SUPPORT,
                                           { TYPE_USER_CREATABLE }, { })
 
-static RmeGuest *rme_guest;
+static RmeGuest *rme_get_machine_guest(void)
+{
+    MachineState *machine = MACHINE(qdev_get_machine());
+
+    if (!machine->cgs ||
+        !object_dynamic_cast(OBJECT(machine->cgs), TYPE_RME_GUEST)) {
+        return NULL;
+    }
+
+    return RME_GUEST(machine->cgs);
+}
 
 static int rme_populate_range(const RmeRamRegion *region, bool measure,
                               Error **errp)
@@ -137,19 +149,20 @@ static void rme_populate_ram_region(gpointer data, gpointer err)
 
 static void rme_vm_state_change(void *opaque, bool running, RunState state)
 {
+    RmeGuest *guest = opaque;
     Error *errp = NULL;
 
-    if (!running || rme_guest->activated) {
+    if (!running || guest->activated) {
         return;
     }
 
-    g_slist_foreach(rme_guest->ram_regions, rme_populate_ram_region, &errp);
-    g_slist_free_full(g_steal_pointer(&rme_guest->ram_regions), g_free);
+    g_slist_foreach(guest->ram_regions, rme_populate_ram_region, &errp);
+    g_slist_free_full(g_steal_pointer(&guest->ram_regions), g_free);
     if (errp) {
         return;
     }
 
-    rme_guest->activated = true;
+    guest->activated = true;
     kvm_mark_guest_state_protected();
 }
 
@@ -164,6 +177,7 @@ static gint rme_compare_ram_regions(gconstpointer a, gconstpointer b)
 
 static void rme_rom_load_notify(Notifier *notifier, void *data)
 {
+    RmeGuest *guest = container_of(notifier, RmeGuest, rom_load_notifier);
     RmeRamRegion *region;
     RomLoaderNotifyData *rom = data;
 
@@ -186,9 +200,8 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
      * initialize and populate the RAM regions. To help a verifier
      * independently calculate the RIM, sort regions by GPA.
      */
-    rme_guest->ram_regions = g_slist_insert_sorted(rme_guest->ram_regions,
-                                                   region,
-                                                   rme_compare_ram_regions);
+    guest->ram_regions = g_slist_insert_sorted(guest->ram_regions, region,
+                                               rme_compare_ram_regions);
 }
 
 #define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
@@ -247,12 +260,9 @@ static unsigned int kvm_arm_rme_get_cap(void)
 
 static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
 {
+    RmeGuest *guest = RME_GUEST(cgs);
     KVMState *s = KVM_STATE(current_accel());
     static Error *rme_mig_blocker;
-
-    if (!rme_guest) {
-        return 0;
-    }
 
     if (!kvm_vm_check_extension(s, kvm_arm_rme_get_cap())) {
         error_setg(errp, "VM doesn't support Realms");
@@ -262,14 +272,16 @@ static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
     error_setg(&rme_mig_blocker, "RME: migration is not implemented");
     migrate_add_blocker(&rme_mig_blocker, &error_fatal);
 
-    rme_guest->rom_load_notifier.notify = rme_rom_load_notify;
-    rom_add_load_notifier(&rme_guest->rom_load_notifier);
+    guest->rom_load_notifier.notify = rme_rom_load_notify;
+    rom_add_load_notifier(&guest->rom_load_notifier);
+    guest->rom_load_notifier_registered = true;
 
     /*
      * The realm activation is done last, when the VM starts, after all images
      * have been loaded and all vcpus finalized.
      */
-    qemu_add_vm_change_state_handler(rme_vm_state_change, NULL);
+    guest->vm_state_handler =
+        qemu_add_vm_change_state_handler(rme_vm_state_change, guest);
 
     cgs->require_guest_memfd = true;
     cgs->ready = true;
@@ -278,7 +290,7 @@ static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
 
 void kvm_arm_rme_vcpu_init(ARMCPU *cpu)
 {
-    if (!rme_guest) {
+    if (!rme_get_machine_guest()) {
         return;
     }
 
@@ -294,21 +306,27 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
 
 static void rme_guest_init(Object *obj)
 {
-    if (rme_guest) {
-        error_report("a single instance of RmeGuest is supported");
-        exit(1);
-    }
-    rme_guest = RME_GUEST(obj);
 }
 
 static void rme_guest_finalize(Object *obj)
 {
+    RmeGuest *guest = RME_GUEST(obj);
+
+    if (guest->rom_load_notifier_registered) {
+        notifier_remove(&guest->rom_load_notifier);
+    }
+    if (guest->vm_state_handler) {
+        qemu_del_vm_change_state_handler(guest->vm_state_handler);
+    }
+    g_slist_free_full(guest->ram_regions, g_free);
 }
 
 static AddressSpace *rme_dma_get_address_space(PCIBus *bus, void *opaque,
                                                int devfn)
 {
-    return &rme_guest->dma_as;
+    RmeGuest *guest = opaque;
+
+    return &guest->dma_as;
 }
 
 static const PCIIOMMUOps rme_dma_ops = {
@@ -317,10 +335,11 @@ static const PCIIOMMUOps rme_dma_ops = {
 
 void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
 {
+    RmeGuest *guest = rme_get_machine_guest();
     RealmDmaRegion *dma_region;
     const unsigned int ipa_bits = 64 - clz64(highest_gpa) + 1;
 
-    if (!rme_guest) {
+    if (!guest) {
         return;
     }
 
@@ -333,14 +352,21 @@ void kvm_arm_rme_init_gpa_space(hwaddr highest_gpa, PCIBus *pci_bus)
     dma_region = g_new0(RealmDmaRegion, 1);
 
     memory_region_init_iommu(dma_region, sizeof(*dma_region),
-                             TYPE_REALM_DMA_REGION, OBJECT(rme_guest),
+                             TYPE_REALM_DMA_REGION, OBJECT(guest),
                              "realm-dma-region", 1ULL << ipa_bits);
-    address_space_init(&rme_guest->dma_as, MEMORY_REGION(dma_region),
+    address_space_init(&guest->dma_as, MEMORY_REGION(dma_region),
                        TYPE_REALM_DMA_REGION);
-    rme_guest->dma_region = dma_region;
-    rme_guest->ipa_bits = ipa_bits;
+    guest->dma_region = dma_region;
+    guest->ipa_bits = ipa_bits;
 
-    pci_setup_iommu(pci_bus, &rme_dma_ops, NULL);
+    pci_setup_iommu(pci_bus, &rme_dma_ops, guest);
+}
+
+AddressSpace *kvm_arm_rme_get_dma_as(void)
+{
+    RmeGuest *guest = rme_get_machine_guest();
+
+    return guest && guest->dma_region ? &guest->dma_as : NULL;
 }
 
 static void realm_dma_region_init(Object *obj)
@@ -352,7 +378,9 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
                                                 IOMMUAccessFlags flag,
                                                 int iommu_idx)
 {
-    const hwaddr address_mask = MAKE_64BIT_MASK(0, rme_guest->ipa_bits - 1);
+    RmeGuest *guest = RME_GUEST(memory_region_owner(MEMORY_REGION(mr)));
+    const hwaddr shared_bit = 1ULL << (guest->ipa_bits - 1);
+    const hwaddr address_mask = shared_bit - 1;
     IOMMUTLBEntry entry = {
         .target_as = &address_space_memory,
         .iova = addr,
@@ -365,6 +393,11 @@ static IOMMUTLBEntry realm_dma_region_translate(IOMMUMemoryRegion *mr,
          * address, preventing vhost from finding the correct memory region.
          */
         .addr_mask = 4 * KiB - 1,
+        /*
+         * Firmware can use the canonical IPA for a page that it has made
+         * shared with the RMM, while Linux DMA addresses carry shared_bit.
+         * Both forms refer to the same host-visible RAM alias.
+         */
         .perm = IOMMU_RW,
     };
 
