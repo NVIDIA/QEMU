@@ -18,6 +18,17 @@
 #define KVM_ARM_VGIC_V2   (1 << 0)
 #define KVM_ARM_VGIC_V3   (1 << 1)
 
+/*
+ * Keep the machine model independent of host Linux headers. These values
+ * mirror KVM_VM_TYPE_ARM_NORMAL and KVM_VM_TYPE_ARM_REALM.
+ */
+#define QEMU_KVM_ARM_VM_TYPE_SHIFT 8
+#define QEMU_KVM_ARM_VM_TYPE(type) \
+    (((type) << QEMU_KVM_ARM_VM_TYPE_SHIFT) & \
+     (0xfULL << QEMU_KVM_ARM_VM_TYPE_SHIFT))
+#define QEMU_KVM_ARM_VM_TYPE_NORMAL QEMU_KVM_ARM_VM_TYPE(0)
+#define QEMU_KVM_ARM_VM_TYPE_REALM  QEMU_KVM_ARM_VM_TYPE(1)
+
 /**
  * kvm_arm_register_device:
  * @mr: memory region for this device

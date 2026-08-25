@@ -1116,6 +1116,7 @@ S: Supported
 F: hw/arm/virt*
 F: include/hw/arm/virt.h
 F: docs/system/arm/virt.rst
+F: tests/qtest/arm-virt-machine-test.c
 F: tests/functional/aarch64/test_*virt*.py
 F: tests/functional/aarch64/test_tuxrun.py
 F: tests/functional/arm/test_tuxrun.py
