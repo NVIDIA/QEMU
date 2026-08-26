@@ -345,9 +345,9 @@ ssize_t rom_add_option(const char *file, int32_t bootindex);
 typedef struct RomLoaderNotifyData {
     /* Address of the blob in guest memory */
     hwaddr addr;
-    /* Length of the blob */
+    /* Length of the blob, including any zero-filled tail */
     size_t len;
-    /* Blog data */
+    /* Blob data, valid only for the duration of the notification */
     uint8_t *data;
 } RomLoaderNotifyData;
 

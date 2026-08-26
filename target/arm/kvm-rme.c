@@ -80,59 +80,90 @@ static RmeGuest *rme_get_machine_guest(void)
     return RME_GUEST(machine->cgs);
 }
 
+static void rme_ram_region_free(gpointer opaque)
+{
+    RmeRamRegion *region = opaque;
+
+    qemu_vfree(region->data);
+    g_free(region);
+}
+
+static uint8_t *rme_alloc_page_buffer(hwaddr size, Error **errp)
+{
+    size_t buffer_size = size;
+    uint8_t *buffer;
+
+    if (buffer_size != size) {
+        error_setg(errp, "Realm population range is too large");
+        return NULL;
+    }
+
+    buffer = qemu_try_memalign(RME_PAGE_SIZE, buffer_size);
+    if (!buffer) {
+        error_setg_errno(errp, ENOMEM,
+                         "failed to allocate Realm population buffer");
+        return NULL;
+    }
+    memset(buffer, 0, buffer_size);
+    return buffer;
+}
+
 static int rme_populate_range(const RmeRamRegion *region, bool measure,
                               Error **errp)
 {
+    const hwaddr end = region->base + region->size;
+    struct kvm_arm_rmi_populate populate_args = {
+        .base = region->base,
+        .size = region->size,
+        .source_uaddr = (uintptr_t)region->data,
+        .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
+    };
     int ret;
-    void *buffer;
-    hwaddr size = region->size;
-    hwaddr base = region->base;
-    hwaddr start = QEMU_ALIGN_DOWN(base, RME_PAGE_SIZE);
-    hwaddr end = QEMU_ALIGN_UP(base + size, RME_PAGE_SIZE);
-    struct kvm_arm_rmi_populate populate_args;
-    size_t aligned_size = ROUND_UP(region->size, qemu_real_host_page_size());
 
-    if (!region->data) {
-        return -ENODEV;
+    if (!QEMU_IS_ALIGNED(region->base, RME_PAGE_SIZE) ||
+        !QEMU_IS_ALIGNED(region->size, RME_PAGE_SIZE) ||
+        !QEMU_PTR_IS_ALIGNED(region->data, RME_PAGE_SIZE)) {
+        error_setg(errp,
+                   "Realm range [0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx
+                   ") is not page-aligned",
+                   region->base, end);
+        return -EINVAL;
     }
 
-    ret = kvm_set_memory_attributes_private(start, end - start);
+    /*
+     * Keep KVM's attributes, QEMU's RamDiscardManager state, and the shared
+     * host mapping synchronized before handing the private copy to KVM.
+     */
+    ret = kvm_convert_memory(region->base, region->size, true);
     if (ret) {
-        error_report("RME: failed to configure initial"
-                     "private guest memory");
+        error_setg_errno(errp, -ret,
+                         "failed to configure private Realm range "
+                         "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                         region->base, end);
         return ret;
     }
 
-    /* Allocate page-aligned memory */
-    buffer = qemu_memalign(qemu_real_host_page_size(), aligned_size);
-
-    if (!buffer) {
-        return -ENOMEM;
-    }
-
-    memset(buffer, 0, aligned_size);
-    memcpy(buffer, region->data, region->size);
-
-    populate_args = (struct kvm_arm_rmi_populate) {
-        .base = start,
-        .size = end - start,
-        .source_uaddr = (uintptr_t)buffer,
-        .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
-    };
-
     while (populate_args.size > 0) {
+        hwaddr size = populate_args.size;
+
         ret = kvm_vm_ioctl(kvm_state, KVM_ARM_RMI_POPULATE, &populate_args, 0);
         if (ret) {
             error_setg_errno(errp, -ret,
-                "failed to populate realm [0x%"HWADDR_PRIx", 0x%"HWADDR_PRIx")",
-                start, end);
-            break;
+                             "failed to populate Realm "
+                             "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                             region->base, end);
+            return ret;
+        }
+        if (populate_args.size >= size) {
+            error_setg(errp,
+                       "KVM made no progress populating Realm range "
+                       "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                       region->base, end);
+            return -EIO;
         }
     }
 
-    qemu_vfree(buffer);
-
-    return ret;
+    return 0;
 }
 
 static void rme_populate_ram_region(gpointer data, gpointer err)
@@ -147,6 +178,92 @@ static void rme_populate_ram_region(gpointer data, gpointer err)
     rme_populate_range(region, /* measure */ true, errp);
 }
 
+static bool rme_coalesce_ram_regions(RmeGuest *guest, Error **errp)
+{
+    GSList *regions = g_steal_pointer(&guest->ram_regions);
+    GSList *result = NULL;
+    RmeRamRegion *merged = NULL;
+    hwaddr previous_end = 0;
+    bool have_previous = false;
+
+    while (regions) {
+        GSList *node = regions;
+        RmeRamRegion *region = node->data;
+        RmeRamRegion *new_region;
+        uint8_t *new_data;
+        hwaddr region_end;
+        hwaddr start;
+        hwaddr end;
+
+        regions = regions->next;
+        g_slist_free_1(node);
+
+        if (region->size > HWADDR_MAX - region->base) {
+            error_setg(errp, "Realm image at 0x%" HWADDR_PRIx
+                       " is too large", region->base);
+            goto error;
+        }
+        region_end = region->base + region->size;
+        if (region_end > HWADDR_MAX - (RME_PAGE_SIZE - 1)) {
+            error_setg(errp, "Realm image at 0x%" HWADDR_PRIx
+                       " cannot be page-aligned", region->base);
+            goto error;
+        }
+        if (have_previous && region->base < previous_end) {
+            error_setg(errp, "overlapping Realm images at GPA 0x%"
+                       HWADDR_PRIx, region->base);
+            goto error;
+        }
+
+        start = QEMU_ALIGN_DOWN(region->base, RME_PAGE_SIZE);
+        end = QEMU_ALIGN_UP(region_end, RME_PAGE_SIZE);
+
+        if (merged && start <= merged->base + merged->size) {
+            hwaddr merged_end = merged->base + merged->size;
+
+            if (end > merged_end) {
+                new_data = rme_alloc_page_buffer(end - merged->base, errp);
+                if (!new_data) {
+                    goto error;
+                }
+                memcpy(new_data, merged->data, merged->size);
+                qemu_vfree(merged->data);
+                merged->data = new_data;
+                merged->size = end - merged->base;
+            }
+            memcpy(merged->data + (region->base - merged->base),
+                   region->data, region->size);
+        } else {
+            new_region = g_new0(RmeRamRegion, 1);
+            new_region->base = start;
+            new_region->size = end - start;
+            new_region->data = rme_alloc_page_buffer(new_region->size, errp);
+            if (!new_region->data) {
+                g_free(new_region);
+                goto error;
+            }
+            memcpy(new_region->data + (region->base - start),
+                   region->data, region->size);
+            result = g_slist_append(result, new_region);
+            merged = new_region;
+        }
+
+        previous_end = region_end;
+        have_previous = true;
+        rme_ram_region_free(region);
+        continue;
+
+error:
+        rme_ram_region_free(region);
+        g_slist_free_full(regions, rme_ram_region_free);
+        g_slist_free_full(result, rme_ram_region_free);
+        return false;
+    }
+
+    guest->ram_regions = result;
+    return true;
+}
+
 static void rme_vm_state_change(void *opaque, bool running, RunState state)
 {
     RmeGuest *guest = opaque;
@@ -156,13 +273,21 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
         return;
     }
 
-    g_slist_foreach(guest->ram_regions, rme_populate_ram_region, &errp);
-    g_slist_free_full(g_steal_pointer(&guest->ram_regions), g_free);
+    if (rme_coalesce_ram_regions(guest, &errp)) {
+        g_slist_foreach(guest->ram_regions, rme_populate_ram_region, &errp);
+    }
+    g_slist_free_full(g_steal_pointer(&guest->ram_regions),
+                      rme_ram_region_free);
     if (errp) {
-        return;
+        error_report_err(errp);
+        exit(EXIT_FAILURE);
     }
 
     guest->activated = true;
+    if (guest->rom_load_notifier_registered) {
+        notifier_remove(&guest->rom_load_notifier);
+        guest->rom_load_notifier_registered = false;
+    }
     kvm_mark_guest_state_protected();
 }
 
@@ -171,15 +296,23 @@ static gint rme_compare_ram_regions(gconstpointer a, gconstpointer b)
     const RmeRamRegion *ra = a;
     const RmeRamRegion *rb = b;
 
-    g_assert(ra->base != rb->base);
+    if (ra->base == rb->base) {
+        return 0;
+    }
     return ra->base < rb->base ? -1 : 1;
 }
 
 static void rme_rom_load_notify(Notifier *notifier, void *data)
 {
     RmeGuest *guest = container_of(notifier, RmeGuest, rom_load_notifier);
+    GSList *entry;
     RmeRamRegion *region;
     RomLoaderNotifyData *rom = data;
+    uint8_t *copy;
+
+    if (guest->activated) {
+        return;
+    }
 
     if (rom->addr == -1) {
         /*
@@ -189,11 +322,46 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
          */
         return;
     }
+    if (!rom->len) {
+        return;
+    }
+    if (!rom->data) {
+        error_report("Realm image at 0x%" HWADDR_PRIx " has no data",
+                     rom->addr);
+        exit(EXIT_FAILURE);
+    }
+    if (rom->len > HWADDR_MAX - rom->addr) {
+        error_report("Realm image at 0x%" HWADDR_PRIx " is too large",
+                     rom->addr);
+        exit(EXIT_FAILURE);
+    }
+
+    copy = qemu_try_memalign(RME_PAGE_SIZE, rom->len);
+    if (!copy) {
+        error_report("failed to copy Realm image at 0x%" HWADDR_PRIx,
+                     rom->addr);
+        exit(EXIT_FAILURE);
+    }
+    memcpy(copy, rom->data, rom->len);
+
+    /*
+     * rom_reset() notifies listeners on every reset. Before the Realm is
+     * activated, replace a previous snapshot of the same ROM instead of
+     * adding a duplicate which would later look like an overlapping image.
+     */
+    for (entry = guest->ram_regions; entry; entry = entry->next) {
+        region = entry->data;
+        if (region->base == rom->addr && region->size == rom->len) {
+            qemu_vfree(region->data);
+            region->data = copy;
+            return;
+        }
+    }
 
     region = g_new0(RmeRamRegion, 1);
     region->base = rom->addr;
     region->size = rom->len;
-    region->data = rom->data;
+    region->data = copy;
 
     /*
      * The Realm Initial Measurement (RIM) depends on the order in which we
@@ -318,7 +486,7 @@ static void rme_guest_finalize(Object *obj)
     if (guest->vm_state_handler) {
         qemu_del_vm_change_state_handler(guest->vm_state_handler);
     }
-    g_slist_free_full(guest->ram_regions, g_free);
+    g_slist_free_full(guest->ram_regions, rme_ram_region_free);
 }
 
 static AddressSpace *rme_dma_get_address_space(PCIBus *bus, void *opaque,
