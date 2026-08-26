@@ -1252,6 +1252,8 @@ static void rom_reset(void *unused)
     RomLoaderNotifyData notify;
 
     QTAILQ_FOREACH(rom, &roms, next) {
+        uint8_t *notify_data = rom->data;
+
         if (rom->fw_file) {
             continue;
         }
@@ -1285,10 +1287,6 @@ static void rom_reset(void *unused)
                               rom->romsize - rom->datasize,
                               MEMTXATTRS_UNSPECIFIED);
         }
-        if (rom->isrom) {
-            /* rom needs to be written only once */
-            rom_free_data(rom);
-        }
         /*
          * The rom loader is really on the same level as firmware in the guest
          * shadowing a ROM into RAM. Such a shadowing mechanism needs to ensure
@@ -1299,12 +1297,26 @@ static void rom_reset(void *unused)
 
         trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
 
-        notify = (RomLoaderNotifyData) {
-            .addr = rom->addr,
-            .len = rom->datasize,
-            .data = rom->data,
-        };
-        notifier_list_notify(&rom_loader_notifier, &notify);
+        if (!notifier_list_empty(&rom_loader_notifier)) {
+            if (rom->romsize > rom->datasize) {
+                notify_data = g_malloc0(rom->romsize);
+                memcpy(notify_data, rom->data, rom->datasize);
+            }
+            notify = (RomLoaderNotifyData) {
+                .addr = rom->addr,
+                .len = rom->romsize,
+                .data = notify_data,
+            };
+            notifier_list_notify(&rom_loader_notifier, &notify);
+            if (notify_data != rom->data) {
+                g_free(notify_data);
+            }
+        }
+
+        if (rom->isrom) {
+            /* rom needs to be written only once */
+            rom_free_data(rom);
+        }
     }
 }
 
