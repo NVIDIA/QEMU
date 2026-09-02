@@ -481,6 +481,25 @@ typedef struct PCIIOMMUOps {
      */
     void (*unset_iommu_device)(PCIBus *bus, void *opaque, int devfn);
     /**
+     * @set_ats: update the IOMMU state for a PCI ATS control change
+     *
+     * Optional callback.
+     *
+     * @bus: the #PCIBus of the PCI device.
+     *
+     * @opaque: the data passed to pci_setup_iommu().
+     *
+     * @devfn: device and function number of the PCI device.
+     *
+     * @enabled: whether ATS is enabled in the PCI configuration space.
+     *
+     * @errp: pass an Error out only when return false.
+     *
+     * Returns: true if the IOMMU state was updated, otherwise false.
+     */
+    bool (*set_ats)(PCIBus *bus, void *opaque, int devfn, bool enabled,
+                    Error **errp);
+    /**
      * @get_viommu_flags: get vIOMMU flags
      *
      * Optional callback, if not implemented, then vIOMMU doesn't support
@@ -750,6 +769,7 @@ bool pci_device_set_iommu_device(PCIDevice *dev, HostIOMMUDevice *hiod,
                                  Error **errp);
 void pci_device_unset_iommu_device(PCIDevice *dev);
 bool pci_device_iommu_msi_direct_gpa(PCIDevice *dev, hwaddr *out_doorbell);
+bool pci_device_set_ats(PCIDevice *dev, bool enabled, Error **errp);
 
 /**
  * pci_device_get_viommu_flags: get vIOMMU flags.

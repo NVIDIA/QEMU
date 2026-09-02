@@ -3094,6 +3094,19 @@ void pci_device_unset_iommu_device(PCIDevice *dev)
     }
 }
 
+bool pci_device_set_ats(PCIDevice *dev, bool enabled, Error **errp)
+{
+    PCIBus *iommu_bus;
+
+    pci_device_get_iommu_bus_devfn(dev, &iommu_bus, NULL, NULL);
+    if (iommu_bus && iommu_bus->iommu_ops->set_ats) {
+        return iommu_bus->iommu_ops->set_ats(pci_get_bus(dev),
+                                             iommu_bus->iommu_opaque,
+                                             dev->devfn, enabled, errp);
+    }
+    return true;
+}
+
 uint64_t pci_device_get_viommu_flags(PCIDevice *dev)
 {
     PCIBus *iommu_bus;
