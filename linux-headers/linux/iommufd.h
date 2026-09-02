@@ -438,6 +438,16 @@ struct iommu_hwpt_vtd_s1 {
 };
 
 /**
+ * enum iommu_hwpt_arm_smmuv3_flags - ARM SMMUv3 nested STE flags
+ * @IOMMU_HWPT_ARM_SMMUV3_FLAGS_BYPASS_EATS_VALID: The EATS field in @ste
+ *                                                 controls ATS when Cfg is
+ *                                                 bypass
+ */
+enum iommu_hwpt_arm_smmuv3_flags {
+	IOMMU_HWPT_ARM_SMMUV3_FLAGS_BYPASS_EATS_VALID = 1 << 0,
+};
+
+/**
  * struct iommu_hwpt_arm_smmuv3 - ARM SMMUv3 nested STE
  *                                (IOMMU_HWPT_DATA_ARM_SMMUV3)
  *
@@ -446,6 +456,7 @@ struct iommu_hwpt_vtd_s1 {
  *       Allowed fields: (Refer to "5.2 Stream Table Entry" in SMMUv3 HW Spec)
  *       - word-0: V, Cfg, S1Fmt, S1ContextPtr, S1CDMax
  *       - word-1: EATS, S1DSS, S1CIR, S1COR, S1CSH, S1STALLD
+ * @flags: Combination of enum iommu_hwpt_arm_smmuv3_flags
  *
  * -EIO will be returned if @ste is not legal or contains any non-allowed field.
  * Cfg can be used to select a S1, Bypass or Abort configuration. A Bypass
@@ -465,6 +476,7 @@ struct iommu_hwpt_vtd_s1 {
  */
 struct iommu_hwpt_arm_smmuv3 {
 	__aligned_le64 ste[2];
+	__aligned_u64 flags;
 };
 
 /**
