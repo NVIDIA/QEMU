@@ -47,7 +47,9 @@ typedef struct SMMURealmViommu {
     IOMMUFDViommu core;
     /* Number of devices sharing a PSMMU-only vIOMMU */
     unsigned int users;
-    /* Devices sharing a vIOMMU that describes a vSMMU */
+    /* Bypass HWPTs and devices of a vIOMMU that describes a vSMMU */
+    uint32_t bypass_hwpt_id;
+    uint32_t bypass_ats_hwpt_id;
     QLIST_HEAD(, SMMUv3RealmDevice) device_list;
 } SMMURealmViommu;
 
