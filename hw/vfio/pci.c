@@ -1442,7 +1442,11 @@ void vfio_pci_write_config(PCIDevice *pdev,
 {
     VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(pdev);
     VFIODevice *vbasedev = &vdev->vbasedev;
+    bool ats_write = pdev->exp.ats_cap &&
+        ranges_overlap(addr, len, pdev->exp.ats_cap + PCI_ATS_CTRL, 2);
+    bool ats_was_enabled = pcie_ats_enabled(pdev);
     uint32_t val_le = cpu_to_le32(val);
+    Error *err = NULL;
     int ret;
 
     trace_vfio_pci_write_config(vdev->vbasedev.name, addr, val, len);
@@ -1514,6 +1518,23 @@ void vfio_pci_write_config(PCIDevice *pdev,
     } else {
         /* Write everything to QEMU to keep emulated bits correct */
         pci_default_write_config(pdev, addr, val, len);
+    }
+
+    if (ats_write && ats_was_enabled != pcie_ats_enabled(pdev) &&
+        !pci_device_set_ats(pdev, pcie_ats_enabled(pdev), &err)) {
+        error_reportf_err(err, "%s: failed to update IOMMU ATS state: ",
+                          vbasedev->name);
+        /*
+         * Restore the enable bit to match the IOMMU, so the guest can read the
+         * real state and a repeated write retries the transition.
+         */
+        if (ats_was_enabled) {
+            pci_word_test_and_set_mask(pdev->config + pdev->exp.ats_cap +
+                                       PCI_ATS_CTRL, PCI_ATS_CTRL_ENABLE);
+        } else {
+            pci_word_test_and_clear_mask(pdev->config + pdev->exp.ats_cap +
+                                         PCI_ATS_CTRL, PCI_ATS_CTRL_ENABLE);
+        }
     }
 }
 
@@ -2675,6 +2696,16 @@ static void vfio_add_ext_cap(VFIOPCIDevice *vdev)
             if (!vfio_setup_rebar_ecap(vdev, next)) {
                 pcie_add_capability(pdev, cap_id, cap_ver, next, size);
             }
+            break;
+        case PCI_EXT_CAP_ID_ATS:
+            pcie_add_capability(pdev, cap_id, cap_ver, next, size);
+            pdev->exp.ats_cap = next;
+            vfio_add_emulated_word(vdev, next + PCI_ATS_CTRL, 0,
+                                   PCI_ATS_CTRL_ENABLE |
+                                   PCI_ATS_CTRL_STU(0x1f));
+            pci_word_test_and_set_mask(pdev->wmask + next + PCI_ATS_CTRL,
+                                       PCI_ATS_CTRL_ENABLE |
+                                       PCI_ATS_CTRL_STU(0x1f));
             break;
         /*
          * VFIO kernel does not expose the PASID CAP today. We may synthesize
