@@ -10,3 +10,9 @@ GICCapabilityList *qmp_query_gic_capabilities(Error **errp)
     error_setg(errp, "GIC hardware is not available on this target");
     return NULL;
 }
+
+CcaCapability *qmp_query_cca_capabilities(Error **errp)
+{
+    error_setg(errp, "CCA is not available on this target");
+    return NULL;
+}
