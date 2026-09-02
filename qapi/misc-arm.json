@@ -89,3 +89,47 @@
 ##
 { 'enum': 'OasMode',
   'data': [ 'auto', '32', '36', '40', '42', '44', '48', '52', '56' ] }
+
+##
+# @CcaMeasurementAlgo:
+#
+# A measurement algorithm supported by Arm CCA.
+#
+# @measurement-algo: name of the measurement algorithm
+#
+# Since: 11.0
+##
+{ 'struct': 'CcaMeasurementAlgo',
+  'data': { 'measurement-algo': 'str' } }
+
+##
+# @CcaCapability:
+#
+# Capabilities reported for Arm CCA.
+#
+# @sections: supported measurement algorithms
+#
+# Since: 11.0
+##
+{ 'struct': 'CcaCapability',
+  'data': { 'sections': ['CcaMeasurementAlgo'] } }
+
+##
+# @query-cca-capabilities:
+#
+# Report Arm CCA capabilities.  This command is available on Arm
+# system emulators.  It reports an error when KVM does not advertise
+# Realm support.
+#
+# Returns: the Arm CCA capabilities
+#
+# Since: 11.0
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-cca-capabilities" }
+#     <- { "return": { "sections": [
+#              { "measurement-algo": "sha256" }
+#          ] } }
+##
+{ 'command': 'query-cca-capabilities', 'returns': 'CcaCapability' }

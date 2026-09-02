@@ -228,3 +228,30 @@ CpuDefinitionInfoList *qmp_query_cpu_definitions(Error **errp)
 
     return cpu_list;
 }
+
+CcaCapability *qmp_query_cca_capabilities(Error **errp)
+{
+    CcaMeasurementAlgoList *head = NULL;
+    CcaMeasurementAlgoList **tail = &head;
+    CcaCapability *info;
+    CcaMeasurementAlgo *malgo;
+
+    if (!kvm_enabled()) {
+        error_setg(errp, "KVM is not enabled");
+        return NULL;
+    }
+
+    if (!kvm_arm_rme_available()) {
+        error_setg(errp, "RME is not enabled in KVM");
+        return NULL;
+    }
+
+    /* KVM currently creates Realms using SHA-256. */
+    malgo = g_new0(CcaMeasurementAlgo, 1);
+    malgo->measurement_algo = g_strdup("sha256");
+    QAPI_LIST_APPEND(tail, malgo);
+
+    info = g_new0(CcaCapability, 1);
+    info->sections = head;
+    return info;
+}

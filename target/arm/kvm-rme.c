@@ -426,13 +426,18 @@ static unsigned int kvm_arm_rme_get_cap(void)
     return rme_cap;
 }
 
+bool kvm_arm_rme_available(void)
+{
+    return kvm_enabled() &&
+           kvm_vm_check_extension(kvm_state, kvm_arm_rme_get_cap());
+}
+
 static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
 {
     RmeGuest *guest = RME_GUEST(cgs);
-    KVMState *s = KVM_STATE(current_accel());
     static Error *rme_mig_blocker;
 
-    if (!kvm_vm_check_extension(s, kvm_arm_rme_get_cap())) {
+    if (!kvm_arm_rme_available()) {
         error_setg(errp, "VM doesn't support Realms");
         return -ENODEV;
     }

@@ -252,6 +252,13 @@ void arm_gic_cap_kvm_probe(GICCapability *v2, GICCapability *v3);
 char *kvm_print_register_name(uint64_t regidx);
 
 /**
+ * kvm_arm_rme_available:
+ *
+ * Return whether the current KVM VM supports Arm Realms.
+ */
+bool kvm_arm_rme_available(void);
+
+/**
  * kvm_arm_rme_vcpu_init
  * @cs: the CPU
  *
