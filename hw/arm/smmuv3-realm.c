@@ -20,6 +20,7 @@
 
 #define SMMU_STE_VALID      (1ULL << 0)
 #define SMMU_STE_CFG_BYPASS (1ULL << 3)
+#define SMMU_STE_EATS_TRANS (1ULL << 28)
 
 void smmuv3_realm_idr_override(SMMUv3State *s)
 {
@@ -62,6 +63,13 @@ smmuv3_realm_viommu_alloc(HostIOMMUDeviceIOMMUFD *hiodi, void *data,
 
 static void smmuv3_realm_viommu_free(SMMURealmViommu *viommu)
 {
+    if (viommu->bypass_ats_hwpt_id) {
+        iommufd_backend_free_id(viommu->core.iommufd,
+                                viommu->bypass_ats_hwpt_id);
+    }
+    if (viommu->bypass_hwpt_id) {
+        iommufd_backend_free_id(viommu->core.iommufd, viommu->bypass_hwpt_id);
+    }
     iommufd_backend_free_id(viommu->core.iommufd, viommu->core.viommu_id);
     g_free(viommu);
 }
@@ -192,6 +200,41 @@ static SMMUv3RealmDevice *smmuv3_realm_find_dev(SMMUState *bs, PCIBus *bus,
  * Devices behind a Realm vSMMU all share one vIOMMU that describes the vSMMU to
  * the kernel. The first device allocates it on top of its nesting parent HWPT.
  */
+/*
+ * Allocate a pair of bypass HWPTs that set the EATS field in the STE explicitly
+ * per the ATS state of the device that the guest sees, as the guest must issue
+ * ATC invalidations for an enabled ATS. Otherwise, the bypass STE is identical
+ * to the one of the nesting parent HWPT.
+ */
+static bool smmuv3_realm_viommu_alloc_bypass(SMMURealmViommu *viommu,
+                                             HostIOMMUDeviceIOMMUFD *hiodi,
+                                             Error **errp)
+{
+    struct iommu_hwpt_arm_smmuv3 bypass_data = {
+        .ste = { SMMU_STE_CFG_BYPASS | SMMU_STE_VALID, 0x0ULL },
+        .flags = IOMMU_HWPT_ARM_SMMUV3_FLAGS_BYPASS_EATS_VALID,
+    };
+    struct iommu_hwpt_arm_smmuv3 bypass_ats_data = {
+        .ste = {
+            SMMU_STE_CFG_BYPASS | SMMU_STE_VALID,
+            SMMU_STE_EATS_TRANS,
+        },
+        .flags = IOMMU_HWPT_ARM_SMMUV3_FLAGS_BYPASS_EATS_VALID,
+    };
+
+    return iommufd_backend_alloc_hwpt(hiodi->iommufd, hiodi->devid,
+                                      viommu->core.viommu_id, 0,
+                                      IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                      sizeof(bypass_data), &bypass_data,
+                                      &viommu->bypass_hwpt_id, errp) &&
+           iommufd_backend_alloc_hwpt(hiodi->iommufd, hiodi->devid,
+                                      viommu->core.viommu_id, 0,
+                                      IOMMU_HWPT_DATA_ARM_SMMUV3,
+                                      sizeof(bypass_ats_data),
+                                      &bypass_ats_data,
+                                      &viommu->bypass_ats_hwpt_id, errp);
+}
+
 static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
                                          Error **errp)
 {
@@ -219,7 +262,24 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
         if (!viommu) {
             return false;
         }
+        if (!smmuv3_realm_viommu_alloc_bypass(viommu, hiodi, errp)) {
+            smmuv3_realm_viommu_free(viommu);
+            return false;
+        }
         realm->viommu = viommu;
+    }
+
+    /*
+     * The guest cannot have enabled ATS yet, since this runs at VM start or at
+     * a hotplug. smmuv3_realm_set_ats() switches the bypass HWPT later on.
+     */
+    if (!host_iommu_device_iommufd_attach_hwpt(hiodi, viommu->bypass_hwpt_id,
+                                               errp)) {
+        if (QLIST_EMPTY(&viommu->device_list)) {
+            smmuv3_realm_viommu_free(viommu);
+            realm->viommu = NULL;
+        }
+        return false;
     }
 
     realm_dev->viommu = viommu;
@@ -230,10 +290,17 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
 static void smmuv3_realm_dev_put_viommu(SMMUv3RealmDevice *realm_dev)
 {
     SMMUv3State *s = ARM_SMMUV3(realm_dev->sdev.smmu);
+    HostIOMMUDeviceIOMMUFD *hiodi = realm_dev->hiodi;
     SMMURealmViommu *viommu = realm_dev->viommu;
 
     if (!viommu) {
         return;
+    }
+
+    /* Detach the device from the bypass HWPT before it might be freed */
+    if (!host_iommu_device_iommufd_attach_hwpt(hiodi, hiodi->hwpt_id, NULL)) {
+        error_report("Unable to attach device 0x%x to its default HWPT",
+                     smmu_get_sid(&realm_dev->sdev));
     }
 
     QLIST_REMOVE(realm_dev, next);
@@ -309,6 +376,30 @@ static bool smmuv3_realm_alloc_viommu(PCIBus *bus, void *opaque, int devfn,
 
     *viommu_id = realm_dev->viommu->core.viommu_id;
     return true;
+}
+
+static bool smmuv3_realm_set_ats(PCIBus *bus, void *opaque, int devfn,
+                                 bool enabled, Error **errp)
+{
+    SMMUv3RealmDevice *realm_dev = smmuv3_realm_find_dev(opaque, bus, devfn);
+    SMMURealmViommu *viommu;
+    uint32_t hwpt_id;
+
+    if (!realm_dev || !realm_dev->hiodi || !realm_dev->viommu) {
+        error_setg(errp, "Device 0x%x has no Realm vIOMMU",
+                   PCI_BUILD_BDF(pci_bus_num(bus), devfn));
+        return false;
+    }
+
+    viommu = realm_dev->viommu;
+    if (enabled) {
+        hwpt_id = viommu->bypass_ats_hwpt_id;
+    } else {
+        hwpt_id = viommu->bypass_hwpt_id;
+    }
+
+    return host_iommu_device_iommufd_attach_hwpt(realm_dev->hiodi, hwpt_id,
+                                                  errp);
 }
 
 static void smmuv3_realm_free_viommu(PCIBus *bus, void *opaque, int devfn,
@@ -417,6 +508,7 @@ static const PCIIOMMUOps smmuv3_realm_ops = {
     .set_iommu_device = smmuv3_realm_set_iommu_device,
     .unset_iommu_device = smmuv3_realm_unset_iommu_device,
     .get_msi_direct_gpa = smmuv3_realm_get_msi_gpa,
+    .set_ats = smmuv3_realm_set_ats,
 };
 
 bool smmuv3_realm_init(SMMUv3State *s, Error **errp)
