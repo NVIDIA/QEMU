@@ -1665,6 +1665,12 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
     ram_start_offset = memory_region_get_ram_addr(mr) + mr_offset;
 
     if (!add) {
+        bool clear_attrs =
+            machine_has_assigned_device_memory(current_machine) &&
+            memory_region_is_ram_device(mr) &&
+            (kvm_supported_memory_attributes &
+             KVM_MEMORY_ATTRIBUTE_PRIVATE);
+
         do {
             slot_size = MIN(kvm_max_slot_size, size);
             mem = kvm_lookup_matching_slot(kml, start_addr, slot_size);
@@ -1707,6 +1713,23 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
                 fprintf(stderr, "%s: error unregistering slot: %s\n",
                         __func__, strerror(-err));
                 abort();
+            }
+            /*
+             * Drop any VDEV-installed PRIVATE attributes for this slot. The
+             * mem_attr_array is per-VM and persists across slot lifecycle,
+             * so without this clear a re-mapped or recycled gfn range could
+             * inherit stale VDEV-locked state. The attribute-clear also
+             * tears down any leftover ASSIGNED-DEV S2 entries via
+             * kvm_arch_post_set_memory_attributes() / kvm_unmap_gfn_range().
+             */
+            if (clear_attrs) {
+                if (kvm_set_memory_attributes_shared(start_addr, slot_size)) {
+                    error_report("failed to clear memory attributes while "
+                                 "removing slot [0x%" HWADDR_PRIx
+                                 ", 0x%" HWADDR_PRIx ")",
+                                 start_addr, start_addr + slot_size);
+                    exit(EXIT_FAILURE);
+                }
             }
             start_addr += slot_size;
             size -= slot_size;
@@ -3394,16 +3417,42 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
 
     if (!memory_region_has_guest_memfd(mr)) {
         /*
-         * Because vMMIO region must be shared, guest TD may convert vMMIO
-         * region to shared explicitly.  Don't complain such case.  See
+         * Because vMMIO region may be shared, guest TD may convert vMMIO
+         * region to shared explicitly. Don't complain such case. See
          * memory_region_type() for checking if the region is MMIO region.
          */
         if (!to_private &&
-            !memory_region_is_ram(mr) &&
-            !memory_region_is_ram_device(mr) &&
+            (!memory_region_is_ram(mr) ||
+             (machine_has_assigned_device_memory(current_machine) &&
+              memory_region_is_ram_device(mr))) &&
             !memory_region_is_rom(mr) &&
             !memory_region_is_romd(mr)) {
-            ret = 0;
+            /*
+             * For ram_device regions (e.g. VFIO BARs), the realm may
+             * have marked individual gfns PRIVATE through
+             * iommufd_tsm_dev_memmap_exit() when validating a VDEV
+             * mapping. When the realm later asks to release the
+             * mapping with RSI_IPA_STATE_SET(EMPTY), the kernel
+             * surfaces it here as a !to_private convert. A silent
+             * ret=0 would leave PRIVATE set with no DEV mapping
+             * behind it; honour the release by actually clearing the
+             * attribute. The kvm_arch_post_set_memory_attributes()
+             * side-effect then tears down any leftover ASSIGNED-DEV
+             * S2 via kvm_unmap_gfn_range(KVM_FILTER_PRIVATE), keeping
+             * userspace's view in sync with the kernel's.
+             *
+             * For the non-ram_device legs of this branch (e.g. TDX
+             * vMMIO traps) no PRIVATE attribute was ever installed,
+             * so preserve the original ret=0 fast path.
+             */
+            if (machine_has_assigned_device_memory(current_machine) &&
+                memory_region_is_ram_device(mr) &&
+                (kvm_supported_memory_attributes &
+                 KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+                ret = kvm_set_memory_attributes_shared(start, size);
+            } else {
+                ret = 0;
+            }
         } else {
             error_report("Convert non guest_memfd backed memory region "
                         "(0x%"HWADDR_PRIx" ,+ 0x%"HWADDR_PRIx") to %s",

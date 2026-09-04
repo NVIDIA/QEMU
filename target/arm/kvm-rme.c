@@ -457,6 +457,7 @@ static int kvm_arm_rme_init(ConfidentialGuestSupport *cgs, Error **errp)
         qemu_add_vm_change_state_handler(rme_vm_state_change, guest);
 
     cgs->require_guest_memfd = true;
+    cgs->assigned_device_memory = true;
     cgs->ready = true;
     return 0;
 }
