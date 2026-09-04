@@ -3385,6 +3385,13 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
         return ret;
     }
 
+    if (!int128_eq(section.size, int128_make64(size))) {
+        error_report("Convert memory range (0x%" HWADDR_PRIx
+                     " + 0x%" HWADDR_PRIx ") crosses a memory-region "
+                     "boundary", start, size);
+        goto out_unref;
+    }
+
     if (!memory_region_has_guest_memfd(mr)) {
         /*
          * Because vMMIO region must be shared, guest TD may convert vMMIO
