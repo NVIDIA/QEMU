@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia-unstable9-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: hw/arm/tegra241-cmdqv: Keep VINTF page0 region alive
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 04 Sep 2026 16:39:23 -0500
+
 qemu (1:11.0.0+nvidia-unstable8-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: system/memory: Make ram device region directly accessible
