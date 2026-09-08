@@ -30,6 +30,7 @@
 #include "system/memory.h"
 #include "qemu/xxhash.h"
 #include "migration.h"
+#include "hw/core/boards.h"
 
 /*
  * total_dirty_pages is procted by BQL and is used
@@ -803,6 +804,18 @@ void qmp_calc_dirty_rate(int64_t calc_time,
         }
     } else {
         sample_pages = DIRTYRATE_DEFAULT_SAMPLE_PAGES;
+    }
+
+    if (mode == DIRTY_RATE_MEASURE_MODE_PAGE_SAMPLING) {
+        /*
+         * Private in-place pages are inaccessible through the host mapping.
+         * Checking page attributes before sampling would race conversions.
+         */
+        if (machine_require_guest_memfd_convert_in_place(current_machine)) {
+            error_setg(errp, "Page sampling is unsupported for "
+                       "in-place confidential memory");
+            return;
+        }
     }
 
     /*
