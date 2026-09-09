@@ -1,3 +1,16 @@
+qemu (1:11.0.0+nvidia7-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: pcie/acs: Make ACS Control read-only to guests
+  * NVIDIA: SAUCE: Expose ACS caps on Guest as configured by the HYP
+  * NVIDIA: SAUCE: xio3130_downstream: Add ACS support for downstream PCIe ports
+  * NVIDIA: SAUCE: hw/arm: GB300 workaround for GPU BAR1 GPA=HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 workaround for GPU BAR1 HPA
+  * NVIDIA: SAUCE: hw/arm: GB200 DirectNIC GPA=HPA
+  * NVIDIA: SAUCE: hw/vfio: thread vf-token through iommufd bind
+  * NVIDIA: SAUCE: hw/arm/tegra241-cmdqv: Keep VINTF page0 region alive
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Wed, 09 Sep 2026 09:47:36 -0500
+
 qemu (1:11.0.0+nvidia6-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: system/memory: Make ram device region directly accessible
