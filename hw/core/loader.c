@@ -986,6 +986,8 @@ struct Rom {
     char *fw_file;
     GMappedFile *mapped_file;
 
+    /* Valid ROM data may have zero length and therefore a NULL pointer. */
+    bool data_available;
     bool committed;
 
     hwaddr addr;
@@ -1009,6 +1011,7 @@ static void rom_free_data(Rom *rom)
     }
 
     rom->data = NULL;
+    rom->data_available = false;
 }
 
 static void rom_free(Rom *rom)
@@ -1040,6 +1043,7 @@ static void rom_insert(Rom *rom)
         rom->as = &address_space_memory;
     }
 
+    rom->data_available = true;
     rom->committed = false;
 
     /* List is ordered by load address in the same address space */
@@ -1252,8 +1256,6 @@ static void rom_reset(void *unused)
     RomLoaderNotifyData notify;
 
     QTAILQ_FOREACH(rom, &roms, next) {
-        uint8_t *notify_data = rom->data;
-
         if (rom->fw_file) {
             continue;
         }
@@ -1263,7 +1265,7 @@ static void rom_reset(void *unused)
          * that some of those RAMs can actually be modified by the guest.
          */
         if (runstate_check(RUN_STATE_INMIGRATE)) {
-            if (rom->data && rom->isrom) {
+            if (rom->data_available && rom->isrom) {
                 /*
                  * Free it so that a rom_reset after migration doesn't
                  * overwrite a potentially modified 'rom'.
@@ -1273,19 +1275,30 @@ static void rom_reset(void *unused)
             continue;
         }
 
-        if (rom->data == NULL) {
+        if (!rom->data_available) {
             continue;
         }
         if (rom->mr) {
             void *host = memory_region_get_ram_ptr(rom->mr);
-            memcpy(host, rom->data, rom->datasize);
-            memset(host + rom->datasize, 0, rom->romsize - rom->datasize);
+
+            if (rom->datasize) {
+                memcpy(host, rom->data, rom->datasize);
+            }
+            if (rom->romsize > rom->datasize) {
+                memset(host + rom->datasize, 0,
+                       rom->romsize - rom->datasize);
+            }
         } else {
-            address_space_write_rom(rom->as, rom->addr, MEMTXATTRS_UNSPECIFIED,
-                                    rom->data, rom->datasize);
-            address_space_set(rom->as, rom->addr + rom->datasize, 0,
-                              rom->romsize - rom->datasize,
-                              MEMTXATTRS_UNSPECIFIED);
+            if (rom->datasize) {
+                address_space_write_rom(rom->as, rom->addr,
+                                        MEMTXATTRS_UNSPECIFIED,
+                                        rom->data, rom->datasize);
+            }
+            if (rom->romsize > rom->datasize) {
+                address_space_set(rom->as, rom->addr + rom->datasize, 0,
+                                  rom->romsize - rom->datasize,
+                                  MEMTXATTRS_UNSPECIFIED);
+            }
         }
         /*
          * The rom loader is really on the same level as firmware in the guest
@@ -1298,19 +1311,13 @@ static void rom_reset(void *unused)
         trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
 
         if (!notifier_list_empty(&rom_loader_notifier)) {
-            if (rom->romsize > rom->datasize) {
-                notify_data = g_malloc0(rom->romsize);
-                memcpy(notify_data, rom->data, rom->datasize);
-            }
             notify = (RomLoaderNotifyData) {
                 .addr = rom->addr,
                 .len = rom->romsize,
-                .data = notify_data,
+                .data_len = rom->datasize,
+                .data = rom->data,
             };
             notifier_list_notify(&rom_loader_notifier, &notify);
-            if (notify_data != rom->data) {
-                g_free(notify_data);
-            }
         }
 
         if (rom->isrom) {

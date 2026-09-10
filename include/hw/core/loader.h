@@ -347,7 +347,9 @@ typedef struct RomLoaderNotifyData {
     hwaddr addr;
     /* Length of the blob, including any zero-filled tail */
     size_t len;
-    /* Blob data, valid only for the duration of the notification */
+    /* Length of the data physically present in @data */
+    size_t data_len;
+    /* File-backed data, valid only for the duration of the notification */
     uint8_t *data;
 } RomLoaderNotifyData;
 
