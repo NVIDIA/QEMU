@@ -46,12 +46,15 @@
      RHI_DA_FEATURE_VDEV_GET_MEASUREMENT |                           \
      RHI_DA_FEATURE_VDEV_SET_TDI_STATE)
 
+#define RHI_DA_VERSION                         SMC_RHI_CALL(0x004a)
 #define RHI_DA_FEATURES                        SMC_RHI_CALL(0x004b)
 #define RHI_DA_OBJECT_SIZE                     SMC_RHI_CALL(0x004c)
 #define RHI_DA_OBJECT_READ                     SMC_RHI_CALL(0x004d)
 #define RHI_DA_VDEV_GET_MEASUREMENTS           SMC_RHI_CALL(0x0052)
 #define RHI_DA_VDEV_GET_INTERFACE_REPORT       SMC_RHI_CALL(0x0053)
 #define RHI_DA_VDEV_SET_TDI_STATE              SMC_RHI_CALL(0x0054)
+
+#define RHI_DA_VERSION_1_0                     0x10000
 
 #define SMCCC_RET_NOT_SUPPORTED                -1
 
