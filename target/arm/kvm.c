@@ -611,7 +611,7 @@ int kvm_arch_get_default_type(MachineState *ms)
  * RHI device-assignment hypercalls live in the SMCCC Standard Hypervisor
  * range and must be forwarded to userspace. Each entry covers a block of
  * consecutive function IDs (.nr_functions is the count of IDs starting at
- * .base): RHI_DA_FEATURES/OBJECT_SIZE/OBJECT_READ (0x4B..0x4D) and
+ * .base): RHI_DA_VERSION/FEATURES/OBJECT_SIZE/OBJECT_READ (0x4A..0x4D) and
  * RHI_DA_VDEV_GET_MEASUREMENTS/GET_INTERFACE_REPORT/SET_TDI_STATE
  * (0x52..0x54).
  */
@@ -622,8 +622,8 @@ static struct kvm_smccc_filter rhi_da_smccc_filters[] = {
         .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
     },
     {
-        .base         = RHI_DA_FEATURES,
-        .nr_functions = 0x3,
+        .base         = RHI_DA_VERSION,
+        .nr_functions = 0x4,
         .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
     },
 };
@@ -1943,6 +1943,13 @@ static int handle_da_vdev_set_tdi_state(SmcccCall *call)
     return 0;
 }
 
+static int handle_da_version(SmcccCall *call)
+{
+    call->out[0] = RHI_DA_VERSION_1_0;
+
+    return 0;
+}
+
 static int handle_da_features(SmcccCall *call)
 {
     call->out[0] = RHI_DA_BASE_FEATURE;
@@ -1991,12 +1998,11 @@ static int handle_da_object_read(SmcccCall *call)
     uint64_t max_len = call->in[4];
     uint64_t offset = call->in[5];
     g_autofree uint8_t *object_data = NULL;
+    AddressSpace *as = rhi_guest_buffer_as();
+    hwaddr destination;
     uint32_t object_size;
-    uint32_t copy_len;
     uint32_t resp_len = 0;
     uint32_t guest_rid;
-    void *hva;
-    hwaddr written = 0;
     int ret;
 
     if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
@@ -2029,14 +2035,16 @@ static int handle_da_object_read(SmcccCall *call)
         call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
         return 0;
     }
-    if (offset >= object_size) {
+    if (offset > max_len || object_size > max_len - offset) {
         call->out[0] = RHI_DA_ERROR_INVALID_OFFSET;
         return 0;
     }
-
-    copy_len = MIN(max_len, object_size - offset);
-    hva = rhi_map_guest_buffer(guest_ipa, copy_len, true);
-    if (!hva) {
+    if (offset > HWADDR_MAX - guest_ipa) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+    destination = guest_ipa + offset;
+    if (!rhi_guest_buffer_is_ram(as, destination, object_size, true)) {
         call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
         return 0;
     }
@@ -2044,7 +2052,7 @@ static int handle_da_object_read(SmcccCall *call)
     object_data = g_try_malloc0(object_size);
     if (!object_data) {
         call->out[0] = RHI_DA_ERROR_DEVICE;
-        goto out_unmap;
+        return 0;
     }
 
     /*
@@ -2055,10 +2063,16 @@ static int handle_da_object_read(SmcccCall *call)
     ret = iommufd_tsm_da_object_read(guest_rid, object_type, 0, object_data,
                                      object_size, &resp_len);
     if (!ret && resp_len == object_size) {
-        memcpy(hva, object_data + offset, copy_len);
-        call->out[0] = RHI_DA_SUCCESS;
-        call->out[1] = copy_len;
-        written = copy_len;
+        MemTxResult txret;
+
+        txret = address_space_write(as, destination, MEMTXATTRS_UNSPECIFIED,
+                                    object_data, object_size);
+        if (txret == MEMTX_OK) {
+            call->out[0] = RHI_DA_SUCCESS;
+            call->out[1] = object_size;
+        } else {
+            call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        }
     } else if (!ret) {
         call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
     } else if (ret == -EFAULT) {
@@ -2070,9 +2084,6 @@ static int handle_da_object_read(SmcccCall *call)
     } else {
         call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
     }
-
-out_unmap:
-    rhi_unmap_guest_buffer(hva, copy_len, true, written);
     return 0;
 }
 
@@ -2146,6 +2157,8 @@ static int handle_std_hyp_call(SmcccCall *call)
     memset(call->out, 0, sizeof(call->out));
 
     switch (call->fn) {
+    case RHI_DA_VERSION:
+        return handle_da_version(call);
     case RHI_DA_FEATURES:
         return handle_da_features(call);
     case RHI_DA_OBJECT_SIZE:
