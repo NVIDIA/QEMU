@@ -48,6 +48,7 @@ OBJECT_DEFINE_SIMPLE_TYPE(RealmDmaRegion, realm_dma_region,
 typedef struct {
     hwaddr base;
     hwaddr size;
+    size_t data_size;
     uint8_t *data;
 } RmeRamRegion;
 
@@ -317,9 +318,12 @@ static bool rme_coalesce_ram_regions(RmeGuest *guest, Error **errp)
                 qemu_vfree(merged->data);
                 merged->data = new_data;
                 merged->size = end - merged->base;
+                merged->data_size = merged->size;
             }
-            memcpy(merged->data + (region->base - merged->base),
-                   region->data, region->size);
+            if (region->data_size) {
+                memcpy(merged->data + (region->base - merged->base),
+                       region->data, region->data_size);
+            }
         } else {
             new_region = g_new0(RmeRamRegion, 1);
             new_region->base = start;
@@ -329,8 +333,11 @@ static bool rme_coalesce_ram_regions(RmeGuest *guest, Error **errp)
                 g_free(new_region);
                 goto error;
             }
-            memcpy(new_region->data + (region->base - start),
-                   region->data, region->size);
+            new_region->data_size = new_region->size;
+            if (region->data_size) {
+                memcpy(new_region->data + (region->base - start),
+                       region->data, region->data_size);
+            }
             result = g_slist_append(result, new_region);
             merged = new_region;
         }
@@ -412,7 +419,12 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
     if (!rom->len) {
         return;
     }
-    if (!rom->data) {
+    if (rom->data_len > rom->len) {
+        error_report("Realm image at 0x%" HWADDR_PRIx
+                     " has invalid data length", rom->addr);
+        exit(EXIT_FAILURE);
+    }
+    if (rom->data_len && !rom->data) {
         error_report("Realm image at 0x%" HWADDR_PRIx " has no data",
                      rom->addr);
         exit(EXIT_FAILURE);
@@ -423,13 +435,16 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
         exit(EXIT_FAILURE);
     }
 
-    copy = qemu_try_memalign(RME_PAGE_SIZE, rom->len);
-    if (!copy) {
-        error_report("failed to copy Realm image at 0x%" HWADDR_PRIx,
-                     rom->addr);
-        exit(EXIT_FAILURE);
+    copy = NULL;
+    if (rom->data_len) {
+        copy = qemu_try_memalign(RME_PAGE_SIZE, rom->data_len);
+        if (!copy) {
+            error_report("failed to copy Realm image at 0x%" HWADDR_PRIx,
+                         rom->addr);
+            exit(EXIT_FAILURE);
+        }
+        memcpy(copy, rom->data, rom->data_len);
     }
-    memcpy(copy, rom->data, rom->len);
 
     /*
      * rom_reset() notifies listeners on every reset. Before the Realm is
@@ -441,6 +456,7 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
         if (region->base == rom->addr && region->size == rom->len) {
             qemu_vfree(region->data);
             region->data = copy;
+            region->data_size = rom->data_len;
             return;
         }
     }
@@ -448,6 +464,7 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
     region = g_new0(RmeRamRegion, 1);
     region->base = rom->addr;
     region->size = rom->len;
+    region->data_size = rom->data_len;
     region->data = copy;
 
     /*
