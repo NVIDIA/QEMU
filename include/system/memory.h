@@ -490,6 +490,15 @@ struct IOMMUMemoryRegionClass {
     void (*replay)(IOMMUMemoryRegion *iommu, IOMMUNotifier *notifier);
 
     /**
+     * @require_notifier_success:
+     *
+     * The IOMMU's translation state must not diverge from mappings installed
+     * by notifier consumers. A consumer that cannot apply a MAP or UNMAP must
+     * reject device realization or stop the VM.
+     */
+    bool require_notifier_success;
+
+    /**
      * @get_attr:
      *
      * Get IOMMU misc attributes. This is an optional method that

@@ -892,4 +892,5 @@ static void realm_dma_region_class_init(ObjectClass *oc, const void *data)
 
     imrc->translate = realm_dma_region_translate;
     imrc->replay = realm_dma_region_replay;
+    imrc->require_notifier_success = true;
 }

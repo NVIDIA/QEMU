@@ -153,6 +153,31 @@ static MemoryRegion *vfio_translate_iotlb(IOMMUTLBEntry *iotlb, hwaddr *xlat_p,
     return mr;
 }
 
+static bool vfio_iommu_notify_error(VFIOGuestIOMMU *giommu, Error *err)
+{
+    VFIOContainer *bcontainer = giommu->bcontainer;
+    IOMMUMemoryRegionClass *imrc =
+        IOMMU_MEMORY_REGION_GET_CLASS(giommu->iommu_mr);
+
+    if (!imrc->require_notifier_success) {
+        return false;
+    }
+
+    error_prepend(&err, "IOMMU region %s: ",
+                  memory_region_name(MEMORY_REGION(giommu->iommu_mr)));
+    if (!bcontainer->initialized) {
+        if (!bcontainer->error) {
+            error_propagate(&bcontainer->error, err);
+        } else {
+            error_free(err);
+        }
+        return true;
+    }
+
+    error_report_err(err);
+    hw_error("vfio: IOMMU mapping update failed, unable to continue");
+}
+
 static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 {
     VFIOGuestIOMMU *giommu = container_of(n, VFIOGuestIOMMU, n);
@@ -171,6 +196,9 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
         error_setg(&local_err,
                    "Wrong target AS \"%s\", only system memory is allowed",
                    iotlb->target_as->name ? iotlb->target_as->name : "none");
+        if (vfio_iommu_notify_error(giommu, local_err)) {
+            return;
+        }
         if (migration_is_running()) {
             migration_file_set_error(-EINVAL, local_err);
         } else {
@@ -186,7 +214,9 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 
         mr = vfio_translate_iotlb(iotlb, &xlat, &local_err);
         if (!mr) {
-            error_report_err(local_err);
+            if (!vfio_iommu_notify_error(giommu, local_err)) {
+                error_report_err(local_err);
+            }
             goto out;
         }
         vaddr = memory_region_get_ram_ptr(mr) + xlat;
@@ -203,10 +233,14 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
                                      iotlb->addr_mask + 1, vaddr,
                                      read_only, mr);
         if (ret) {
-            error_report("vfio_container_dma_map(%p, 0x%"HWADDR_PRIx", "
-                         "0x%"HWADDR_PRIx", %p) = %d (%s)",
-                         bcontainer, iova,
-                         iotlb->addr_mask + 1, vaddr, ret, strerror(-ret));
+            error_setg(&local_err,
+                       "vfio_container_dma_map(%p, 0x%" HWADDR_PRIx ", "
+                       "0x%" HWADDR_PRIx ", %p) = %d (%s)",
+                       bcontainer, iova, iotlb->addr_mask + 1, vaddr, ret,
+                       strerror(-ret));
+            if (!vfio_iommu_notify_error(giommu, local_err)) {
+                error_report_err(local_err);
+            }
         }
     } else {
         ret = vfio_container_dma_unmap(bcontainer, iova,
@@ -217,6 +251,9 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
                        "0x%"HWADDR_PRIx") = %d (%s)",
                        bcontainer, iova,
                        iotlb->addr_mask + 1, ret, strerror(-ret));
+            if (vfio_iommu_notify_error(giommu, local_err)) {
+                goto out;
+            }
             if (migration_is_running()) {
                 migration_file_set_error(ret, local_err);
             } else {
