@@ -127,19 +127,48 @@ static uint8_t *rme_alloc_page_buffer(hwaddr size, Error **errp)
     return buffer;
 }
 
+static int rme_population_chunk_size(hwaddr base, hwaddr size,
+                                     hwaddr *chunk_size, Error **errp)
+{
+    MemoryRegionSection section;
+    MemoryRegion *mr;
+
+    section = memory_region_find(get_system_memory(), base, size);
+    mr = section.mr;
+    if (!mr) {
+        error_setg(errp, "Realm population GPA 0x%" HWADDR_PRIx
+                   " is not backed by RAM", base);
+        return -EINVAL;
+    }
+
+    *chunk_size = int128_get64(section.size);
+    if (!memory_region_is_ram(mr) || !memory_region_has_guest_memfd(mr)) {
+        error_setg(errp, "Realm population GPA 0x%" HWADDR_PRIx
+                   " is not backed by guestmemfd RAM", base);
+        memory_region_unref(mr);
+        return -EINVAL;
+    }
+    memory_region_unref(mr);
+
+    if (!*chunk_size ||
+        !QEMU_IS_ALIGNED(*chunk_size, qemu_real_host_page_size())) {
+        error_setg(errp, "Realm population section at GPA 0x%" HWADDR_PRIx
+                   " is not host-page-aligned", base);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
 static int rme_populate_range(const RmeRamRegion *region, bool measure,
                               Error **errp)
 {
     const hwaddr end = region->base + region->size;
-    struct kvm_arm_rmi_populate populate_args = {
-        .base = region->base,
-        .size = region->size,
-        .source_uaddr = (uintptr_t)region->data,
-        .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
-    };
+    hwaddr offset;
     int ret;
 
-    if (!QEMU_IS_ALIGNED(region->base, RME_PAGE_SIZE) ||
+    if (region->size > HWADDR_MAX - region->base ||
+        !QEMU_IS_ALIGNED(region->base, RME_PAGE_SIZE) ||
         !QEMU_IS_ALIGNED(region->size, RME_PAGE_SIZE) ||
         !QEMU_PTR_IS_ALIGNED(region->data, RME_PAGE_SIZE)) {
         error_setg(errp,
@@ -150,36 +179,75 @@ static int rme_populate_range(const RmeRamRegion *region, bool measure,
     }
 
     /*
-     * Keep KVM's attributes, QEMU's RamDiscardManager state, and the shared
-     * host mapping synchronized before handing the private copy to KVM.
+     * Preflight every leaf before changing attributes. Guest-visible RAM can
+     * be contiguous across adjacent NUMA memory backends, but each conversion
+     * must stay within one leaf MemoryRegion.
      */
-    ret = kvm_convert_memory(region->base, region->size, true);
-    if (ret) {
-        error_setg_errno(errp, -ret,
-                         "failed to configure private Realm range "
-                         "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
-                         region->base, end);
-        return ret;
-    }
+    for (offset = 0; offset < region->size; ) {
+        hwaddr chunk_size;
 
-    while (populate_args.size > 0) {
-        hwaddr size = populate_args.size;
-
-        ret = kvm_vm_ioctl(kvm_state, KVM_ARM_RMI_POPULATE, &populate_args, 0);
+        ret = rme_population_chunk_size(region->base + offset,
+                                        region->size - offset,
+                                        &chunk_size, errp);
         if (ret) {
-            error_setg_errno(errp, -ret,
-                             "failed to populate Realm "
-                             "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
-                             region->base, end);
             return ret;
         }
-        if (populate_args.size >= size) {
-            error_setg(errp,
-                       "KVM made no progress populating Realm range "
-                       "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
-                       region->base, end);
-            return -EIO;
+        offset += chunk_size;
+    }
+
+    for (offset = 0; offset < region->size; ) {
+        struct kvm_arm_rmi_populate populate_args;
+        hwaddr chunk_size;
+
+        ret = rme_population_chunk_size(region->base + offset,
+                                        region->size - offset,
+                                        &chunk_size, errp);
+        assert(ret == 0);
+
+        /*
+         * Keep KVM's attributes, QEMU's RamDiscardManager state, and the
+         * shared host mapping synchronized before handing the private copy
+         * to KVM.
+         */
+        ret = kvm_convert_memory(region->base + offset, chunk_size, true);
+        if (ret) {
+            error_setg_errno(errp, -ret,
+                             "failed to configure private Realm range "
+                             "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                             region->base + offset,
+                             region->base + offset + chunk_size);
+            return ret;
         }
+
+        populate_args = (struct kvm_arm_rmi_populate) {
+            .base = region->base + offset,
+            .size = chunk_size,
+            .source_uaddr = (uintptr_t)region->data + offset,
+            .flags = measure ? KVM_ARM_RMI_POPULATE_FLAGS_MEASURE : 0,
+        };
+
+        while (populate_args.size > 0) {
+            hwaddr size = populate_args.size;
+
+            ret = kvm_vm_ioctl(kvm_state, KVM_ARM_RMI_POPULATE,
+                               &populate_args, 0);
+            if (ret) {
+                error_setg_errno(errp, -ret,
+                                 "failed to populate Realm "
+                                 "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                                 region->base, end);
+                return ret;
+            }
+            if (populate_args.size >= size) {
+                error_setg(errp,
+                           "KVM made no progress populating Realm range "
+                           "[0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx ")",
+                           region->base, end);
+                return -EIO;
+            }
+        }
+
+        offset += chunk_size;
     }
 
     return 0;
