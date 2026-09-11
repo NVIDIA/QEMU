@@ -475,7 +475,9 @@ ARM KVM CPUs
 M: Peter Maydell <peter.maydell@linaro.org>
 L: qemu-arm@nongnu.org
 S: Supported
+F: include/hw/arm/rme-da.h
 F: target/arm/kvm.c
+F: target/arm/kvm-rme.c
 F: tests/functional/aarch64/test_kvm.py
 
 MIPS KVM CPUs
@@ -1115,6 +1117,7 @@ S: Supported
 F: hw/arm/virt*
 F: include/hw/arm/virt.h
 F: docs/system/arm/virt.rst
+F: tests/qtest/arm-virt-machine-test.c
 F: tests/functional/aarch64/test_*virt*.py
 F: tests/functional/aarch64/test_tuxrun.py
 F: tests/functional/arm/test_tuxrun.py

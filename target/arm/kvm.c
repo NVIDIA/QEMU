@@ -18,6 +18,7 @@
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "qemu/units.h"
 #include "qom/object.h"
 #include "qapi/error.h"
 #include "system/system.h"
@@ -33,6 +34,7 @@
 #include "hw/pci/pci.h"
 #include "exec/memattrs.h"
 #include "system/address-spaces.h"
+#include "system/confidential-guest-support.h"
 #include "gdbstub/enums.h"
 #include "hw/core/boards.h"
 #include "hw/core/irq.h"
@@ -40,8 +42,12 @@
 #include "qemu/log.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/ghes.h"
+#include "hw/arm/rme-da.h"
 #include "target/arm/gtimer.h"
 #include "migration/blocker.h"
+#include "system/iommufd.h"
+
+QEMU_BUILD_BUG_ON(QEMU_KVM_ARM_VM_TYPE_REALM != KVM_VM_TYPE_ARM_REALM);
 
 const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_INFO(DEVICE_CTRL),
@@ -51,6 +57,9 @@ const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
 static bool cap_has_mp_state;
 static bool cap_has_inject_serror_esr;
 static bool cap_has_inject_ext_dabt;
+
+#define KVM_REG_ARM_ID_AA64DFR0_EL1     ARM64_SYS_REG(3, 0, 0, 5, 0)
+#define KVM_REG_ARM_PMCR_EL0            ARM64_SYS_REG(3, 3, 9, 12, 0)
 
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
@@ -107,7 +116,9 @@ bool kvm_arm_create_scratch_host_vcpu(int *fdarray,
                                       struct kvm_vcpu_init *init)
 {
     int ret = 0, kvmfd = -1, vmfd = -1, cpufd = -1;
+    MachineState *ms = MACHINE(qdev_get_machine());
     int max_vm_pa_size;
+    int vm_type;
 
     kvmfd = qemu_open_old("/dev/kvm", O_RDWR);
     if (kvmfd < 0) {
@@ -117,10 +128,18 @@ bool kvm_arm_create_scratch_host_vcpu(int *fdarray,
     if (max_vm_pa_size < 0) {
         max_vm_pa_size = 0;
     }
+
+    vm_type = (ms->cgs ? KVM_VM_TYPE_ARM_REALM : KVM_VM_TYPE_ARM_NORMAL);
     do {
-        vmfd = ioctl(kvmfd, KVM_CREATE_VM, max_vm_pa_size);
+        vmfd = ioctl(kvmfd, KVM_CREATE_VM, max_vm_pa_size | vm_type);
     } while (vmfd == -1 && errno == EINTR);
     if (vmfd < 0) {
+        if (errno == EINVAL && max_vm_pa_size &&
+            (vm_type & KVM_VM_TYPE_ARM_MASK) == KVM_VM_TYPE_ARM_REALM) {
+            error_report("KVM rejected a scratch Realm VM with a %d-bit IPA; "
+                         "the requested size may exceed the RMM S2SZ limit",
+                         max_vm_pa_size);
+        }
         goto err;
     }
 
@@ -217,8 +236,8 @@ static int read_sys_reg64(int fd, uint64_t *pret, uint64_t id)
 
 static bool kvm_arm_pauth_supported(void)
 {
-    return (kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
-            kvm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
+    return (kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
+            kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PTRAUTH_GENERIC));
 }
 
 
@@ -297,7 +316,7 @@ static bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
      * Ask for SVE if supported, so that we can query ID_AA64ZFR0,
      * which is otherwise RAZ.
      */
-    sve_supported = kvm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
+    sve_supported = kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_SVE);
     if (sve_supported) {
         init.features[0] |= 1 << KVM_ARM_VCPU_SVE;
     }
@@ -319,7 +338,7 @@ static bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
                              1 << KVM_ARM_VCPU_PTRAUTH_GENERIC);
     }
 
-    if (kvm_check_extension(kvm_state, KVM_CAP_ARM_PMU_V3)) {
+    if (kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_PMU_V3)) {
         init.features[0] |= 1 << KVM_ARM_VCPU_PMU_V3;
         pmu_supported = true;
         features |= 1ULL << ARM_FEATURE_PMU;
@@ -588,8 +607,63 @@ int kvm_arch_get_default_type(MachineState *ms)
     return fixed_ipa ? 0 : size;
 }
 
+/*
+ * RHI device-assignment hypercalls live in the SMCCC Standard Hypervisor
+ * range and must be forwarded to userspace. Each entry covers a block of
+ * consecutive function IDs (.nr_functions is the count of IDs starting at
+ * .base): RHI_DA_VERSION/FEATURES/OBJECT_SIZE/OBJECT_READ (0x4A..0x4D) and
+ * RHI_DA_VDEV_GET_MEASUREMENTS/GET_INTERFACE_REPORT/SET_TDI_STATE
+ * (0x52..0x54).
+ */
+static struct kvm_smccc_filter rhi_da_smccc_filters[] = {
+    {
+        .base         = RHI_DA_VDEV_GET_MEASUREMENTS,
+        .nr_functions = 0x3,
+        .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
+    },
+    {
+        .base         = RHI_DA_VERSION,
+        .nr_functions = 0x4,
+        .action       = KVM_SMCCC_FILTER_FWD_TO_USER,
+    },
+};
+
+/*
+ * Forward the RHI device-assignment hypercalls to userspace. Only needed for
+ * realms with assigned devices; the filter is inert for other guests, which
+ * never issue these function IDs.
+ */
+static bool kvm_arm_install_rhi_da_filter(KVMState *s)
+{
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VM_SMCCC_CTRL,
+        .attr  = KVM_ARM_VM_SMCCC_FILTER,
+    };
+    bool installed = true;
+    unsigned int i;
+
+    if (kvm_vm_ioctl(s, KVM_HAS_DEVICE_ATTR, &attr)) {
+        warn_report("KVM SMCCC filter not supported; "
+                    "RME device assignment will not work");
+        return false;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(rhi_da_smccc_filters); i++) {
+        attr.addr = (uintptr_t)&rhi_da_smccc_filters[i];
+
+        if (kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr)) {
+            warn_report("Failed to install RHI device-assignment "
+                        "SMCCC filter");
+            installed = false;
+        }
+    }
+
+    return installed;
+}
+
 int kvm_arch_init(MachineState *ms, KVMState *s)
 {
+    Error *local_err = NULL;
     int ret = 0;
     /* For ARM interrupt delivery is always asynchronous,
      * whether we are using an in-kernel VGIC or not.
@@ -604,6 +678,15 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
 
     cap_has_mp_state = kvm_check_extension(s, KVM_CAP_MP_STATE);
 
+    /* Initialize confidential guest (Realm) if needed */
+    if (ms->cgs) {
+        ret = confidential_guest_kvm_init(ms->cgs, &local_err);
+        if (ret < 0) {
+            error_report_err(local_err);
+            return ret;
+        }
+    }
+
     /* Check whether user space can specify guest syndrome value */
     cap_has_inject_serror_esr =
         kvm_check_extension(s, KVM_CAP_ARM_INJECT_SERROR_ESR);
@@ -612,10 +695,22 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         !kvm_check_extension(s, KVM_CAP_ARM_IRQ_LINE_LAYOUT_2)) {
         error_report("Using more than 256 vcpus requires a host kernel "
                      "with KVM_CAP_ARM_IRQ_LINE_LAYOUT_2");
-        ret = -EINVAL;
+        return -EINVAL;
     }
 
-    if (kvm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
+    /*
+     * KVM_CAP_ARM_NISV_TO_USER is not on the realm-ext-allowed list
+     * (kvm_realm_ext_allowed() rejects anything not relevant to
+     * confidential VMs), so KVM_ENABLE_CAP returns -EINVAL for a realm VM.
+     * The cap has no effect on realms anyway -- realm faults go through the
+     * RMM path, not the NISV-to-user path -- so skip the attempt instead of
+     * producing a spurious error_report.
+     *
+     * ms->cgs is the same realm test the series uses for the VM type and for
+     * the confidential_guest_kvm_init() call above; kvm_arm_rme_vm_type() was
+     * removed in RFC v2.
+     */
+    if (!ms->cgs && kvm_vm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_NISV_TO_USER, 0)) {
             error_report("Failed to enable KVM_CAP_ARM_NISV_TO_USER cap");
         } else {
@@ -634,24 +729,30 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
             warn_report("Eager Page Split support not available");
         } else if (!(s->kvm_eager_split_size & sizes)) {
             error_report("Eager Page Split requested chunk size not valid");
-            ret = -EINVAL;
+            return -EINVAL;
         } else {
             ret = kvm_vm_enable_cap(s, KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE, 0,
                                     s->kvm_eager_split_size);
             if (ret < 0) {
                 error_report("Enabling of Eager Page Split failed: %s",
                              strerror(-ret));
+                return ret;
             }
         }
     }
 
-    max_hw_wps = kvm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_WPS);
+    max_hw_wps = kvm_vm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_WPS);
     hw_watchpoints = g_array_sized_new(true, true,
                                        sizeof(HWWatchpoint), max_hw_wps);
 
-    max_hw_bps = kvm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_BPS);
+    max_hw_bps = kvm_vm_check_extension(s, KVM_CAP_GUEST_DEBUG_HW_BPS);
     hw_breakpoints = g_array_sized_new(true, true,
                                        sizeof(HWBreakpoint), max_hw_bps);
+
+    if (ms->cgs && !kvm_arm_install_rhi_da_filter(s)) {
+        /* CPU-only Realms remain usable, but device assignment cannot. */
+        ms->cgs->assigned_device_memory = false;
+    }
 
     return ret;
 }
@@ -801,8 +902,18 @@ static uint64_t *kvm_arm_get_cpreg_ptr(ARMCPU *cpu, uint64_t regidx)
  * cpreg list of arbitrary system registers, false if it is synchronized
  * by hand using code in kvm_arch_get/put_registers().
  */
-static bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx)
+static bool kvm_arm_reg_syncs_via_cpreg_list(ARMCPU *cpu, uint64_t regidx)
 {
+    /*
+     * Realm KVM exposes PMCR_EL0 so userspace can discover the counter
+     * count, but the Realm SET_ONE_REG allow-list does not permit writing
+     * it.  PMU configuration is handled explicitly through the PMU device
+     * attribute instead.
+     */
+    if (cpu->kvm_rme && regidx == KVM_REG_ARM_PMCR_EL0) {
+        return false;
+    }
+
     switch (regidx & KVM_REG_ARM_COPROC_MASK) {
     case KVM_REG_ARM_CORE:
     case KVM_REG_ARM64_SVE:
@@ -846,7 +957,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
     qsort(&rlp->reg, rlp->n, sizeof(rlp->reg[0]), compare_u64);
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
-        if (!kvm_arm_reg_syncs_via_cpreg_list(rlp->reg[i])) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, rlp->reg[i])) {
             continue;
         }
         switch (rlp->reg[i] & KVM_REG_SIZE_MASK) {
@@ -868,7 +979,7 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
 
     for (i = 0, arraylen = 0; i < rlp->n; i++) {
         uint64_t regidx = rlp->reg[i];
-        if (!kvm_arm_reg_syncs_via_cpreg_list(regidx)) {
+        if (!kvm_arm_reg_syncs_via_cpreg_list(cpu, regidx)) {
             continue;
         }
         cpu->cpreg_indexes[arraylen] = regidx;
@@ -888,6 +999,140 @@ static int kvm_arm_init_cpreg_list(ARMCPU *cpu)
 out:
     g_free(rlp);
     return ret;
+}
+
+static bool kvm_arm_configure_aa64dfr0(ARMCPU *cpu)
+{
+    int ret;
+    uint64_t val, newval;
+    CPUState *cs = CPU(cpu);
+
+    if (!cpu->num_bps && !cpu->num_wps) {
+        return true;
+    }
+
+    newval = cpu->isar.idregs[ID_AA64DFR0_EL1_IDX];
+    if (cpu->num_bps) {
+        uint64_t ctx_cmps = FIELD_EX64(newval, ID_AA64DFR0, CTX_CMPS);
+
+        /* CTX_CMPs is never greater than BRPs */
+        ctx_cmps = MIN(ctx_cmps, cpu->num_bps - 1);
+        newval = FIELD_DP64(newval, ID_AA64DFR0, BRPS, cpu->num_bps - 1);
+        newval = FIELD_DP64(newval, ID_AA64DFR0, CTX_CMPS, ctx_cmps);
+    }
+    if (cpu->num_wps) {
+        newval = FIELD_DP64(newval, ID_AA64DFR0, WRPS, cpu->num_wps - 1);
+    }
+    ret = kvm_set_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &newval);
+    if (ret) {
+        error_report("Failed to set KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
+    }
+
+    /*
+     * Check if the write succeeded. KVM does offer the writable mask for this
+     * register, but this way we also check if the value we wrote was sane.
+     */
+    ret = kvm_get_one_reg(cs, KVM_REG_ARM_ID_AA64DFR0_EL1, &val);
+    if (ret) {
+        error_report("Failed to get KVM_REG_ARM_ID_AA64DFR0_EL1: %s",
+                     strerror(-ret));
+        return false;
+    }
+
+    if (val != newval) {
+        error_report("Failed to update KVM_REG_ARM_ID_AA64DFR0_EL1");
+        return false;
+    }
+
+    return true;
+}
+
+static bool kvm_arm_configure_pmcr(ARMCPU *cpu)
+{
+    unsigned int nr_counters = cpu->num_pmu_ctrs;
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VCPU_PMU_V3_CTRL,
+        .attr = KVM_ARM_VCPU_PMU_V3_SET_NR_COUNTERS,
+        .addr = (uintptr_t)&nr_counters,
+    };
+    int ret;
+    uint64_t val, newval;
+    CPUState *cs = CPU(cpu);
+
+    if (cpu->num_pmu_ctrs == -1) {
+        return true;
+    }
+
+    /* An explicit zero is already satisfied when this vCPU has no PMU. */
+    if (!cpu->has_pmu && cpu->num_pmu_ctrs == 0) {
+        return true;
+    }
+
+    /*
+     * Realms restrict which registers userspace may write. Prefer the PMU
+     * device attribute, which configures the VM-wide PMCR_EL0.N value without
+     * requiring a SET_ONE_REG allow-list entry. Fall back for older kernels.
+     */
+    ret = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, &attr);
+    if (!ret) {
+        ret = kvm_vcpu_ioctl(cs, KVM_SET_DEVICE_ATTR, &attr);
+        if (ret) {
+            error_report("Failed to set number of KVM PMU counters: %s",
+                         strerror(-ret));
+            return false;
+        }
+        return true;
+    }
+
+    newval = FIELD_DP64(cpu->isar.reset_pmcr_el0, PMCR, N, cpu->num_pmu_ctrs);
+    ret = kvm_set_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &newval);
+    if (ret) {
+        error_report("Failed to set KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
+    }
+
+    /*
+     * Check if the write succeeded, since older versions of KVM ignore it.
+     */
+    ret = kvm_get_one_reg(cs, KVM_REG_ARM_PMCR_EL0, &val);
+    if (ret) {
+        error_report("Failed to get KVM_REG_ARM_PMCR_EL0: %s",
+                     strerror(-ret));
+        return false;
+    }
+
+    if (val != newval) {
+        error_report("Failed to update KVM_REG_ARM_PMCR_EL0");
+        return false;
+    }
+
+    return true;
+}
+
+/*
+ * Apply the user-requested overrides for the number of breakpoints,
+ * watchpoints and PMU counters.
+ *
+ * These settings are one-shot in KVM. ID register writes are rejected after
+ * the VM has run, while KVM_ARM_VCPU_PMU_V3_SET_NR_COUNTERS is rejected once
+ * KVM_ARM_VCPU_PMU_V3_INIT has created the PMU. kvm_arm_reset_vcpu() runs on
+ * every guest reset, so only configure them on the first one.
+ */
+static bool kvm_arm_configure_vcpu_regs(ARMCPU *cpu)
+{
+    if (cpu->kvm_vcpu_regs_configured) {
+        return true;
+    }
+
+    if (!kvm_arm_configure_aa64dfr0(cpu) || !kvm_arm_configure_pmcr(cpu)) {
+        return false;
+    }
+
+    cpu->kvm_vcpu_regs_configured = true;
+    return true;
 }
 
 /**
@@ -1106,6 +1351,20 @@ void kvm_arm_reset_vcpu(ARMCPU *cpu)
         fprintf(stderr, "kvm_arm_vcpu_init failed: %s\n", strerror(-ret));
         abort();
     }
+
+    /*
+     * Before loading the KVM values into CPUState, update the KVM configuration
+     */
+    if (!kvm_arm_configure_vcpu_regs(cpu)) {
+        /*
+         * The individual helpers have already reported what went wrong.  This
+         * is a configuration failure rather than an internal inconsistency,
+         * so exit cleanly instead of dumping core.
+         */
+        error_report("Failed to apply the requested vCPU configuration");
+        exit(1);
+    }
+
     if (!write_kvmstate_to_list(cpu)) {
         fprintf(stderr, "write_kvmstate_to_list failed\n");
         abort();
@@ -1409,6 +1668,10 @@ static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
 {
     ARMCPU *cpu = opaque;
 
+    if (kvm_guest_state_protected()) {
+        return;
+    }
+
     if (running) {
         if (cpu->kvm_adjvtime) {
             kvm_arm_put_virtual_time(cpu);
@@ -1537,6 +1800,467 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+/*
+ * The RHI device-assignment arguments below all come straight from guest
+ * registers, so every one of them has to be validated before use.
+ *
+ * A vDevice is named by a 32-bit Routing ID (segment:BDF).  Reject anything
+ * wider instead of silently truncating, which would otherwise let a guest
+ * address a device it did not name.
+ */
+static bool rhi_da_get_rid(uint64_t reg, uint32_t *rid)
+{
+    if (reg > UINT32_MAX) {
+        return false;
+    }
+    *rid = reg;
+    return true;
+}
+
+/*
+ * The address space RHI buffer IPAs are resolved in.
+ *
+ * The guest hands over an IPA, and for a buffer the host has to read or write
+ * that IPA carries the "shared" top bit.  The Realm DMA address space strips
+ * that bit and targets the host-visible RAM alias, and passes canonical
+ * addresses through unchanged, so both spellings of the same page work.
+ */
+static AddressSpace *rhi_guest_buffer_as(void)
+{
+    return kvm_arm_rme_get_dma_as() ?: &address_space_memory;
+}
+
+static bool rhi_guest_buffer_is_ram(AddressSpace *as, hwaddr addr,
+                                    hwaddr size, bool is_write)
+{
+    MemoryRegion *mr;
+    hwaddr xlat, len;
+
+    if (!size || size - 1 > HWADDR_MAX - addr) {
+        return false;
+    }
+
+    RCU_READ_LOCK_GUARD();
+    while (size > 0) {
+        len = size;
+        mr = address_space_translate(as, addr, &xlat, &len, is_write,
+                                     MEMTXATTRS_UNSPECIFIED);
+        if (!len || !memory_region_is_ram(mr)) {
+            return false;
+        }
+        size -= len;
+        addr += len;
+    }
+
+    return true;
+}
+
+/*
+ * Map a guest buffer passed to an RHI hypercall.
+ *
+ * Refuse anything that is not plain RAM: these buffers are only ever guest
+ * memory, and letting one land on an emulated device would turn a TSM
+ * response into arbitrary MMIO writes.
+ *
+ * Returns the host address of the whole range, or NULL.  On success the
+ * caller must release it with rhi_unmap_guest_buffer() and the same @len.
+ */
+static void *rhi_map_guest_buffer(uint64_t ipa, hwaddr len, bool is_write)
+{
+    AddressSpace *as = rhi_guest_buffer_as();
+    hwaddr mapped = len;
+    void *hva;
+
+    if (!rhi_guest_buffer_is_ram(as, ipa, len, is_write)) {
+        return NULL;
+    }
+
+    hva = address_space_map(as, ipa, &mapped, is_write, MEMTXATTRS_UNSPECIFIED);
+    if (!hva) {
+        return NULL;
+    }
+    if (mapped != len) {
+        address_space_unmap(as, hva, mapped, is_write, 0);
+        return NULL;
+    }
+
+    return hva;
+}
+
+static void rhi_unmap_guest_buffer(void *hva, hwaddr len, bool is_write,
+                                   hwaddr access_len)
+{
+    address_space_unmap(rhi_guest_buffer_as(), hva, len, is_write, access_len);
+}
+
+/* Number of GP registers carrying SMCCC arguments (x0-x5) / results (x0-x3). */
+#define SMCCC_NUM_ARG_REGS 6
+#define SMCCC_NUM_RES_REGS 4
+
+/*
+ * A forwarded SMCCC call.
+ *
+ * @in holds the guest's x0-x5, captured before any result is produced, and
+ * @out holds x0-x3 as they will be written back.  Keeping the two apart
+ * matters: x1-x3 are both argument and result registers, so a handler that
+ * wrote its status into the vCPU's registers directly would clobber arguments
+ * it had not read yet.
+ */
+typedef struct SmcccCall {
+    uint64_t fn;
+    uint64_t in[SMCCC_NUM_ARG_REGS];
+    uint64_t out[SMCCC_NUM_RES_REGS];
+} SmcccCall;
+
+static int handle_da_vdev_set_tdi_state(SmcccCall *call)
+{
+    uint64_t target_state = call->in[2];
+    int ret = -EINVAL;
+    uint32_t guest_rid;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    if (target_state == RHI_DA_TDI_CONFIG_LOCKED) {
+        ret = iommufd_tsm_bind(guest_rid);
+    } else if (target_state == RHI_DA_TDI_CONFIG_UNLOCKED) {
+        ret = iommufd_tsm_unbind(guest_rid);
+    } else if (target_state == RHI_DA_TDI_CONFIG_RUN) {
+        ret = iommufd_tsm_da_set_tdi_state_run(guest_rid);
+    }
+
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    }
+
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_version(SmcccCall *call)
+{
+    call->out[0] = RHI_DA_VERSION_1_0;
+
+    return 0;
+}
+
+static int handle_da_features(SmcccCall *call)
+{
+    call->out[0] = RHI_DA_BASE_FEATURE;
+
+    return 0;
+}
+
+/* Match the maximum object size accepted by the RME-DA guest ABI. */
+#define RME_DA_OBJECT_MAX_SIZE (16 * MiB)
+
+static int handle_da_object_size(SmcccCall *call)
+{
+    uint64_t object_type = call->in[2];
+    uint32_t object_size;
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+    if (object_type > UINT32_MAX) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        return 0;
+    }
+
+    ret = iommufd_tsm_get_da_object_size(guest_rid, object_type, &object_size);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+        call->out[1] = object_size;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else if (ret == -EINVAL) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    } else {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    }
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_object_read(SmcccCall *call)
+{
+    uint64_t object_type = call->in[2];
+    uint64_t guest_ipa = call->in[3];
+    uint64_t max_len = call->in[4];
+    uint64_t offset = call->in[5];
+    g_autofree uint8_t *object_data = NULL;
+    AddressSpace *as = rhi_guest_buffer_as();
+    hwaddr destination;
+    uint32_t object_size;
+    uint32_t resp_len = 0;
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+    if (object_type > UINT32_MAX) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        return 0;
+    }
+
+    if (!max_len || max_len > RME_DA_OBJECT_MAX_SIZE) {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+        return 0;
+    }
+
+    ret = iommufd_tsm_get_da_object_size(guest_rid, object_type,
+                                         &object_size);
+    if (ret) {
+        if (ret == -ENODEV) {
+            call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        } else if (ret == -EINVAL) {
+            call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+        } else {
+            call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+        }
+        return 0;
+    }
+    if (!object_size || object_size > RME_DA_OBJECT_MAX_SIZE) {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+        return 0;
+    }
+    if (offset > max_len || object_size > max_len - offset) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OFFSET;
+        return 0;
+    }
+    if (offset > HWADDR_MAX - guest_ipa) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+    destination = guest_ipa + offset;
+    if (!rhi_guest_buffer_is_ram(as, destination, object_size, true)) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+
+    object_data = g_try_malloc0(object_size);
+    if (!object_data) {
+        call->out[0] = RHI_DA_ERROR_DEVICE;
+        return 0;
+    }
+
+    /*
+     * Fetch from offset zero into a QEMU-owned buffer. The target kernel's
+     * cached-object helper does not validate a nonzero offset before adding
+     * it to the source pointer, so never pass guest-controlled offsets to it.
+     */
+    ret = iommufd_tsm_da_object_read(guest_rid, object_type, 0, object_data,
+                                     object_size, &resp_len);
+    if (!ret && resp_len == object_size) {
+        MemTxResult txret;
+
+        txret = address_space_write(as, destination, MEMTXATTRS_UNSPECIFIED,
+                                    object_data, object_size);
+        if (txret == MEMTX_OK) {
+            call->out[0] = RHI_DA_SUCCESS;
+            call->out[1] = object_size;
+        } else {
+            call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        }
+    } else if (!ret) {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    } else if (ret == -EFAULT) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else if (ret == -EINVAL) {
+        call->out[0] = RHI_DA_ERROR_INVALID_OBJECT;
+    } else {
+        call->out[0] = RHI_DA_ERROR_DATA_NOT_AVAILABLE;
+    }
+    return 0;
+}
+
+static int handle_da_get_interface_report(SmcccCall *call)
+{
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    ret = iommufd_tsm_da_get_interface_report(guest_rid);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+    }
+    /* return to guest. */
+    return 0;
+}
+
+static int handle_da_get_measurements(SmcccCall *call)
+{
+    struct rhi_vdev_measurement_params *param_hva;
+    const hwaddr len = sizeof(*param_hva);
+    uint32_t guest_rid;
+    int ret;
+
+    if (!rhi_da_get_rid(call->in[1], &guest_rid)) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+        return 0;
+    }
+
+    param_hva = rhi_map_guest_buffer(call->in[2], len, false);
+    if (!param_hva) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+        return 0;
+    }
+
+    /*
+     * The kernel copies the nonce while servicing the ioctl. A concurrent
+     * guest update can only change the nonce selected by that same guest.
+     */
+    ret = iommufd_tsm_da_get_measurement(guest_rid, param_hva);
+    if (!ret) {
+        call->out[0] = RHI_DA_SUCCESS;
+    } else if (ret == -EFAULT) {
+        call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
+    } else if (ret == -ENODEV) {
+        call->out[0] = RHI_DA_ERROR_INVALID_VDEV_ID;
+    } else {
+        call->out[0] = RHI_DA_ERROR_INPUT;
+    }
+
+    /* Read-only mapping of the guest parameter block; nothing to flush back. */
+    rhi_unmap_guest_buffer(param_hva, len, false, 0);
+    return 0;
+}
+
+static int handle_std_hyp_call(SmcccCall *call)
+{
+    /*
+     * SMCCC leaves x1-x3 as result registers.  Start from zero so that a
+     * handler which only produces a status code does not echo the guest's own
+     * arguments back to it.
+     */
+    memset(call->out, 0, sizeof(call->out));
+
+    switch (call->fn) {
+    case RHI_DA_VERSION:
+        return handle_da_version(call);
+    case RHI_DA_FEATURES:
+        return handle_da_features(call);
+    case RHI_DA_OBJECT_SIZE:
+        return handle_da_object_size(call);
+    case RHI_DA_OBJECT_READ:
+        return handle_da_object_read(call);
+    case RHI_DA_VDEV_GET_INTERFACE_REPORT:
+        return handle_da_get_interface_report(call);
+    case RHI_DA_VDEV_GET_MEASUREMENTS:
+        return handle_da_get_measurements(call);
+    case RHI_DA_VDEV_SET_TDI_STATE:
+        return handle_da_vdev_set_tdi_state(call);
+    default:
+        /*
+         * The SMCCC filter installed by kvm_arm_install_rhi_da_filter()
+         * should keep this unreachable, but never leave the function ID
+         * itself sitting in x0 as if it were a result.
+         */
+        qemu_log_mask(LOG_UNIMP, "%s: unhandled SMCCC function 0x%" PRIx64 "\n",
+                      __func__, call->fn);
+        call->out[0] = (uint64_t)SMCCC_RET_NOT_SUPPORTED;
+        return 0;
+    }
+}
+
+static int handle_arm64_tio_exit(struct kvm_run *kvm_run)
+{
+    uint64_t gpa_base, gpa_top, pa_base;
+    uint32_t rid;
+    bool accepted;
+
+    if (kvm_run->cca_exit.nr != RMI_EXIT_VDEV_MAP) {
+        error_report("unsupported KVM_EXIT_ARM64_TIO operation 0x%" PRIx64,
+                     (uint64_t)kvm_run->cca_exit.nr);
+        return -EINVAL;
+    }
+
+    gpa_base = kvm_run->cca_exit.gpa_base;
+    gpa_top = kvm_run->cca_exit.gpa_top;
+    pa_base = kvm_run->cca_exit.pa_base;
+
+    if (kvm_run->cca_exit.vdev_id > UINT32_MAX) {
+        accepted = false;
+    } else {
+        rid = kvm_run->cca_exit.vdev_id;
+        accepted = iommufd_tsm_dev_memmap_exit(rid, gpa_base, gpa_top,
+                                               pa_base);
+    }
+
+    /* KVM treats response as a boolean and constructs the RMM flag itself. */
+    kvm_run->cca_exit.response = accepted ? 0 : 1;
+    return 0;
+}
+
+#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
+                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
+
+/*
+ * SMCCC Standard Hypervisor (ARM_SMCCC_OWNER_STANDARD_HYP) call forwarded to
+ * userspace by the filter installed in kvm_arm_install_rhi_da_filter().
+ *
+ * KVM does not sync the GP registers on a hypercall exit, so read the
+ * registers carrying the SMCCC arguments before dispatch and write the
+ * results back afterwards.
+ *
+ * TODO: replace this with first-class SMCCC register handling.
+ */
+static int kvm_arm_handle_hypercall(CPUState *cs, struct kvm_run *run)
+{
+    SmcccCall call = { .fn = run->hypercall.nr };
+    int ret;
+    int i;
+
+    for (i = 0; i < SMCCC_NUM_ARG_REGS; i++) {
+        ret = kvm_get_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]), &call.in[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    /*
+     * RHI dispatch looks up and operates on VFIO devices.  The global VFIO
+     * device list and device lifetime are protected by the BQL, which is not
+     * held while kvm_cpu_exec() handles architecture-specific exits.
+     */
+    bql_lock();
+    ret = handle_std_hyp_call(&call);
+    bql_unlock();
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < SMCCC_NUM_RES_REGS; i++) {
+        ret = kvm_set_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]), &call.out[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -1553,11 +2277,24 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
         break;
+    case KVM_EXIT_ARM64_TIO:
+        /*
+         * See the VFIO device-lifetime comment in
+         * kvm_arm_handle_hypercall().
+         */
+        bql_lock();
+        ret = handle_arm64_tio_exit(run);
+        bql_unlock();
+        break;
+    case KVM_EXIT_HYPERCALL:
+        ret = kvm_arm_handle_hypercall(cs, run);
+        break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: un-handled exit reason %d\n",
                       __func__, run->exit_reason);
         break;
     }
+
     return ret;
 }
 
@@ -1888,7 +2625,7 @@ void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa)
 
 void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
 {
-    bool has_steal_time = kvm_check_extension(kvm_state, KVM_CAP_STEAL_TIME);
+    bool has_steal_time = kvm_vm_check_extension(kvm_state, KVM_CAP_STEAL_TIME);
 
     if (cpu->kvm_steal_time == ON_OFF_AUTO_AUTO) {
         if (!has_steal_time || !arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
@@ -1918,17 +2655,17 @@ void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
 
 bool kvm_arm_aarch32_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL1_32BIT);
 }
 
 bool kvm_arm_el2_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_EL2);
 }
 
 bool kvm_arm_mte_supported(void)
 {
-    return kvm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
+    return kvm_vm_check_extension(kvm_state, KVM_CAP_ARM_MTE);
 }
 
 QEMU_BUILD_BUG_ON(KVM_ARM64_SVE_VQ_MIN != 1);
@@ -1993,6 +2730,8 @@ int kvm_arch_init_vcpu(CPUState *cs)
     if (cpu->has_el2 && kvm_arm_el2_supported()) {
         cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_HAS_EL2;
     }
+
+    kvm_arm_rme_vcpu_init(cpu);
 
     /* Do KVM_ARM_VCPU_INIT ioctl */
     ret = kvm_arm_vcpu_init(cpu);
@@ -2076,9 +2815,6 @@ static void kvm_inject_arm_sea(CPUState *c)
     arm_cpu_do_interrupt(c);
 }
 
-#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
-                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
-
 #define AARCH64_SIMD_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U128 | \
                  KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
 
@@ -2148,7 +2884,30 @@ static int kvm_arch_put_sve(CPUState *cs, uint32_t vq, bool have_ffr)
     return 0;
 }
 
-int kvm_arch_put_registers(CPUState *cs, KvmPutState level, Error **errp)
+static int kvm_arm_rme_put_core_regs(CPUState *cs, Error **errp)
+{
+    int i, ret;
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+
+    /* The RME ABI only allows us to set 8 GPRs and the PC */
+    for (i = 0; i < 8; i++) {
+        ret = kvm_set_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]),
+                              &env->xregs[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    ret = kvm_set_one_reg(cs, AARCH64_CORE_REG(regs.pc), &env->pc);
+    if (ret) {
+        return ret;
+    }
+
+    return 0;
+}
+
+static int kvm_arm_put_core_regs(CPUState *cs, Error **errp)
 {
     uint64_t val;
     uint32_t fpr;
@@ -2251,6 +3010,23 @@ int kvm_arch_put_registers(CPUState *cs, KvmPutState level, Error **errp)
         return ret;
     }
 
+    return 0;
+}
+
+int kvm_arch_put_registers(CPUState *cs, KvmPutState level, Error **errp)
+{
+    int ret;
+    ARMCPU *cpu = ARM_CPU(cs);
+
+    if (cpu->kvm_rme) {
+        ret = kvm_arm_rme_put_core_regs(cs, errp);
+    } else {
+        ret = kvm_arm_put_core_regs(cs, errp);
+    }
+    if (ret) {
+        return ret;
+    }
+
     write_cpustate_to_list(cpu, true);
 
     if (!write_list_to_kvmstate(cpu, level)) {
@@ -2333,7 +3109,24 @@ static int kvm_arch_get_sve(CPUState *cs, uint32_t vq, bool have_ffr)
     return 0;
 }
 
-int kvm_arch_get_registers(CPUState *cs, Error **errp)
+static int kvm_arm_rme_get_core_regs(CPUState *cs, Error **errp)
+{
+    int i, ret;
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+
+    for (i = 0; i < 8; i++) {
+        ret = kvm_get_one_reg(cs, AARCH64_CORE_REG(regs.regs[i]),
+                              &env->xregs[i]);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+static int kvm_arm_get_core_regs(CPUState *cs, Error **errp)
 {
     uint64_t val;
     unsigned int el;
@@ -2435,6 +3228,23 @@ int kvm_arch_get_registers(CPUState *cs, Error **errp)
         return ret;
     }
     vfp_set_fpcr(env, fpr);
+
+    return 0;
+}
+
+int kvm_arch_get_registers(CPUState *cs, Error **errp)
+{
+    int ret;
+    ARMCPU *cpu = ARM_CPU(cs);
+
+    if (cpu->kvm_rme) {
+        ret = kvm_arm_rme_get_core_regs(cs, errp);
+    } else {
+        ret = kvm_arm_get_core_regs(cs, errp);
+    }
+    if (ret) {
+        return ret;
+    }
 
     ret = kvm_get_vcpu_events(cpu);
     if (ret) {

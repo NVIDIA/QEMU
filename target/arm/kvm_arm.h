@@ -18,6 +18,17 @@
 #define KVM_ARM_VGIC_V2   (1 << 0)
 #define KVM_ARM_VGIC_V3   (1 << 1)
 
+/*
+ * Keep the machine model independent of host Linux headers. These values
+ * mirror KVM_VM_TYPE_ARM_NORMAL and KVM_VM_TYPE_ARM_REALM.
+ */
+#define QEMU_KVM_ARM_VM_TYPE_SHIFT 8
+#define QEMU_KVM_ARM_VM_TYPE(type) \
+    (((type) << QEMU_KVM_ARM_VM_TYPE_SHIFT) & \
+     (0xfULL << QEMU_KVM_ARM_VM_TYPE_SHIFT))
+#define QEMU_KVM_ARM_VM_TYPE_NORMAL QEMU_KVM_ARM_VM_TYPE(0)
+#define QEMU_KVM_ARM_VM_TYPE_REALM  QEMU_KVM_ARM_VM_TYPE(1)
+
 /**
  * kvm_arm_register_device:
  * @mr: memory region for this device
@@ -239,5 +250,40 @@ void arm_gic_cap_kvm_probe(GICCapability *v2, GICCapability *v3);
  * The caller must free the string with g_free().
  */
 char *kvm_print_register_name(uint64_t regidx);
+
+/**
+ * kvm_arm_rme_available:
+ *
+ * Return whether the current KVM VM supports Arm Realms.
+ */
+bool kvm_arm_rme_available(void);
+
+/**
+ * kvm_arm_rme_vcpu_init
+ * @cs: the CPU
+ *
+ * If the user requested a Realm, setup the given vCPU accordingly. Realm vCPUs
+ * behave a little differently, for example most of their register state is
+ * hidden from the host.
+ */
+void kvm_arm_rme_vcpu_init(ARMCPU *cpu);
+
+/**
+ * kvm_arm_rme_init_gpa_space
+ * @ipa_bits: size of the full Realm IPA space, including the shared bit
+ * @pci_bus: The main PCI bus, for which PCI queries DMA address spaces
+ *
+ * Setup the guest-physical address space for a Realm. Install a memory region
+ * and notifier to manage the shared upper half of the address space.
+ */
+void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus);
+
+/**
+ * kvm_arm_rme_get_dma_as:
+ *
+ * Return the shared-IPA DMA address space for a Realm, or NULL for a
+ * non-Realm machine or before the Realm address space has been initialized.
+ */
+AddressSpace *kvm_arm_rme_get_dma_as(void);
 
 #endif

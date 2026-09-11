@@ -64,11 +64,14 @@ struct VirtIOMMIOProxy {
     uint32_t host_features_sel;
     uint32_t guest_features_sel;
     uint32_t guest_page_shift;
+    AddressSpace *dma_as;
     /* virtio-bus */
     VirtioBusState bus;
     /* Fields only used for non-legacy (v2) devices */
     uint32_t guest_features[2];
     VirtIOMMIOQueue vqs[VIRTIO_QUEUE_MAX];
 };
+
+void virtio_mmio_set_dma_as(DeviceState *dev, AddressSpace *dma_as);
 
 #endif

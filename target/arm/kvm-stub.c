@@ -42,6 +42,15 @@ bool kvm_arm_el2_supported(void)
     return false;
 }
 
+void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus)
+{
+}
+
+AddressSpace *kvm_arm_rme_get_dma_as(void)
+{
+    return NULL;
+}
+
 /*
  * These functions should never actually be called without KVM support.
  */
@@ -116,6 +125,16 @@ void arm_gic_cap_kvm_probe(GICCapability *v2, GICCapability *v3)
 }
 
 char *kvm_print_register_name(uint64_t regidx)
+{
+    g_assert_not_reached();
+}
+
+bool kvm_arm_rme_available(void)
+{
+    return false;
+}
+
+void kvm_arm_rme_vcpu_init(ARMCPU *cpu)
 {
     g_assert_not_reached();
 }

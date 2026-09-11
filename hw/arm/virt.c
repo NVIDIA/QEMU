@@ -62,6 +62,7 @@
 #include "hw/pci-host/gpex.h"
 #include "hw/pci-bridge/pci_expander_bridge.h"
 #include "hw/virtio/virtio-pci.h"
+#include "hw/virtio/virtio-mmio.h"
 #include "hw/core/sysbus-fdt.h"
 #include "hw/core/platform-bus.h"
 #include "hw/core/qdev-properties.h"
@@ -263,6 +264,17 @@ static const int a15irqmap[] = {
     [VIRT_PLATFORM_BUS] = 112, /* ...to 112 + PLATFORM_BUS_NUM_IRQS -1 */
 };
 
+static bool virt_machine_is_confidential(VirtMachineState *vms)
+{
+    return MACHINE(vms)->cgs;
+}
+
+static bool virt_dtb_randomness_enabled(VirtMachineState *vms)
+{
+    return vms->dtb_randomness &&
+           (vms->dtb_randomness_set || !virt_machine_is_confidential(vms));
+}
+
 static void create_randomness(MachineState *ms, const char *node)
 {
     struct {
@@ -293,6 +305,7 @@ static bool ns_el2_virt_timer_present(void)
 
 static void create_fdt(VirtMachineState *vms)
 {
+    bool dtb_randomness = true;
     MachineState *ms = MACHINE(vms);
     int nb_numa_nodes = ms->numa_state->num_nodes;
     void *fdt = create_device_tree(&vms->fdt_size);
@@ -300,6 +313,14 @@ static void create_fdt(VirtMachineState *vms)
     if (!fdt) {
         error_report("create_device_tree() failed");
         exit(1);
+    }
+
+    /*
+     * Including random data in the DTB causes random intial measurement on CCA,
+     * so disable it for confidential VMs.
+     */
+    if (!virt_dtb_randomness_enabled(vms)) {
+        dtb_randomness = false;
     }
 
     ms->fdt = fdt;
@@ -323,13 +344,13 @@ static void create_fdt(VirtMachineState *vms)
 
     /* /chosen must exist for load_dtb to fill in necessary properties later */
     qemu_fdt_add_subnode(fdt, "/chosen");
-    if (vms->dtb_randomness) {
+    if (dtb_randomness) {
         create_randomness(ms, "/chosen");
     }
 
     if (vms->secure) {
         qemu_fdt_add_subnode(fdt, "/secure-chosen");
-        if (vms->dtb_randomness) {
+        if (dtb_randomness) {
             create_randomness(ms, "/secure-chosen");
         }
     }
@@ -1186,6 +1207,7 @@ static void create_gpio_devices(const VirtMachineState *vms, int gpio,
 
 static void create_virtio_devices(const VirtMachineState *vms)
 {
+    AddressSpace *dma_as = kvm_arm_rme_get_dma_as();
     int i;
     hwaddr size = vms->memmap[VIRT_MMIO].size;
     MachineState *ms = MACHINE(vms);
@@ -1220,9 +1242,18 @@ static void create_virtio_devices(const VirtMachineState *vms)
     for (i = 0; i < vms->virtio_transports; i++) {
         int irq = vms->irqmap[VIRT_MMIO] + i;
         hwaddr base = vms->memmap[VIRT_MMIO].base + i * size;
+        DeviceState *dev = qdev_new(TYPE_VIRTIO_MMIO);
+        SysBusDevice *s = SYS_BUS_DEVICE(dev);
 
-        sysbus_create_simple("virtio-mmio", base,
-                             qdev_get_gpio_in(vms->gic, irq));
+        if (dma_as) {
+            /* Legacy virtio-mmio cannot negotiate IOMMU_PLATFORM. */
+            qdev_prop_set_bit(dev, "force-legacy", false);
+            virtio_mmio_set_dma_as(dev, dma_as);
+        }
+
+        sysbus_realize_and_unref(s, &error_fatal);
+        sysbus_mmio_map(s, 0, base);
+        sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
     }
 
     /* We add dtb nodes in reverse order so that they appear in the finished
@@ -1284,9 +1315,7 @@ static void virt_flash_create(VirtMachineState *vms)
     vms->flash[1] = virt_flash_create1(vms, "virt.flash1", "pflash1");
 }
 
-static void virt_flash_map1(PFlashCFI01 *flash,
-                            hwaddr base, hwaddr size,
-                            MemoryRegion *sysmem)
+static void virt_flash_realize1(PFlashCFI01 *flash, hwaddr size)
 {
     DeviceState *dev = DEVICE(flash);
 
@@ -1294,10 +1323,18 @@ static void virt_flash_map1(PFlashCFI01 *flash,
     assert(size / VIRT_FLASH_SECTOR_SIZE <= UINT32_MAX);
     qdev_prop_set_uint32(dev, "num-blocks", size / VIRT_FLASH_SECTOR_SIZE);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+}
+
+static void virt_flash_map1(PFlashCFI01 *flash,
+                            hwaddr base, hwaddr size,
+                            MemoryRegion *sysmem)
+{
+    SysBusDevice *sbd = SYS_BUS_DEVICE(flash);
+
+    virt_flash_realize1(flash, size);
 
     memory_region_add_subregion(sysmem, base,
-                                sysbus_mmio_get_region(SYS_BUS_DEVICE(dev),
-                                                       0));
+                                sysbus_mmio_get_region(sbd, 0));
 }
 
 static void virt_flash_map(VirtMachineState *vms,
@@ -1329,6 +1366,16 @@ static void virt_flash_fdt(VirtMachineState *vms,
     hwaddr flashbase = vms->memmap[VIRT_FLASH].base;
     MachineState *ms = MACHINE(vms);
     char *nodename;
+
+    /*
+     * For Realms the firmware images are stored in the guest's address
+     * space.  As such there is no need for flash configuration in the FDT.
+     * See function virt_confidential_firmware_init() and
+     * arm_setup_confidential_firmware_boot() for details.
+     */
+    if (virt_machine_is_confidential(vms)) {
+        return;
+    }
 
     if (sysmem == secure_sysmem) {
         /* Report both flash devices as a single node in the DT */
@@ -1365,6 +1412,32 @@ static void virt_flash_fdt(VirtMachineState *vms,
     }
 }
 
+static bool virt_confidential_firmware_init(VirtMachineState *vms,
+                                            MemoryRegion *sysmem)
+{
+    MemoryRegion *fw_ram;
+    hwaddr fw_base = vms->memmap[VIRT_FLASH].base;
+    hwaddr fw_size = vms->memmap[VIRT_FLASH].size;
+
+    if (!MACHINE(vms)->firmware) {
+        return false;
+    }
+
+    assert(machine_require_guest_memfd(MACHINE(vms)));
+
+    fw_ram = g_new(MemoryRegion, 1);
+    memory_region_init_ram_guest_memfd(fw_ram, NULL, "fw_ram", fw_size,
+                                       &error_fatal);
+    /*
+     * Map the guest's firmware image directly in its address space.
+     * Copying of the firmware image itself is done in function
+     * arm_setup_confidential_firmware_boot().
+     */
+    memory_region_add_subregion(sysmem, fw_base, fw_ram);
+
+    return true;
+}
+
 static bool virt_firmware_init(VirtMachineState *vms,
                                MemoryRegion *sysmem,
                                MemoryRegion *secure_sysmem)
@@ -1372,6 +1445,28 @@ static bool virt_firmware_init(VirtMachineState *vms,
     int i;
     const char *bios_name;
     BlockBackend *pflash_blk0;
+
+    /*
+     * For a confidential VM, the firmware image and any boot information,
+     * including EFI variables, are stored in RAM in order to be measurable and
+     * private. Create a RAM region and load the firmware image there.
+     */
+    if (virt_machine_is_confidential(vms)) {
+        hwaddr flashsize = vms->memmap[VIRT_FLASH].size / 2;
+
+        for (i = 0; i < ARRAY_SIZE(vms->flash); i++) {
+            if (pflash_cfi01_get_blk(vms->flash[i]) ||
+                drive_get(IF_PFLASH, 0, i)) {
+                error_report("pflash is not supported for Realm VMs; "
+                             "use -bios to provide Realm firmware");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        virt_flash_realize1(vms->flash[0], flashsize);
+        virt_flash_realize1(vms->flash[1], flashsize);
+        return virt_confidential_firmware_init(vms, sysmem);
+    }
 
     /* Map legacy -drive if=pflash to machine properties */
     for (i = 0; i < ARRAY_SIZE(vms->flash); i++) {
@@ -1664,6 +1759,12 @@ static void create_pcie(VirtMachineState *vms)
     pci->bypass_iommu = vms->default_bus_bypass_iommu;
     vms->bus = pci->bus;
     if (vms->bus) {
+        /*
+         * Some PCI devices query their IOMMU address space while they are
+         * realized. Install the Realm DMA address-space selector before
+         * creating even the default NIC so every endpoint sees it.
+         */
+        kvm_arm_rme_init_gpa_space(vms->rme_ipa_bits, vms->bus);
         pci_init_nic_devices(pci->bus, mc->default_nic);
     }
 
@@ -2318,6 +2419,23 @@ static void machvirt_init(MachineState *machine)
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
 
+    if (virt_machine_is_confidential(vms) && !kvm_enabled()) {
+        error_report("Realm VMs require KVM acceleration");
+        exit(EXIT_FAILURE);
+    }
+
+    if (virt_machine_is_confidential(vms) && vms->iommu != VIRT_IOMMU_NONE) {
+        error_report("guest IOMMUs are not supported for Realm VMs");
+        exit(EXIT_FAILURE);
+    }
+
+    if (virt_machine_is_confidential(vms) &&
+        vms->default_bus_bypass_iommu) {
+        error_report("default-bus-bypass-iommu is not supported for Realm "
+                     "VMs");
+        exit(EXIT_FAILURE);
+    }
+
     possible_cpus = mc->possible_cpu_arch_ids(machine);
 
     /*
@@ -2377,10 +2495,11 @@ static void machvirt_init(MachineState *machine)
      * if the guest has EL2 then we will use SMC as the conduit,
      * and otherwise we will use HVC (for backwards compatibility and
      * because if we're using KVM then we must use HVC).
+     * Realm guests must also use SMC.
      */
     if (vms->secure && firmware_loaded) {
         vms->psci_conduit = QEMU_PSCI_CONDUIT_DISABLED;
-    } else if (vms->virt) {
+    } else if (vms->virt || virt_machine_is_confidential(vms)) {
         vms->psci_conduit = QEMU_PSCI_CONDUIT_SMC;
     } else {
         vms->psci_conduit = QEMU_PSCI_CONDUIT_HVC;
@@ -2636,7 +2755,8 @@ static void machvirt_init(MachineState *machine)
      */
     create_virtio_devices(vms);
 
-    vms->fw_cfg = create_fw_cfg(vms, &address_space_memory);
+    vms->fw_cfg = create_fw_cfg(vms, kvm_arm_rme_get_dma_as() ?:
+                                     &address_space_memory);
     rom_set_fw(vms->fw_cfg);
 
     create_platform_bus(vms);
@@ -2659,7 +2779,10 @@ static void machvirt_init(MachineState *machine)
     vms->bootinfo.get_dtb = machvirt_dtb;
     vms->bootinfo.skip_dtb_autoload = true;
     vms->bootinfo.firmware_loaded = firmware_loaded;
+    vms->bootinfo.firmware_base = vms->memmap[VIRT_FLASH].base;
+    vms->bootinfo.firmware_max_size = vms->memmap[VIRT_FLASH].size;
     vms->bootinfo.psci_conduit = vms->psci_conduit;
+    vms->bootinfo.confidential = virt_machine_is_confidential(vms);
     arm_load_kernel(ARM_CPU(first_cpu), machine, &vms->bootinfo);
 
     vms->machine_done.notify = virt_machine_done;
@@ -2906,6 +3029,11 @@ static bool virt_get_dtb_randomness(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
+    /*
+     * Report the value the user set, not the effective one.  A confidential
+     * VM defaults to no randomness (see virt_dtb_randomness_enabled()), but
+     * a getter that did not round-trip its setter would be surprising.
+     */
     return vms->dtb_randomness;
 }
 
@@ -2914,6 +3042,7 @@ static void virt_set_dtb_randomness(Object *obj, bool value, Error **errp)
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     vms->dtb_randomness = value;
+    vms->dtb_randomness_set = true;
 }
 
 static char *virt_get_oem_id(Object *obj, Error **errp)
@@ -3212,6 +3341,13 @@ static void virt_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
 {
     VirtMachineState *vms = VIRT_MACHINE(hotplug_dev);
 
+    if (virt_machine_is_confidential(vms) &&
+        (object_dynamic_cast(OBJECT(dev), TYPE_VIRTIO_IOMMU_PCI) ||
+         object_dynamic_cast(OBJECT(dev), TYPE_ARM_SMMUV3))) {
+        error_setg(errp, "guest IOMMUs are not supported for Realm VMs");
+        return;
+    }
+
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         virt_memory_pre_plug(hotplug_dev, dev, errp);
     } else if (object_dynamic_cast(OBJECT(dev), TYPE_VIRTIO_MD_PCI)) {
@@ -3431,14 +3567,33 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
 {
     VirtMachineState *vms = VIRT_MACHINE(ms);
     int max_vm_pa_size, requested_pa_size;
+    int rme_reserve_bit = 0;
     bool fixed_ipa;
+    int vm_type;
 
-    max_vm_pa_size = kvm_arm_get_max_vm_ipa_size(ms, &fixed_ipa);
+    vm_type = (ms->cgs ? QEMU_KVM_ARM_VM_TYPE_REALM :
+                         QEMU_KVM_ARM_VM_TYPE_NORMAL);
+
+    if (ms->cgs) {
+        /*
+         * With RME, the upper GPA bit differentiates Realm from NS memory.
+         * Reserve the upper bit to ensure that highmem devices will fit.
+         */
+        rme_reserve_bit = 1;
+    }
+
+    max_vm_pa_size = kvm_arm_get_max_vm_ipa_size(ms, &fixed_ipa) -
+                     rme_reserve_bit;
 
     /* we freeze the memory map to compute the highest gpa */
     virt_set_memmap(vms, max_vm_pa_size);
 
-    requested_pa_size = 64 - clz64(vms->highest_gpa);
+    if (ms->cgs) {
+        /* Keep the Realm shared IPA bit stable across PCI layout changes. */
+        requested_pa_size = max_vm_pa_size + rme_reserve_bit;
+    } else {
+        requested_pa_size = 64 - clz64(vms->highest_gpa);
+    }
 
     /*
      * KVM requires the IPA size to be at least 32 bits.
@@ -3447,19 +3602,26 @@ static int virt_kvm_type(MachineState *ms, const char *type_str)
         requested_pa_size = 32;
     }
 
-    if (requested_pa_size > max_vm_pa_size) {
+    if (requested_pa_size > max_vm_pa_size + rme_reserve_bit) {
         error_report("-m and ,maxmem option values "
                      "require an IPA range (%d bits) larger than "
                      "the one supported by the host (%d bits)",
-                     requested_pa_size, max_vm_pa_size);
+                     requested_pa_size, max_vm_pa_size + rme_reserve_bit);
         return -1;
     }
+
+    vms->rme_ipa_bits = ms->cgs ? requested_pa_size : 0;
+
     /*
-     * We return the requested PA log size, unless KVM only supports
-     * the implicit legacy 40b IPA setting, in which case the kvm_type
-     * must be 0.
+     * Return the requested PA log size unless KVM only supports the implicit
+     * legacy 40-bit IPA setting. In that case, leave the IPA-size bits clear
+     * while preserving the Realm VM-type field.
      */
-    return fixed_ipa ? 0 : requested_pa_size;
+    if (fixed_ipa) {
+        return vm_type;
+    }
+
+    return requested_pa_size | vm_type;
 }
 
 static int virt_get_physical_address_range(MachineState *ms,
@@ -3764,13 +3926,14 @@ static void virt_instance_init(Object *obj)
     /* MTE is disabled by default.  */
     vms->mte = false;
 
-    /* Supply kaslr-seed and rng-seed by default */
+    /* Supply kaslr-seed and rng-seed by default. */
     vms->dtb_randomness = true;
 
     vms->irqmap = a15irqmap;
 
     vms->virtio_transports = NUM_VIRTIO_TRANSPORTS;
 
+    /* Machine properties must exist before machine options are parsed. */
     virt_flash_create(vms);
 
     vms->oem_id = g_strndup(ACPI_BUILD_APPNAME6, 6);

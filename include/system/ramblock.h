@@ -15,6 +15,7 @@
 #define SYSTEM_RAMBLOCK_H
 
 #include "qemu/rcu.h"
+#include "qemu/thread.h"
 #include "system/ram_addr.h"
 #include "system/ramlist.h"
 #include "system/hostmem.h"
@@ -95,6 +96,12 @@ struct RamBlockAttributes {
     Object parent;
 
     RAMBlock *ram_block;
+
+    /*
+     * Protects the bitmap and listener list. Listener callbacks run while
+     * this lock is held to order notifications and replay with state changes.
+     */
+    QemuMutex lock;
 
     /* 1-setting of the bitmap represents ram is populated (shared) */
     unsigned bitmap_size;

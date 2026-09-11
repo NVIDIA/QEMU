@@ -19,6 +19,8 @@
 #include "system/ram_addr.h"
 #include "system/host_iommu_device.h"
 
+typedef struct VFIODevice VFIODevice;
+
 #define TYPE_IOMMUFD_BACKEND "iommufd"
 OBJECT_DECLARE_TYPE(IOMMUFDBackend, IOMMUFDBackendClass, IOMMUFD_BACKEND)
 
@@ -128,6 +130,29 @@ bool iommufd_backend_invalidate_cache(IOMMUFDBackend *be, uint32_t id,
 
 bool iommufd_change_process_capable(IOMMUFDBackend *be);
 bool iommufd_change_process(IOMMUFDBackend *be, Error **errp);
+
+struct rhi_vdev_measurement_params;
+
+/*
+ * Arm RME device assignment.  @rid is the guest-visible Routing ID of the
+ * assigned device: PCI segment in bits [31:16], BDF in bits [15:0].  All of
+ * these return 0 (or true) on success, and -ENODEV if @rid does not name a
+ * device that has been registered as an iommufd vDevice.
+ */
+int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp);
+int iommufd_tsm_bind(uint32_t rid);
+int iommufd_tsm_unbind(uint32_t rid);
+int iommufd_tsm_da_set_tdi_state_run(uint32_t rid);
+int iommufd_tsm_get_da_object_size(uint32_t rid, uint32_t object_type,
+                                   uint32_t *object_size);
+int iommufd_tsm_da_object_read(uint32_t rid, uint32_t object_type,
+                               uint64_t offset, void *buf, uint32_t max_len,
+                               uint32_t *resp_len);
+int iommufd_tsm_da_get_interface_report(uint32_t rid);
+int iommufd_tsm_da_get_measurement(uint32_t rid,
+                                   struct rhi_vdev_measurement_params *param);
+bool iommufd_tsm_dev_memmap_exit(uint32_t rid, uint64_t gpa_base,
+                                 uint64_t gpa_top, uint64_t pa_base);
 
 #define TYPE_HOST_IOMMU_DEVICE_IOMMUFD TYPE_HOST_IOMMU_DEVICE "-iommufd"
 OBJECT_DECLARE_TYPE(HostIOMMUDeviceIOMMUFD, HostIOMMUDeviceIOMMUFDClass,

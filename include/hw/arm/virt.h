@@ -157,6 +157,7 @@ struct VirtMachineState {
     bool ras;
     bool mte;
     bool dtb_randomness;
+    bool dtb_randomness_set;
     bool second_ns_uart_present;
     OnOffAuto acpi;
     VirtGICType gic_version;
@@ -176,6 +177,7 @@ struct VirtMachineState {
     int psci_conduit;
     uint8_t virtio_transports;
     hwaddr highest_gpa;
+    uint8_t rme_ipa_bits;
     DeviceState *gic;
     DeviceState *acpi_dev;
     Notifier powerdown_notifier;

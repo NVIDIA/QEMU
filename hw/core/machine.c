@@ -1321,6 +1321,11 @@ bool machine_require_guest_memfd(MachineState *machine)
     return machine->cgs && machine->cgs->require_guest_memfd;
 }
 
+bool machine_has_assigned_device_memory(MachineState *machine)
+{
+    return machine->cgs && machine->cgs->assigned_device_memory;
+}
+
 static char *cpu_slot_to_string(const CPUArchId *cpu)
 {
     GString *s = g_string_new(NULL);

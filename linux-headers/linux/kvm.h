@@ -180,6 +180,7 @@ struct kvm_xen_exit {
 #define KVM_EXIT_MEMORY_FAULT     39
 #define KVM_EXIT_TDX              40
 #define KVM_EXIT_ARM_SEA          41
+#define KVM_EXIT_ARM64_TIO	  44
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -474,6 +475,16 @@ struct kvm_run {
 			__u64 gva;
 			__u64 gpa;
 		} arm_sea;
+		/* KVM_EXIT_ARM64_TIO*/
+		struct {
+			__u64 flags;
+			__u64 nr;
+			__u64 vdev_id;
+			__u64 gpa_base;
+			__u64 gpa_top; /* input and output */
+			__u64 pa_base;
+			__u64 response;
+		} cca_exit;
 		/* Fix the size of the union. */
 		char padding[256];
 	};
@@ -677,10 +688,20 @@ struct kvm_enable_cap {
  * address size for the VM. Bits[7-0] are reserved for the guest
  * PA size shift (i.e, log2(PA_Size)). For backward compatibility,
  * value 0 implies the default IPA size, 40bits.
+ *
+ * Bits[11-8] are reserved for the VM type, bit[31] for protected VMs.
  */
 #define KVM_VM_TYPE_ARM_IPA_SIZE_MASK	0xffULL
 #define KVM_VM_TYPE_ARM_IPA_SIZE(x)		\
 	((x) & KVM_VM_TYPE_ARM_IPA_SIZE_MASK)
+#define KVM_VM_TYPE_ARM_SHIFT		8
+#define KVM_VM_TYPE_ARM_MASK		(0xfULL << KVM_VM_TYPE_ARM_SHIFT)
+#define KVM_VM_TYPE_ARM(_type)		\
+	(((_type) << KVM_VM_TYPE_ARM_SHIFT) & KVM_VM_TYPE_ARM_MASK)
+#define KVM_VM_TYPE_ARM_NORMAL		KVM_VM_TYPE_ARM(0)
+#define KVM_VM_TYPE_ARM_REALM		KVM_VM_TYPE_ARM(1)
+#define KVM_VM_TYPE_ARM_PROTECTED	(1UL << 31)
+
 /*
  * ioctls for /dev/kvm fds:
  */
@@ -701,6 +722,8 @@ struct kvm_enable_cap {
 #define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x05, struct kvm_cpuid2)
 #define KVM_GET_EMULATED_CPUID	  _IOWR(KVMIO, 0x09, struct kvm_cpuid2)
 #define KVM_GET_MSR_FEATURE_INDEX_LIST    _IOWR(KVMIO, 0x0a, struct kvm_msr_list)
+
+#define KVM_ARM_RMI_POPULATE	  _IOWR(KVMIO, 0xd7, struct kvm_arm_rmi_populate)
 
 /*
  * Extension capability list.
@@ -966,6 +989,12 @@ struct kvm_enable_cap {
 #define KVM_CAP_GUEST_MEMFD_FLAGS 244
 #define KVM_CAP_ARM_SEA_TO_USER 245
 #define KVM_CAP_S390_USER_OPEREXEC 246
+#define KVM_CAP_S390_KEYOP 247
+#define KVM_CAP_S390_VSIE_ESAMODE 248
+#define KVM_CAP_S390_HPAGE_2G 249
+#define KVM_CAP_PPC_COMPAT_CAPS 250
+#define KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES 251
+#define KVM_CAP_ARM_RMI 252
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

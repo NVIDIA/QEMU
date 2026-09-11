@@ -70,6 +70,12 @@ struct ConfidentialGuestSupport {
     bool require_guest_memfd;
 
     /*
+     * True when the confidential-guest implementation assigns device-memory
+     * ranges and needs KVM memory attributes maintained across VFIO slots.
+     */
+    bool assigned_device_memory;
+
+    /*
      * ready: flag set by CGS initialization code once it's ready to
      *        start executing instructions in a potentially-secure
      *        guest

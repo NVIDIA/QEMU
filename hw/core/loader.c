@@ -74,6 +74,8 @@
 #endif
 
 static int roms_loaded;
+static NotifierList rom_loader_notifier =
+    NOTIFIER_LIST_INITIALIZER(rom_loader_notifier);
 
 /* return the size or -1 if error */
 int64_t get_image_size(const char *filename, Error **errp)
@@ -1201,6 +1203,11 @@ MemoryRegion *rom_add_blob(const char *name, const void *blob, size_t len,
     return mr;
 }
 
+void rom_add_load_notifier(Notifier *notifier)
+{
+    notifier_list_add(&rom_loader_notifier, notifier);
+}
+
 /* This function is specific for elf program because we don't need to allocate
  * all the rom. We just allocate the first part and the rest is just zeros. This
  * is why romsize and datasize are different. Also, this function takes its own
@@ -1242,6 +1249,7 @@ ssize_t rom_add_option(const char *file, int32_t bootindex)
 static void rom_reset(void *unused)
 {
     Rom *rom;
+    RomLoaderNotifyData notify;
 
     QTAILQ_FOREACH(rom, &roms, next) {
         if (rom->fw_file) {
@@ -1277,10 +1285,6 @@ static void rom_reset(void *unused)
                               rom->romsize - rom->datasize,
                               MEMTXATTRS_UNSPECIFIED);
         }
-        if (rom->isrom) {
-            /* rom needs to be written only once */
-            rom_free_data(rom);
-        }
         /*
          * The rom loader is really on the same level as firmware in the guest
          * shadowing a ROM into RAM. Such a shadowing mechanism needs to ensure
@@ -1290,6 +1294,21 @@ static void rom_reset(void *unused)
         address_space_flush_icache_range(rom->as, rom->addr, rom->datasize);
 
         trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
+
+        if (!notifier_list_empty(&rom_loader_notifier)) {
+            notify = (RomLoaderNotifyData) {
+                .addr = rom->addr,
+                .len = rom->romsize,
+                .data_len = rom->datasize,
+                .data = rom->data,
+            };
+            notifier_list_notify(&rom_loader_notifier, &notify);
+        }
+
+        if (rom->isrom) {
+            /* rom needs to be written only once */
+            rom_free_data(rom);
+        }
     }
 }
 
