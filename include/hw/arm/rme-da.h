@@ -73,6 +73,8 @@
 #define RHI_DA_TDI_CONFIG_LOCKED                0x1
 #define RHI_DA_TDI_CONFIG_RUN                   0x2
 
+#define RHI_DA_MEASUREMENT_FLAG_RAW             (1ULL << 0)
+
 #define PCI_TSM_REQ_INFO                        0
 #define PCI_TSM_REQ_STATE_CHANGE                1
 

@@ -2126,7 +2126,6 @@ static int handle_da_get_measurements(SmcccCall *call)
         call->out[0] = RHI_DA_ERROR_ACCESS_FAILED;
         return 0;
     }
-
     /*
      * The kernel copies the nonce while servicing the ioctl. A concurrent
      * guest update can only change the nonce selected by that same guest.
@@ -2194,6 +2193,12 @@ static int handle_arm64_tio_exit(struct kvm_run *kvm_run)
         error_report("unsupported KVM_EXIT_ARM64_TIO operation 0x%" PRIx64,
                      (uint64_t)kvm_run->cca_exit.nr);
         return -EINVAL;
+    }
+    if (kvm_run->cca_exit.flags) {
+        error_report("unsupported KVM_EXIT_ARM64_TIO flags 0x%" PRIx64,
+                     (uint64_t)kvm_run->cca_exit.flags);
+        kvm_run->cca_exit.response = 1;
+        return 0;
     }
 
     gpa_base = kvm_run->cca_exit.gpa_base;

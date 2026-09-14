@@ -220,10 +220,19 @@ int iommufd_tsm_da_get_interface_report(uint32_t rid)
 int iommufd_tsm_da_get_measurement(uint32_t rid,
                                    struct rhi_vdev_measurement_params *param)
 {
-    VFIODevice *vbasedev = vfio_find_bdf(rid);
-    struct arm64_vdev_device_measurement_guest_req req = {
+    VFIODevice *vbasedev;
+    struct arm64_vdev_device_measurement_guest_req req;
+    /* @param is guest-writable; validate and forward one flags snapshot. */
+    uint64_t flags = param->flags;
+
+    if (flags & ~RHI_DA_MEASUREMENT_FLAG_RAW) {
+        return -EINVAL;
+    }
+
+    vbasedev = vfio_find_bdf(rid);
+    req = (struct arm64_vdev_device_measurement_guest_req) {
         .req_type = __RHI_DA_VDEV_UPDATE_MEASUREMENTS,
-        .flags = param->flags,
+        .flags = flags,
         .nonce = (uintptr_t)&param->nonce[0],
     };
 
@@ -287,6 +296,9 @@ bool iommufd_tsm_dev_memmap_exit(uint32_t rid, uint64_t gpa_base,
         return false;
     }
     range_size = gpa_top - gpa_base;
+    if (range_size - 1 > UINT64_MAX - pa_base) {
+        return false;
+    }
 
     /*
      * Treat the exit fields as untrusted. In particular, do not let a Realm
@@ -997,6 +1009,12 @@ static void iommufd_cdev_detach_container(VFIODevice *vbasedev,
     Error *err = NULL;
 
     if (!iommufd_cdev_detach_ioas_hwpt(vbasedev, &err)) {
+        if (vbasedev->iommufd_vdevice && vbasedev->vdevice_id) {
+            error_reportf_err(err,
+                              "failed to detach Realm vDevice HWPT: ");
+            /* Do not discard ownership of an attached kernel HWPT. */
+            exit(EXIT_FAILURE);
+        }
         error_report_err(err);
     }
 
