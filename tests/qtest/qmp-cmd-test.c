@@ -47,6 +47,7 @@ static int query_error_class(const char *cmd)
         { "query-hotpluggable-cpus", ERROR_CLASS_GENERIC_ERROR },
         { "query-hv-balloon-status-report", ERROR_CLASS_GENERIC_ERROR },
         { "query-vm-generation-id", ERROR_CLASS_GENERIC_ERROR },
+        { "query-cca-capabilities", ERROR_CLASS_GENERIC_ERROR },
         /* Only valid with a USB bus added */
         { "x-query-usb", ERROR_CLASS_GENERIC_ERROR },
         /* Only valid with accel=tcg */
