@@ -1,3 +1,54 @@
+qemu (1:11.0.0+nvidia-unstable11-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: arm: fix CCA regression tests
+  * NVIDIA: SAUCE: RME-DA: validate requests and teardown
+  * NVIDIA: SAUCE: target/arm/kvm: align RHI-DA calls with beta1
+  * NVIDIA: SAUCE: hw/core/loader: preserve sparse ROM notifier data
+  * NVIDIA: SAUCE: target/arm/kvm-rme: split population at RAM boundaries
+  * NVIDIA: SAUCE: vfio: fail closed on Realm DMA map errors
+  * NVIDIA: SAUCE: arm/kvm-rme: fix Realm DMA lifetime and mappings
+  * NVIDIA: SAUCE: target/arm/kvm: handle RME-DA exits
+  * NVIDIA: SAUCE: vfio/iommufd: support Arm RME device assignment
+  * NVIDIA: SAUCE: accel/kvm: set assigned-memory attributes
+  * NVIDIA: SAUCE: system/ram-block-attributes: serialize updates
+  * NVIDIA: SAUCE: linux-headers: add Arm CCA device assignment UAPI
+  * NVIDIA: SAUCE: qapi: add CCA capability query for libvirt
+  * NVIDIA: SAUCE: target/arm/kvm-rme: snapshot Realm images safely
+  * NVIDIA: SAUCE: accel/kvm: reject partial memory conversion
+  * NVIDIA: SAUCE: arm: fix Realm DMA address-space setup
+  * NVIDIA: SAUCE: hw/arm/virt: validate Realm machine configuration
+  * NVIDIA: SAUCE: hw/arm: validate Realm firmware and DTB loading
+  * NVIDIA: SAUCE: arm/kvm: align Realm capability and vCPU setup with KVM
+  * NVIDIA: SAUCE: linux-headers: encode ARM VM type in bits[11:8]
+  * NVIDIA: SAUCE: target/arm/kvm-rme: only activate a Realm once
+  * NVIDIA: SAUCE: accel/kvm: Add kvm_guest_state_protected() helper
+  * NVIDIA: SAUCE: hw/arm/boot: Skip bootloader for confidential guests
+  * NVIDIA: SAUCE: hw/arm/boot: Load DTB as is for confidential VMs
+  * NVIDIA: SAUCE: docs/interop/firmware.json: Add arm-rme firmware feature
+  * NVIDIA: SAUCE: target/arm/kvm-rme: Add DMA remapping for the shared memory region
+  * NVIDIA: SAUCE: hw/arm/virt: Use RAM instead of flash for confidential guest firmware
+  * NVIDIA: SAUCE: hw/arm/virt: Move virt_flash_create() to machvirt_init()
+  * NVIDIA: SAUCE: hw/arm/virt: Disable DTB randomness for confidential VMs
+  * NVIDIA: SAUCE: hw/arm/virt: Reserve one bit of guest physical address for RME
+  * NVIDIA: SAUCE: hw/arm/virt: Embed Realm VM type with IPA address space
+  * NVIDIA: SAUCE: hw/arm/virt: Set proper conduit method for Realms
+  * NVIDIA: SAUCE: target/arm/cpu: Don't read Realm registers
+  * NVIDIA: SAUCE: target/arm/cpu: Set number of PMU counters in KVM
+  * NVIDIA: SAUCE: target/arm/cpu: Set number of breakpoints and watchpoints in KVM
+  * NVIDIA: SAUCE: target/arm/kvm-rme: Populate Realm with runtime images
+  * NVIDIA: SAUCE: target/arm/kvm-rme: Keep track of images loaded in Realm memory
+  * NVIDIA: SAUCE: hw/core/loader: Add a ROM loader notifier
+  * NVIDIA: SAUCE: target/arm/kvm: Use kvm_vm_check_extension() where necessary
+  * NVIDIA: SAUCE: target/arm/kvm: Create scratch Realm VM when requested
+  * NVIDIA: SAUCE: target/arm/kvm-rme: Initialize vCPU
+  * NVIDIA: SAUCE: target/arm/kvm: Split kvm_arch_get/put_registers
+  * NVIDIA: SAUCE: target/arm/kvm-rme: Add mechanic to initialize realms
+  * NVIDIA: SAUCE: target/arm: Add confidential guest support
+  * NVIDIA: SAUCE: target/arm/kvm: Return immediately on error in kvm_arch_init()
+  * NVIDIA: SAUCE: linux-headers: Add RME related definitions
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Thu, 17 Sep 2026 13:12:19 -0500
+
 qemu (1:11.0.0+nvidia-unstable10-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: pcie/acs: Make ACS Control read-only to guests
