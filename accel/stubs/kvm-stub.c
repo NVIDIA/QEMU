@@ -166,3 +166,8 @@ int kvm_set_memory_attributes_shared(hwaddr start, uint64_t size)
 {
     return -ENOSYS;
 }
+
+bool kvm_private_memory_attribute_supported(void)
+{
+    return false;
+}
