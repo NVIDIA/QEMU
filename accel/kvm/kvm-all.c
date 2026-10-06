@@ -107,7 +107,10 @@ bool kvm_pre_fault_memory_supported;
 static bool kvm_has_guest_debug;
 static int kvm_sstep_flags;
 static bool kvm_immediate_exit;
+/* Attributes for the selected private-memory conversion interface. */
 static uint64_t kvm_supported_memory_attributes;
+static uint64_t kvm_supported_vm_memory_attributes;
+static uint64_t kvm_supported_guest_memfd_memory_attributes;
 static bool kvm_guest_memfd_supported;
 static uint64_t kvm_guest_memfd_flags_supported;
 static hwaddr kvm_max_slot_size = ~0;
@@ -1610,7 +1613,7 @@ static int kvm_set_memory_attributes(hwaddr start, uint64_t size, uint64_t attr)
     struct kvm_memory_attributes attrs;
     int r;
 
-    assert((attr & kvm_supported_memory_attributes) == attr);
+    assert((attr & kvm_supported_vm_memory_attributes) == attr);
     attrs.attributes = attr;
     attrs.address = start;
     attrs.size = size;
@@ -1674,7 +1677,7 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
         bool clear_attrs =
             machine_has_assigned_device_memory(current_machine) &&
             memory_region_is_ram_device(mr) &&
-            (kvm_supported_memory_attributes &
+            (kvm_supported_vm_memory_attributes &
              KVM_MEMORY_ATTRIBUTE_PRIVATE);
 
         do {
@@ -3100,7 +3103,9 @@ static int kvm_init(AccelState *as, MachineState *ms)
         goto err;
     }
 
-    kvm_supported_memory_attributes = kvm_vm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES);
+    kvm_supported_vm_memory_attributes =
+        kvm_vm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES);
+    kvm_supported_memory_attributes = kvm_supported_vm_memory_attributes;
     kvm_guest_memfd_supported =
         kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD) &&
         kvm_vm_check_extension(s, KVM_CAP_USER_MEMORY2) &&
@@ -3108,6 +3113,24 @@ static int kvm_init(AccelState *as, MachineState *ms)
     kvm_pre_fault_memory_supported = kvm_vm_check_extension(s, KVM_CAP_PRE_FAULT_MEMORY);
     kvm_guest_memfd_flags_supported =
         kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD_FLAGS);
+
+    if (machine_require_guest_memfd_convert_in_place(ms)) {
+        kvm_supported_guest_memfd_memory_attributes =
+            kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES);
+
+        if (!(kvm_supported_guest_memfd_memory_attributes &
+              KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+            ret = -EINVAL;
+            error_report("In-place conversion is only supported if private "
+                         "memory attributes can be set via guest_memfd. "
+                         "Please ensure the 'gmem_in_place_conversion' KVM "
+                         "module parameter is set to 1.");
+            goto err;
+        }
+
+        kvm_supported_memory_attributes =
+            kvm_supported_guest_memfd_memory_attributes;
+    }
 
     if (s->kernel_irqchip_split == ON_OFF_AUTO_AUTO) {
         s->kernel_irqchip_split = mc->default_kernel_irqchip_split ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
@@ -3437,7 +3460,7 @@ static int handle_memory_hole(MemoryRegionSection *section, bool to_private,
              * the mapping; silently skipping it would leave stale state.
              */
             if (assigned_ram_device &&
-                (kvm_supported_memory_attributes &
+                (kvm_supported_vm_memory_attributes &
                  KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
                 int ret = kvm_set_memory_attributes_shared(
                     section->offset_within_address_space,
