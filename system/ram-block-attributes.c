@@ -45,11 +45,11 @@ ram_block_attributes_rdm_is_populated(const RamDiscardManager *rdm,
     unsigned long first_discarded_bit;
     bool populated;
 
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     first_discarded_bit = find_next_zero_bit(attr->bitmap, last_bit + 1,
                                            first_bit);
     populated = first_discarded_bit > last_bit;
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
 
     return populated;
 }
@@ -170,7 +170,7 @@ ram_block_attributes_rdm_register_listener(RamDiscardManager *rdm,
     g_assert(section->mr == attr->ram_block->mr);
     rdl->section = memory_region_section_new_copy(section);
 
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     QLIST_INSERT_HEAD(&attr->rdl_list, rdl, next);
 
     ret = ram_block_attributes_for_each_populated_section(attr, section, rdl,
@@ -180,7 +180,7 @@ ram_block_attributes_rdm_register_listener(RamDiscardManager *rdm,
                      __func__, strerror(-ret));
         exit(1);
     }
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
 }
 
 static void
@@ -192,13 +192,13 @@ ram_block_attributes_rdm_unregister_listener(RamDiscardManager *rdm,
     g_assert(rdl->section);
     g_assert(rdl->section->mr == attr->ram_block->mr);
 
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     rdl->notify_discard(rdl, rdl->section);
 
     memory_region_section_free_copy(rdl->section);
     rdl->section = NULL;
     QLIST_REMOVE(rdl, next);
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
 }
 
 typedef struct RamBlockAttributesReplayData {
@@ -225,10 +225,10 @@ ram_block_attributes_rdm_replay_populated(const RamDiscardManager *rdm,
     int ret;
 
     g_assert(section->mr == attr->ram_block->mr);
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     ret = ram_block_attributes_for_each_populated_section(
         attr, section, &data, ram_block_attributes_rdm_replay_cb);
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
 
     return ret;
 }
@@ -244,10 +244,10 @@ ram_block_attributes_rdm_replay_discarded(const RamDiscardManager *rdm,
     int ret;
 
     g_assert(section->mr == attr->ram_block->mr);
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     ret = ram_block_attributes_for_each_discarded_section(
         attr, section, &data, ram_block_attributes_rdm_replay_cb);
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
 
     return ret;
 }
@@ -334,7 +334,7 @@ int ram_block_attributes_state_change(RamBlockAttributes *attr,
     nbits = size / block_size;
     last_bit = first_bit + nbits - 1;
 
-    qemu_mutex_lock(&attr->lock);
+    qemu_rec_mutex_lock(&attr->lock);
     is_discarded = find_next_bit(attr->bitmap, attr->bitmap_size,
                                  first_bit) > last_bit;
     is_populated = find_next_zero_bit(attr->bitmap, attr->bitmap_size,
@@ -388,7 +388,7 @@ int ram_block_attributes_state_change(RamBlockAttributes *attr,
         }
     }
 
-    qemu_mutex_unlock(&attr->lock);
+    qemu_rec_mutex_unlock(&attr->lock);
     return ret;
 }
 
@@ -424,7 +424,7 @@ static void ram_block_attributes_init(Object *obj)
 {
     RamBlockAttributes *attr = RAM_BLOCK_ATTRIBUTES(obj);
 
-    qemu_mutex_init(&attr->lock);
+    qemu_rec_mutex_init(&attr->lock);
     QLIST_INIT(&attr->rdl_list);
 }
 
@@ -432,7 +432,7 @@ static void ram_block_attributes_finalize(Object *obj)
 {
     RamBlockAttributes *attr = RAM_BLOCK_ATTRIBUTES(obj);
 
-    qemu_mutex_destroy(&attr->lock);
+    qemu_rec_mutex_destroy(&attr->lock);
 }
 
 static void ram_block_attributes_class_init(ObjectClass *klass,
