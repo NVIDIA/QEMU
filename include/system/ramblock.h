@@ -101,7 +101,7 @@ struct RamBlockAttributes {
      * Protects the bitmap and listener list. Listener callbacks run while
      * this lock is held to order notifications and replay with state changes.
      */
-    QemuMutex lock;
+    QemuRecMutex lock;
 
     /* 1-setting of the bitmap represents ram is populated (shared) */
     unsigned bitmap_size;
