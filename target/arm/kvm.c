@@ -731,8 +731,13 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
      * that SError as fatal, so on a host whose HEST has no SEA-notified
      * GHES source every guest-consumed memory error would otherwise be a
      * guest kernel panic. See kvm_arm_handle_sea().
+     *
+     * Not for realm VMs: like KVM_CAP_ARM_NISV_TO_USER above, the cap is not
+     * on the realm-ext-allowed list (kvm_realm_ext_allowed()), so enabling it
+     * fails with -EINVAL, and it would have no effect anyway because a realm's
+     * external aborts are injected by the RMM and never reach the host.
      */
-    if (kvm_check_extension(s, KVM_CAP_ARM_SEA_TO_USER)) {
+    if (!ms->cgs && kvm_check_extension(s, KVM_CAP_ARM_SEA_TO_USER)) {
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_SEA_TO_USER, 0)) {
             warn_report("Failed to enable KVM_CAP_ARM_SEA_TO_USER cap");
         }
