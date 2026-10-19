@@ -493,6 +493,49 @@ typedef struct PCIIOMMUOps {
      */
     uint64_t (*get_viommu_flags)(void *opaque);
     /**
+     * @alloc_viommu: allocate an iommufd vIOMMU object for a device
+     *
+     * Optional callback, for a vIOMMU whose iommufd vIOMMU object is allocated
+     * at the request of the core, e.g. a Realm one, representing the pSMMU or
+     * a vSMMU. The core can then build objects on top of it, such as a vDEVICE.
+     * The vIOMMU model retains the ownership of the vIOMMU object, which it may
+     * share among multiple devices, until @free_viommu gets called for each of
+     * them.
+     *
+     * @bus: the #PCIBus of the PCI device.
+     *
+     * @opaque: the data passed to pci_setup_iommu().
+     *
+     * @devfn: device and function number of the PCI device.
+     *
+     * @dev: the #HostIOMMUDevice of the PCI device.
+     *
+     * @viommu_id: output the ID of the iommufd vIOMMU object.
+     *
+     * @errp: pass an Error out only when return false
+     *
+     * Returns: true on success, or else false with errp set.
+     */
+    bool (*alloc_viommu)(PCIBus *bus, void *opaque, int devfn,
+                         HostIOMMUDevice *dev, uint32_t *viommu_id,
+                         Error **errp);
+    /**
+     * @free_viommu: release the iommufd vIOMMU object from @alloc_viommu
+     *
+     * Optional callback, but required along with @alloc_viommu. The caller must
+     * destroy any object built on the vIOMMU object beforehand, e.g. a vDEVICE.
+     *
+     * @bus: the #PCIBus of the PCI device.
+     *
+     * @opaque: the data passed to pci_setup_iommu().
+     *
+     * @devfn: device and function number of the PCI device.
+     *
+     * @dev: the #HostIOMMUDevice of the PCI device.
+     */
+    void (*free_viommu)(PCIBus *bus, void *opaque, int devfn,
+                        HostIOMMUDevice *dev);
+    /**
      * @get_host_iommu_quirks: get host IOMMU quirks
      *
      * Optional callback, if not implemented, then vIOMMU doesn't support
@@ -717,6 +760,27 @@ bool pci_device_iommu_msi_direct_gpa(PCIDevice *dev, hwaddr *out_doorbell);
  * @dev: PCI device pointer.
  */
 uint64_t pci_device_get_viommu_flags(PCIDevice *dev);
+
+/**
+ * pci_device_alloc_viommu: allocate an iommufd vIOMMU object for a device.
+ *
+ * Returns: true on success, or false with @errp set.
+ *
+ * @dev: PCI device pointer.
+ * @hiod: the #HostIOMMUDevice of @dev
+ * @viommu_id: output the ID of the iommufd vIOMMU object
+ * @errp: pointer to Error*, to store an error if it happens.
+ */
+bool pci_device_alloc_viommu(PCIDevice *dev, HostIOMMUDevice *hiod,
+                             uint32_t *viommu_id, Error **errp);
+
+/**
+ * pci_device_free_viommu: release the iommufd vIOMMU object of a device.
+ *
+ * @dev: PCI device pointer.
+ * @hiod: the #HostIOMMUDevice of @dev
+ */
+void pci_device_free_viommu(PCIDevice *dev, HostIOMMUDevice *hiod);
 
 /**
  * pci_device_get_host_iommu_quirks: get host IOMMU quirks.
