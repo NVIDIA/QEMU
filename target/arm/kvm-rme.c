@@ -8,8 +8,10 @@
 
 #include "qemu/osdep.h"
 
+#include "hw/arm/smmuv3-realm.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
+#include "hw/core/iommu.h"
 #include "hw/core/loader.h"
 #include "hw/pci/pci.h"
 #include "kvm_arm.h"
@@ -764,8 +766,34 @@ static AddressSpace *rme_dma_get_address_space(PCIBus *bus, void *opaque,
     return guest->dma_as;
 }
 
+/* The Realm vIOMMU of a device is allocated on its nesting parent HWPT */
+static uint64_t rme_dma_get_viommu_flags(void *opaque)
+{
+    return VIOMMU_FLAG_WANT_NESTING_PARENT;
+}
+
+/*
+ * Without a vSMMU, an assigned device still reaches its pSMMU through a Realm
+ * vIOMMU, which then describes no vSMMU.
+ */
+static bool rme_dma_alloc_viommu(PCIBus *bus, void *opaque, int devfn,
+                                 HostIOMMUDevice *hiod, uint32_t *viommu_id,
+                                 Error **errp)
+{
+    return smmuv3_realm_alloc_psmmu_viommu(hiod, viommu_id, errp);
+}
+
+static void rme_dma_free_viommu(PCIBus *bus, void *opaque, int devfn,
+                                HostIOMMUDevice *hiod)
+{
+    smmuv3_realm_free_psmmu_viommu(hiod);
+}
+
 static const PCIIOMMUOps rme_dma_ops = {
     .get_address_space = rme_dma_get_address_space,
+    .get_viommu_flags = rme_dma_get_viommu_flags,
+    .alloc_viommu = rme_dma_alloc_viommu,
+    .free_viommu = rme_dma_free_viommu,
 };
 
 void kvm_arm_rme_init_gpa_space(unsigned int ipa_bits, PCIBus *pci_bus)
