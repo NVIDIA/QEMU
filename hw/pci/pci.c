@@ -3105,6 +3105,34 @@ uint64_t pci_device_get_viommu_flags(PCIDevice *dev)
     return 0;
 }
 
+bool pci_device_alloc_viommu(PCIDevice *dev, HostIOMMUDevice *hiod,
+                             uint32_t *viommu_id, Error **errp)
+{
+    PCIBus *iommu_bus;
+
+    pci_device_get_iommu_bus_devfn(dev, &iommu_bus, NULL, NULL);
+    if (iommu_bus && iommu_bus->iommu_ops->alloc_viommu) {
+        return iommu_bus->iommu_ops->alloc_viommu(pci_get_bus(dev),
+                                                  iommu_bus->iommu_opaque,
+                                                  dev->devfn, hiod, viommu_id,
+                                                  errp);
+    }
+    error_setg(errp, "vIOMMU allocation isn't supported by the device's IOMMU");
+    return false;
+}
+
+void pci_device_free_viommu(PCIDevice *dev, HostIOMMUDevice *hiod)
+{
+    PCIBus *iommu_bus;
+
+    pci_device_get_iommu_bus_devfn(dev, &iommu_bus, NULL, NULL);
+    if (iommu_bus && iommu_bus->iommu_ops->free_viommu) {
+        iommu_bus->iommu_ops->free_viommu(pci_get_bus(dev),
+                                          iommu_bus->iommu_opaque,
+                                          dev->devfn, hiod);
+    }
+}
+
 uint64_t pci_device_get_host_iommu_quirks(PCIDevice *dev, uint32_t type,
                                           void *caps, uint32_t size)
 {
