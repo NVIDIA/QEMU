@@ -32,6 +32,20 @@ int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
     return -ENOSYS;
 }
 
+void iommufd_vdevice_unregister(VFIODevice *vbasedev)
+{
+}
+
+bool iommufd_vdevice_alloc_viommu(VFIODevice *vbasedev, Error **errp)
+{
+    error_setg(errp, "IOMMUFD support is not compiled in");
+    return false;
+}
+
+void iommufd_vdevice_free_viommu(VFIODevice *vbasedev)
+{
+}
+
 int iommufd_tsm_bind(uint32_t rid)
 {
     return -ENODEV;

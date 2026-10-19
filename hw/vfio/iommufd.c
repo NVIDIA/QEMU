@@ -37,13 +37,6 @@
 #define TYPE_HOST_IOMMU_DEVICE_IOMMUFD_VFIO             \
             TYPE_HOST_IOMMU_DEVICE_IOMMUFD "-vfio"
 
-/*
- * Arm SMMUv3 stream-table-entry bits used to build a stage-1 bypass STE for
- * the nested (VIOMMU) domain in the RME device-assignment flow.
- */
-#define VFIO_STRTAB_STE_0_V          (1UL << 0)
-#define VFIO_STRTAB_STE_0_CFG_BYPASS 4
-
 static bool iommufd_tsm_vdevice_is_registered(VFIODevice *vbasedev,
                                               uint32_t rid)
 {
@@ -655,6 +648,48 @@ static int iommufd_cdev_attach_ioas_hwpt(VFIODevice *vbasedev, uint32_t id,
     return 0;
 }
 
+/*
+ * Get a vIOMMU for the vDEVICE of the device from its vIOMMU model. It's done
+ * at VM start, ahead of the vDEVICE, whose guest BDF might not be stable yet,
+ * since the kernel accepts a Realm vSMMU only after the Realm has been created,
+ * and before it gets activated.
+ */
+bool iommufd_vdevice_alloc_viommu(VFIODevice *vbasedev, Error **errp)
+{
+    VFIOPCIDevice *vdev;
+
+    if (vbasedev->vdevice_viommu_id) {
+        return true;
+    }
+    if (vbasedev->type != VFIO_DEVICE_TYPE_PCI || !vbasedev->hiod) {
+        error_setg(errp, "vIOMMU allocation is only supported for PCI");
+        return false;
+    }
+    /* The kernel allocates a vIOMMU only on top of a nesting parent HWPT */
+    if (!vbasedev->hwpt ||
+        !(vbasedev->hwpt->hwpt_flags & IOMMU_HWPT_ALLOC_NEST_PARENT)) {
+        error_setg(errp, "vIOMMU allocation requires a nesting parent HWPT");
+        return false;
+    }
+
+    vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+    return pci_device_alloc_viommu(&vdev->parent_obj, vbasedev->hiod,
+                                   &vbasedev->vdevice_viommu_id, errp);
+}
+
+void iommufd_vdevice_free_viommu(VFIODevice *vbasedev)
+{
+    VFIOPCIDevice *vdev;
+
+    if (!vbasedev->vdevice_viommu_id) {
+        return;
+    }
+
+    vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+    pci_device_free_viommu(&vdev->parent_obj, vbasedev->hiod);
+    vbasedev->vdevice_viommu_id = 0;
+}
+
 int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
 {
     IOMMUFDBackend *iommufd;
@@ -674,17 +709,14 @@ int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
         error_setg(errp, "vdevice registration is not supported for mdevs");
         return -EINVAL;
     }
-    if (!vbasedev->hwpt || !vbasedev->hwpt->viommu_id ||
-        !vbasedev->hwpt->nested_hwpt_id) {
-        error_setg(errp,
-                   "vdevice registration requires a VIOMMU and nested HWPT");
+    if (!iommufd_vdevice_alloc_viommu(vbasedev, errp)) {
         return -EINVAL;
     }
 
     iommufd = vbasedev->iommufd;
     alloc_vdev = (struct iommu_vdevice_alloc) {
         .size = sizeof(alloc_vdev),
-        .viommu_id = vbasedev->hwpt->viommu_id,
+        .viommu_id = vbasedev->vdevice_viommu_id,
         .dev_id = vbasedev->devid,
     };
 
@@ -702,17 +734,21 @@ int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp)
         return ret;
     }
 
-    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev,
-                                        vbasedev->hwpt->nested_hwpt_id, errp);
-    if (ret) {
-        iommufd_backend_free_id(iommufd, alloc_vdev.out_vdevice_id);
-        return ret;
-    }
-
     vbasedev->vdevice_id = alloc_vdev.out_vdevice_id;
     vbasedev->vdevice_rid = alloc_vdev.virt_id;
 
     return 0;
+}
+
+void iommufd_vdevice_unregister(VFIODevice *vbasedev)
+{
+    if (!vbasedev->vdevice_id) {
+        return;
+    }
+
+    iommufd_backend_free_id(vbasedev->iommufd, vbasedev->vdevice_id);
+    vbasedev->vdevice_id = 0;
+    vbasedev->vdevice_rid = 0;
 }
 
 static bool iommufd_cdev_detach_ioas_hwpt(VFIODevice *vbasedev, Error **errp)
@@ -737,93 +773,6 @@ static bool iommufd_cdev_detach_ioas_hwpt(VFIODevice *vbasedev, Error **errp)
     return true;
 }
 
-/*
- * Allocate the nested-translation topology used for RME device assignment: a
- * stage-2 nesting-parent HWPT, a VIOMMU on top of it, and a stage-1 bypass
- * HWPT nested under the VIOMMU. Returns the parent VFIOIOASHwpt (with
- * nested_hwpt_id populated) on success, or NULL with @errp set on failure.
- */
-static VFIOIOASHwpt *
-iommufd_cdev_alloc_viommu_hwpt(VFIODevice *vbasedev,
-                               VFIOIOMMUFDContainer *container,
-                               Error **errp)
-{
-    IOMMUFDBackend *iommufd = vbasedev->iommufd;
-    struct iommu_hwpt_arm_smmuv3 bypass_ste = {
-        .ste = {
-            VFIO_STRTAB_STE_0_V | (VFIO_STRTAB_STE_0_CFG_BYPASS << 1),
-            0,
-        },
-    };
-    struct iommu_viommu_alloc alloc_viommu = {
-        .size = sizeof(alloc_viommu),
-        .flags = 0,
-        .type = IOMMU_VIOMMU_TYPE_ARM_REALM_SMMUV3,
-        .dev_id = vbasedev->devid,
-    };
-    VFIOIOASHwpt *hwpt;
-    Error *detach_err = NULL;
-    uint32_t hwpt_id;
-    bool parent_attached = false;
-    bool viommu_allocated = false;
-    int ret;
-
-    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
-                                    container->ioas_id,
-                                    IOMMU_HWPT_ALLOC_NEST_PARENT,
-                                    IOMMU_HWPT_DATA_NONE, 0, NULL,
-                                    &hwpt_id, errp)) {
-        return NULL;
-    }
-
-    hwpt = g_malloc0(sizeof(*hwpt));
-    hwpt->hwpt_id = hwpt_id;
-    hwpt->hwpt_flags = IOMMU_HWPT_ALLOC_NEST_PARENT;
-    QLIST_INIT(&hwpt->device_list);
-
-    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt->hwpt_id, errp);
-    if (ret) {
-        goto err_free;
-    }
-    parent_attached = true;
-
-    alloc_viommu.hwpt_id = hwpt->hwpt_id;
-    if (ioctl(iommufd->fd, IOMMU_VIOMMU_ALLOC, &alloc_viommu)) {
-        error_setg_errno(errp, errno, "failed to allocate VIOMMU");
-        goto err_free;
-    }
-    viommu_allocated = true;
-
-    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
-                                    alloc_viommu.out_viommu_id, 0,
-                                    IOMMU_HWPT_DATA_ARM_SMMUV3,
-                                    sizeof(bypass_ste), &bypass_ste,
-                                    &hwpt_id, errp)) {
-        goto err_free;
-    }
-
-    hwpt->viommu_id = alloc_viommu.out_viommu_id;
-    hwpt->nested_hwpt_id = hwpt_id;
-
-    return hwpt;
-
-err_free:
-    if (viommu_allocated) {
-        iommufd_backend_free_id(container->be,
-                                alloc_viommu.out_viommu_id);
-    }
-    if (parent_attached &&
-        !iommufd_cdev_detach_ioas_hwpt(vbasedev, &detach_err)) {
-        error_reportf_err(detach_err,
-                          "failed to detach device while unwinding: ");
-        /* Continuing would discard ownership of an attached kernel HWPT. */
-        exit(EXIT_FAILURE);
-    }
-    iommufd_backend_free_id(container->be, hwpt->hwpt_id);
-    g_free(hwpt);
-    return NULL;
-}
-
 static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
                                          VFIOIOMMUFDContainer *container,
                                          Error **errp)
@@ -839,12 +788,13 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
     uint32_t hwpt_id;
     int ret;
 
+    viommu_nesting = vfio_device_get_viommu_flags_want_nesting(vbasedev);
+
     /* Try to find a domain */
     QLIST_FOREACH(hwpt, &container->hwpt_list, next) {
-        bool hwpt_has_vdevice = hwpt->viommu_id && hwpt->nested_hwpt_id;
-
-        /* Never mix regular devices and Realm vDevices in one HWPT. */
-        if (vbasedev->iommufd_vdevice != hwpt_has_vdevice) {
+        /* The vIOMMU can only be allocated on top of a nesting parent HWPT */
+        if (viommu_nesting &&
+            !(hwpt->hwpt_flags & IOMMU_HWPT_ALLOC_NEST_PARENT)) {
             continue;
         }
 
@@ -879,75 +829,66 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
         }
     }
 
-    if (vbasedev->iommufd_vdevice) {
-        hwpt = iommufd_cdev_alloc_viommu_hwpt(vbasedev, container, errp);
-        if (!hwpt) {
-            return false;
-        }
-    } else {
-        /*
-         * This is quite early and VFIO Migration state isn't yet fully
-         * initialized, thus rely only on IOMMU hardware capabilities as to
-         * whether IOMMU dirty tracking is going to be requested. Later
-         * vfio_migration_realize() may decide to use VF dirty tracking
-         * instead.
-         */
-        if (!iommufd_backend_get_device_info(vbasedev->iommufd,
-                                             vbasedev->devid, &type, &caps,
-                                             sizeof(caps), &hw_caps,
-                                             NULL, errp)) {
-            return false;
-        }
+    /*
+     * This is quite early and VFIO Migration state isn't yet fully
+     * initialized, thus rely only on IOMMU hardware capabilities as to
+     * whether IOMMU dirty tracking is going to be requested. Later
+     * vfio_migration_realize() may decide to use VF dirty tracking
+     * instead.
+     */
+    if (!iommufd_backend_get_device_info(vbasedev->iommufd, vbasedev->devid,
+                                         &type, &caps, sizeof(caps), &hw_caps,
+                                         NULL, errp)) {
+        return false;
+    }
 
-        viommu_nesting = vfio_device_get_viommu_flags_want_nesting(vbasedev);
-        viommu_nesting_dirty =
-            vfio_device_get_viommu_flags_want_nesting_dirty(vbasedev);
+    viommu_nesting_dirty =
+        vfio_device_get_viommu_flags_want_nesting_dirty(vbasedev);
 
-        if (hw_caps & IOMMU_HW_CAP_DIRTY_TRACKING) {
-            if (!viommu_nesting || viommu_nesting_dirty) {
-                flags |= IOMMU_HWPT_ALLOC_DIRTY_TRACKING;
-            }
+    if (hw_caps & IOMMU_HW_CAP_DIRTY_TRACKING) {
+        if (!viommu_nesting || viommu_nesting_dirty) {
+            flags |= IOMMU_HWPT_ALLOC_DIRTY_TRACKING;
         }
+    }
 
-        /*
-         * If vIOMMU requests VFIO's cooperation to create nesting parent HWPT,
-         * force to create it so that it could be reused by vIOMMU to create
-         * nested HWPT.
-         */
-        if (viommu_nesting) {
-            flags |= IOMMU_HWPT_ALLOC_NEST_PARENT;
+    /*
+     * If vIOMMU requests VFIO's cooperation to create nesting parent HWPT,
+     * force to create it so that it could be reused by vIOMMU to create
+     * nested HWPT.
+     */
+    if (viommu_nesting) {
+        flags |= IOMMU_HWPT_ALLOC_NEST_PARENT;
 
-            if (vfio_device_get_host_iommu_quirk_bypass_ro(vbasedev, type,
-                                                           &caps,
-                                                           sizeof(caps))) {
-                bcontainer->bypass_ro = true;
-            }
+        if (vfio_device_get_host_iommu_quirk_bypass_ro(vbasedev, type,
+                                                       &caps, sizeof(caps))) {
+            bcontainer->bypass_ro = true;
         }
+    }
 
-        if (cpr_is_incoming()) {
-            hwpt_id = vbasedev->cpr.hwpt_id;
-            goto skip_alloc;
-        }
+    if (cpr_is_incoming()) {
+        hwpt_id = vbasedev->cpr.hwpt_id;
+        goto skip_alloc;
+    }
 
-        if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
-                                        container->ioas_id, flags,
-                                        IOMMU_HWPT_DATA_NONE, 0, NULL,
-                                        &hwpt_id, errp)) {
-            return false;
-        }
+    if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
+                                    container->ioas_id, flags,
+                                    IOMMU_HWPT_DATA_NONE, 0, NULL,
+                                    &hwpt_id, errp)) {
+        return false;
+    }
 
-        ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt_id, errp);
-        if (ret) {
-            iommufd_backend_free_id(container->be, hwpt_id);
-            return false;
-        }
+    ret = iommufd_cdev_attach_ioas_hwpt(vbasedev, hwpt_id, errp);
+    if (ret) {
+        iommufd_backend_free_id(container->be, hwpt_id);
+        return false;
+    }
 
 skip_alloc:
-        hwpt = g_malloc0(sizeof(*hwpt));
-        hwpt->hwpt_id = hwpt_id;
-        hwpt->hwpt_flags = flags;
-        QLIST_INIT(&hwpt->device_list);
-    }
+    hwpt = g_malloc0(sizeof(*hwpt));
+    hwpt->hwpt_id = hwpt_id;
+    hwpt->hwpt_flags = flags;
+    QLIST_INIT(&hwpt->device_list);
+
     vbasedev->hwpt = hwpt;
     vbasedev->cpr.hwpt_id = hwpt->hwpt_id;
     vbasedev->iommu_dirty_tracking = iommufd_hwpt_dirty_tracking(hwpt);
@@ -973,17 +914,6 @@ static void iommufd_cdev_autodomains_put(VFIODevice *vbasedev,
 
     if (QLIST_EMPTY(&hwpt->device_list)) {
         QLIST_REMOVE(hwpt, next);
-        /*
-         * Tear down the RME device-assignment nested topology (if any) in the
-         * reverse order it was allocated: stage-1 bypass HWPT, then the VIOMMU,
-         * then the stage-2 nesting-parent HWPT below.
-         */
-        if (hwpt->nested_hwpt_id) {
-            iommufd_backend_free_id(container->be, hwpt->nested_hwpt_id);
-        }
-        if (hwpt->viommu_id) {
-            iommufd_backend_free_id(container->be, hwpt->viommu_id);
-        }
         iommufd_backend_free_id(container->be, hwpt->hwpt_id);
         g_free(hwpt);
     }
@@ -1018,15 +948,8 @@ static void iommufd_cdev_detach_container(VFIODevice *vbasedev,
         error_report_err(err);
     }
 
-    /*
-     * Destroy the VDEVICE before the VIOMMU it belongs to (freed in
-     * iommufd_cdev_autodomains_put() below), as required by the iommufd UAPI.
-     */
-    if (vbasedev->iommufd_vdevice && vbasedev->vdevice_id) {
-        iommufd_backend_free_id(container->be, vbasedev->vdevice_id);
-        vbasedev->vdevice_id = 0;
-        vbasedev->vdevice_rid = 0;
-    }
+    /* Normally, vfio_exitfn() has destroyed the vDEVICE already */
+    iommufd_vdevice_unregister(vbasedev);
 
     if (vbasedev->hwpt) {
         iommufd_cdev_autodomains_put(vbasedev, container);
