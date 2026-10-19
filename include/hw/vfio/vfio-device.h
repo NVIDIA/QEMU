@@ -87,6 +87,7 @@ typedef struct VFIODevice {
     int devid;
     uint32_t vdevice_id;
     uint32_t vdevice_rid;
+    uint32_t vdevice_viommu_id;
     bool iommufd_vdevice;
     IOMMUFDBackend *iommufd;
     VFIOIOASHwpt *hwpt;

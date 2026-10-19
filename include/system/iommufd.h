@@ -139,7 +139,10 @@ struct rhi_vdev_measurement_params;
  * these return 0 (or true) on success, and -ENODEV if @rid does not name a
  * device that has been registered as an iommufd vDevice.
  */
+bool iommufd_vdevice_alloc_viommu(VFIODevice *vbasedev, Error **errp);
+void iommufd_vdevice_free_viommu(VFIODevice *vbasedev);
 int iommufd_vdevice_register(VFIODevice *vbasedev, Error **errp);
+void iommufd_vdevice_unregister(VFIODevice *vbasedev);
 int iommufd_tsm_bind(uint32_t rid);
 int iommufd_tsm_unbind(uint32_t rid);
 int iommufd_tsm_da_set_tdi_state_run(uint32_t rid);

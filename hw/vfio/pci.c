@@ -4236,11 +4236,11 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
 
 #ifdef CONFIG_IOMMUFD
     /*
-     * Register while realize can still propagate failure if the guest-visible
-     * BDF is already stable. Devices behind an unnumbered bridge are deferred
-     * until the guest assigns the secondary bus number.
+     * Register a hotplugged device while realize can still propagate failure,
+     * if its guest-visible BDF is already stable. Defer a cold-plugged device
+     * to VM start. See vfio_register_bdf().
      */
-    if (!vfio_register_bdf(pdev, false, errp)) {
+    if (!vfio_register_bdf(pdev, true, errp)) {
         goto out_deregister;
     }
 #endif
@@ -4264,6 +4264,10 @@ out_deregister:
         timer_free(vdev->intx.mmap_timer);
     }
 out_unset_idev:
+#ifdef CONFIG_IOMMUFD
+    iommufd_vdevice_unregister(vbasedev);
+    iommufd_vdevice_free_viommu(vbasedev);
+#endif
     if (!vbasedev->mdev) {
         pci_device_unset_iommu_device(pdev);
     }
@@ -4300,6 +4304,11 @@ static void vfio_exitfn(PCIDevice *pdev)
     vfio_pci_disable_rp_atomics(vdev);
     vfio_pci_bars_exit(vdev);
     vfio_migration_exit(vbasedev);
+#ifdef CONFIG_IOMMUFD
+    /* The vDEVICE must go before the vIOMMU, and both before the hiod */
+    iommufd_vdevice_unregister(vbasedev);
+    iommufd_vdevice_free_viommu(vbasedev);
+#endif
     if (!vbasedev->mdev) {
         pci_device_unset_iommu_device(pdev);
     }
@@ -4380,9 +4389,20 @@ static bool vfio_register_bdf(PCIDevice *pci_dev, bool require_running,
         }
         return true;
     }
-    if ((require_running && !vdev->is_running) ||
-        (!pci_bus_is_root(bus) &&
-         (pci_bus_num(bus) == 0))) {
+    if (require_running && !vdev->is_running) {
+        return true;
+    }
+
+    /*
+     * Get the vIOMMU as soon as the VM runs, even if the vDEVICE must wait for
+     * a stable BDF. At VM start, the Realm has been created but not activated,
+     * which is the only window for the kernel to accept a Realm vSMMU.
+     */
+    if (!iommufd_vdevice_alloc_viommu(&vdev->vbasedev, errp)) {
+        return false;
+    }
+
+    if (!pci_bus_is_root(bus) && pci_bus_num(bus) == 0) {
         return true;
     }
 
