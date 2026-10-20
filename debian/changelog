@@ -1,3 +1,23 @@
+qemu (1:11.0.0+nvidia-unstable12-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Block hot-unplug of the vIOMMU owner
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Switch bypass HWPTs with PCI ATS
+  * NVIDIA: SAUCE: vfio/pci: Notify the IOMMU of ATS state changes
+  * NVIDIA: SAUCE: pci: Add an IOMMU callback for ATS state changes
+  * NVIDIA: SAUCE: linux-headers: Update iommufd.h for bypass ATS control
+  * NVIDIA: SAUCE: hw/arm/virt: Support SMMUv3's realm mode
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Support realm VSMMU
+  * NVIDIA: SAUCE: hw/arm/smmuv3: Share smmuv3_pasid_supported()
+  * NVIDIA: SAUCE: linux-headers: add iommu_viommu_arm_realm_vsmmuv3 + VSMMU flag
+  * NVIDIA: SAUCE: vfio/iommufd: Let the vIOMMU model allocate the vDEVICE's vIOMMU
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Allocate a vIOMMU for a Realm without vSMMU
+  * NVIDIA: SAUCE: pci: Add IOMMU ops to allocate an iommufd vIOMMU object
+  * NVIDIA: SAUCE: hw/vfio+cxl: Reject a DPA region that is not mmap-capable
+  * NVIDIA: SAUCE: hw/arm/virt: Always set PCI preserve_config
+  * NVIDIA: SAUCE: system/ram-block-attributes: Allow callback reentry
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Tue, 20 Oct 2026 18:49:49 -0500
+
 qemu (1:11.0.0+nvidia-unstable11-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: arm: fix CCA regression tests
