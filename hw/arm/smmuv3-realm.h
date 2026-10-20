@@ -57,6 +57,7 @@ typedef struct SMMUv3RealmDevice {
     SMMUDevice sdev;
     HostIOMMUDeviceIOMMUFD *hiodi;
     SMMURealmViommu *viommu;
+    Error *unplug_blocker; /* set to block the hot-unplug of the device */
     QLIST_ENTRY(SMMUv3RealmDevice) next;
 } SMMUv3RealmDevice;
 
