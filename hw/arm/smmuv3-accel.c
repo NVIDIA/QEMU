@@ -928,13 +928,6 @@ static AddressSpace *smmuv3_accel_find_add_as(PCIBus *bus, void *opaque,
     }
 }
 
-static inline bool smmuv3_pasid_supported(SMMUv3State *s)
-{
-    return s->ssidsize > SSID_SIZE_MODE_0 ||
-           (s->ssidsize == SSID_SIZE_MODE_AUTO &&
-            FIELD_EX32(s->idr[1], IDR1, SSIDSIZE));
-}
-
 static uint64_t smmuv3_accel_get_viommu_flags(void *opaque)
 {
     /*

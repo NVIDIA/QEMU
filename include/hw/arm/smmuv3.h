@@ -99,6 +99,7 @@ struct SMMUv3Class {
 };
 
 bool smmuv3_ats_enabled(struct SMMUv3State *s);
+bool smmuv3_pasid_supported(struct SMMUv3State *s);
 
 #define TYPE_ARM_SMMUV3   "arm-smmuv3"
 OBJECT_DECLARE_TYPE(SMMUv3State, SMMUv3Class, ARM_SMMUV3)
