@@ -243,12 +243,13 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
     SMMUv3State *s = ARM_SMMUV3(realm_dev->sdev.smmu);
     SMMUv3RealmState *realm = s->s_realm;
     SMMURealmViommu *viommu = realm->viommu;
+    bool alloc = !viommu;
 
     if (realm_dev->viommu) {
         return true;
     }
 
-    if (!viommu) {
+    if (alloc) {
         args.flags = IOMMU_VIOMMU_ARM_REALM_SMMUV3_FLAGS_VSMMU;
         args.reg_base = s->mmio_base;
         args.reg_top = s->mmio_base + 0x20000;
@@ -282,6 +283,23 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
         return false;
     }
 
+    /*
+     * Block the hot-unplug of the device that established the vIOMMU. Freeing
+     * the vIOMMU would unregister the vSMMU that the guest still sees, and the
+     * kernel accepts no new one after the Realm is activated.
+     */
+    if (alloc) {
+        SMMUDevice *sdev = &realm_dev->sdev;
+        PCIDevice *pdev = pci_find_device(sdev->bus, pci_bus_num(sdev->bus),
+                                          sdev->devfn);
+
+        error_setg(&realm_dev->unplug_blocker,
+                   "Realm vSMMU is active: removing the device that "
+                   "established the viommu association would break the "
+                   "guest vSMMU");
+        qdev_add_unplug_blocker(DEVICE(pdev), realm_dev->unplug_blocker);
+    }
+
     realm_dev->viommu = viommu;
     QLIST_INSERT_HEAD(&viommu->device_list, realm_dev, next);
     return true;
@@ -301,6 +319,17 @@ static void smmuv3_realm_dev_put_viommu(SMMUv3RealmDevice *realm_dev)
     if (!host_iommu_device_iommufd_attach_hwpt(hiodi, hiodi->hwpt_id, NULL)) {
         error_report("Unable to attach device 0x%x to its default HWPT",
                      smmu_get_sid(&realm_dev->sdev));
+    }
+
+    /* Unblock it for a realize failure, as finalizing it asserts no blocker */
+    if (realm_dev->unplug_blocker) {
+        SMMUDevice *sdev = &realm_dev->sdev;
+        PCIDevice *pdev = pci_find_device(sdev->bus, pci_bus_num(sdev->bus),
+                                          sdev->devfn);
+
+        qdev_del_unplug_blocker(DEVICE(pdev), realm_dev->unplug_blocker);
+        error_free(realm_dev->unplug_blocker);
+        realm_dev->unplug_blocker = NULL;
     }
 
     QLIST_REMOVE(realm_dev, next);
