@@ -2756,8 +2756,14 @@ int kvm_arch_init_vcpu(CPUState *cs)
      * to EL1, which is wrong for a guest running at EL2 or with HCR_EL2.TGE
      * set. Such VMs keep KVM's SError until the injection learns to
      * target EL2.
+     *
+     * Not for realm VMs either: like KVM_CAP_ARM_NISV_TO_USER, the cap is
+     * not on the realm-ext-allowed list (kvm_realm_ext_allowed()), so
+     * enabling it fails with -EINVAL, and it would have no effect anyway
+     * because a realm's external aborts are injected by the RMM and never
+     * reach the host.
      */
-    if (!cpu->has_el2 &&
+    if (!current_machine->cgs && !cpu->has_el2 &&
         kvm_check_extension(cs->kvm_state, KVM_CAP_ARM_SEA_TO_USER)) {
         if (kvm_vm_enable_cap(cs->kvm_state, KVM_CAP_ARM_SEA_TO_USER, 0)) {
             warn_report_once("Failed to enable KVM_CAP_ARM_SEA_TO_USER cap");
