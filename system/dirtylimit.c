@@ -533,6 +533,10 @@ void qmp_set_vcpu_dirty_limit(bool has_cpu_index,
         return;
     }
 
+    if (!dirtyrate_check_logging_supported(errp)) {
+        return;
+    }
+
     dirtylimit_state_lock();
 
     if (!dirtylimit_in_service()) {
