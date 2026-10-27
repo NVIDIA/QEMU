@@ -50,6 +50,9 @@ memfd_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
     MachineState *machine = MACHINE(qdev_get_machine());
     int fd = cpr_find_fd(name, 0);
     uint32_t ram_flags;
+    bool use_guest_memfd = m->guest_memfd == ON_OFF_AUTO_ON ||
+        (m->guest_memfd == ON_OFF_AUTO_AUTO &&
+         machine_require_guest_memfd_convert_in_place(machine));
 
     if (!backend->size) {
         error_setg(errp, "can't create backend with size 0");
@@ -60,9 +63,7 @@ memfd_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
         goto have_fd;
     }
 
-    if (m->guest_memfd == ON_OFF_AUTO_ON ||
-        (m->guest_memfd == ON_OFF_AUTO_AUTO &&
-         machine_require_guest_memfd_convert_in_place(machine))) {
+    if (use_guest_memfd) {
         /*
          * NOTE: guest-memfd ignores seal=on/off because it always
          * implicitly seals the FD by definition.
@@ -70,12 +71,18 @@ memfd_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
         if (!backend->share) {
             error_setg(errp, "guest-memfd=on must be used with share=on");
             return false;
-        } else if (m->hugetlb) {
-            error_setg(errp, "guest-memfd=on doesn't support hugetlb=on");
+        } else if (m->hugetlb &&
+                   machine_require_guest_memfd(machine) &&
+                   !machine_require_guest_memfd_convert_in_place(machine)) {
+            error_setg(errp, "hugetlb guest-memfd for a confidential guest "
+                       "requires in-place conversion");
             return false;
         }
 
-        fd = kvm_create_guest_memfd(backend->size, errp);
+        fd = m->hugetlb ?
+            kvm_create_guest_memfd_hugetlb(backend->size, m->hugetlbsize,
+                                           errp) :
+            kvm_create_guest_memfd(backend->size, errp);
     } else {
         if (machine_require_guest_memfd_convert_in_place(machine)) {
             error_setg(errp, "the current machine requires in-place conversion,"
@@ -98,7 +105,11 @@ have_fd:
     backend->aligned = true;
     ram_flags = backend->share ? RAM_SHARED : RAM_PRIVATE;
     ram_flags |= backend->reserve ? 0 : RAM_NORESERVE;
-    ram_flags |= RAM_GUEST_MEMFD_SHAREABLE;
+    ram_flags |= use_guest_memfd ? RAM_GUEST_MEMFD_SHAREABLE : 0;
+    if (use_guest_memfd && m->hugetlb &&
+        !machine_require_guest_memfd(machine)) {
+        ram_flags |= RAM_GUEST_MEMFD_SHARED_BINDING;
+    }
     ram_flags |= backend->guest_memfd ? RAM_GUEST_MEMFD : 0;
     return memory_region_init_ram_from_fd(&backend->mr, OBJECT(backend), name,
                                           backend->size, ram_flags, fd, 0, errp);
