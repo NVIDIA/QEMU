@@ -89,6 +89,24 @@ static int64_t do_calculate_dirtyrate(DirtyPageRecord dirty_pages,
         calc_time_ms;
 }
 
+bool dirtyrate_check_logging_supported(Error **errp)
+{
+    RAMBlock *block;
+
+    /* KVM cannot enable dirty logging on guest_memfd memslots. */
+    WITH_RCU_READ_LOCK_GUARD() {
+        RAMBLOCK_FOREACH(block) {
+            if (block->guest_memfd >= 0) {
+                error_setg(errp, "Dirty logging is unsupported for "
+                           "guest_memfd memory");
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 void global_dirty_log_change(unsigned int flag, bool start)
 {
     Error *local_err = NULL;
@@ -816,6 +834,8 @@ void qmp_calc_dirty_rate(int64_t calc_time,
                        "in-place confidential memory");
             return;
         }
+    } else if (!dirtyrate_check_logging_supported(errp)) {
+        return;
     }
 
     /*

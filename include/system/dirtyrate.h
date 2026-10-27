@@ -25,6 +25,9 @@ int64_t vcpu_calculate_dirtyrate(int64_t calc_time_ms,
                                  unsigned int flag,
                                  bool one_shot);
 
+/* Reject logging on guest_memfd bindings before starting a service. */
+bool dirtyrate_check_logging_supported(Error **errp);
+
 void global_dirty_log_change(unsigned int flag,
                              bool start);
 #endif
