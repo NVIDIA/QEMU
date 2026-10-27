@@ -50,7 +50,9 @@ Also note that there are a couple of limitations in using guest_memfd
 in this way compared to a normal memfd, which is why the option is
 exposed as an experimental for the time being:
 
- * guest_memfd does not currently support the hugetlb=on option
+ * hugetlb=on requires an explicit hugetlbsize and a kernel that
+   supports HugeTLB guest_memfd.  Confidential guests also require
+   in-place conversion.
  * guest_memfd does not currently support Transparent Huge Pages
 
 In-place conversion
@@ -73,6 +75,19 @@ memory-backend-memfd backend with guest-memfd=on as shown in the
 "Usage" section. Because of this, guest-memfd=auto (which is the
 default) will result in the parameter being automatically enabled
 if the confidential guest type enables in-place conversion.
+
+For ARM Realms, use the rme-guest object's convert-in-place=on property
+and select that object with -machine confidential-guest-support=ID.
+The default remains the existing separate shared/private backing mode.
+
+On a 4 KiB ARM64 host with 1 GiB HugeTLB pages reserved, use a
+1 GiB-aligned backend size and the memory-backend-memfd properties
+share=on,hugetlb=on,hugetlbsize=1G.  guest-memfd=auto selects guest_memfd
+when the Realm has convert-in-place=on.  The backend requests
+GUEST_MEMFD_FLAG_MMAP and GUEST_MEMFD_FLAG_HUGETLB with page_order=18.
+HugeTLB guest_memfd starts private, so this path does not request
+GUEST_MEMFD_FLAG_INIT_SHARED.  The kernel must have in-place conversion
+enabled for a Realm.
 
 References
 ----------

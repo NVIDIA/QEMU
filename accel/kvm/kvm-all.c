@@ -21,6 +21,7 @@
 
 #include "qemu/atomic.h"
 #include "qemu/option.h"
+#include "qemu/host-utils.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
@@ -799,11 +800,9 @@ static int kvm_mem_flags(MemoryRegion *mr)
     }
     if (memory_region_has_guest_memfd(mr)) {
         assert(kvm_guest_memfd_supported);
-        /*
-         * memory_region_has_guest_memfd() is specifically pertaining to
-         * using guest_memfd to handle private memory use cases.
-         */
-        assert(kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
+        if (machine_require_guest_memfd(current_machine)) {
+            assert(kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
+        }
         flags |= KVM_MEM_GUEST_MEMFD;
     }
     return flags;
@@ -1840,6 +1839,7 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
          * Do not impose VM-wide private attributes in either case.
          */
         if (memory_region_has_guest_memfd(mr) &&
+            machine_require_guest_memfd(current_machine) &&
             !machine_require_guest_memfd_convert_in_place(current_machine)) {
             err = kvm_set_memory_attributes_private(start_addr, slot_size);
             if (err) {
@@ -3511,6 +3511,16 @@ static int handle_memory_hole(MemoryRegionSection *section, bool to_private,
         return -EINVAL;
     }
 
+    /* Shared-only bindings have no private-memory attribute tracker. */
+    if (memory_region_is_ram(mr) &&
+        (mr->ram_block->flags & RAM_GUEST_MEMFD_SHARED_BINDING)) {
+        error_report("Cannot convert shared-only guest_memfd memory "
+                     "region (0x%" HWADDR_PRIx " + 0x%" HWADDR_PRIx ")",
+                     section->offset_within_address_space,
+                     int128_get64(section->size));
+        return -EINVAL;
+    }
+
     /*
      * Because vMMIO region must be shared, guest TD may convert vMMIO
      * region to shared explicitly.  Don't complain such case.  See
@@ -5107,12 +5117,13 @@ bool kvm_guest_state_protected(void)
 }
 
 static int kvm_create_guest_memfd_flags(uint64_t size, uint64_t flags,
-                                        Error **errp)
+                                        uint8_t page_order, Error **errp)
 {
     int fd;
     struct kvm_create_guest_memfd guest_memfd = {
         .size = size,
         .flags = flags,
+        .page_order = page_order,
     };
 
     if (!kvm_guest_memfd_supported) {
@@ -5154,7 +5165,7 @@ int kvm_create_guest_memfd(uint64_t size, Error **errp)
     return kvm_create_guest_memfd_flags(size,
                                         GUEST_MEMFD_FLAG_MMAP |
                                         GUEST_MEMFD_FLAG_INIT_SHARED,
-                                        errp);
+                                        0, errp);
 }
 
 int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
@@ -5164,5 +5175,33 @@ int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
         return -1;
     }
 
-    return kvm_create_guest_memfd_flags(size, 0, errp);
+    return kvm_create_guest_memfd_flags(size, 0, 0, errp);
+}
+
+int kvm_create_guest_memfd_hugetlb(uint64_t size, uint64_t hugetlbsize,
+                                    Error **errp)
+{
+    uint64_t host_page_size = qemu_real_host_page_size();
+    uint64_t flags = GUEST_MEMFD_FLAG_MMAP | GUEST_MEMFD_FLAG_HUGETLB;
+    uint8_t page_order;
+    int fd;
+
+    if (!hugetlbsize || (hugetlbsize & (hugetlbsize - 1)) ||
+        hugetlbsize <= host_page_size || size % hugetlbsize) {
+        error_setg(errp, "guest-memfd hugetlb requires an explicit "
+                   "power-of-two hugetlbsize larger than the host page "
+                   "size and aligned memory size");
+        return -1;
+    }
+
+    page_order = ctz64(hugetlbsize) - ctz64(host_page_size);
+    if (!machine_require_guest_memfd(current_machine)) {
+        flags |= GUEST_MEMFD_FLAG_INIT_SHARED;
+    }
+    fd = kvm_create_guest_memfd_flags(size, flags, page_order, errp);
+    if (fd < 0 && errno == EINVAL && (flags & GUEST_MEMFD_FLAG_INIT_SHARED)) {
+        error_append_hint(errp, "The kernel must support shared HugeTLB "
+                          "guest_memfd initialization.\n");
+    }
+    return fd;
 }

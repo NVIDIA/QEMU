@@ -289,6 +289,9 @@ typedef struct IOMMUTLBEvent {
  */
 #define RAM_GUEST_MEMFD_SHAREABLE   (1 << 14)
 
+/* Shared HugeTLB guest_memfd supplied directly to KVM, without private RAM. */
+#define RAM_GUEST_MEMFD_SHARED_BINDING (1 << 15)
+
 static inline void iommu_notifier_init(IOMMUNotifier *n, IOMMUNotify fn,
                                        IOMMUNotifierFlag flags,
                                        hwaddr start, hwaddr end,

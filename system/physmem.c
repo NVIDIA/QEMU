@@ -2273,6 +2273,18 @@ static void ram_block_add(RAMBlock *new_block, Error **errp)
         }
     }
 
+    if (new_block->flags & RAM_GUEST_MEMFD_SHARED_BINDING) {
+        assert(!(new_block->flags & RAM_GUEST_MEMFD));
+        assert(new_block->fd >= 0);
+        assert(new_block->guest_memfd < 0);
+        new_block->guest_memfd = qemu_dup(new_block->fd);
+        if (new_block->guest_memfd < 0) {
+            error_setg_errno(errp, errno, "Cannot duplicate shared guest_memfd");
+            qemu_mutex_unlock_ramlist();
+            goto out_free;
+        }
+    }
+
     ram_size = (new_block->offset + new_block->max_length) >> TARGET_PAGE_BITS;
     dirty_memory_extend(ram_size);
     /* Keep the list sorted from biggest to smallest block.  Unlike QTAILQ,
@@ -2347,7 +2359,8 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, ram_addr_t max_size,
     assert((ram_flags & ~(RAM_SHARED | RAM_PMEM | RAM_NORESERVE |
                           RAM_PROTECTED | RAM_NAMED_FILE | RAM_READONLY |
                           RAM_READONLY_FD | RAM_GUEST_MEMFD |
-                          RAM_RESIZEABLE | RAM_GUEST_MEMFD_SHAREABLE)) == 0);
+                          RAM_RESIZEABLE | RAM_GUEST_MEMFD_SHAREABLE |
+                          RAM_GUEST_MEMFD_SHARED_BINDING)) == 0);
     assert(max_size >= size);
 
     if (xen_enabled()) {
@@ -2615,9 +2628,11 @@ static void reclaim_ramblock(RAMBlock *block)
     }
 
     if (block->guest_memfd >= 0) {
-        ram_block_attributes_destroy(block->attributes);
+        if (block->flags & RAM_GUEST_MEMFD) {
+            ram_block_attributes_destroy(block->attributes);
+            ram_block_coordinated_discard_require(false);
+        }
         close(block->guest_memfd);
-        ram_block_coordinated_discard_require(false);
     }
 
     g_free(block);
@@ -4532,6 +4547,14 @@ static bool ram_is_cpr_compatible(RAMBlock *rb)
 void ram_block_add_cpr_blocker(RAMBlock *rb, Error **errp)
 {
     assert(qemu_ram_is_migratable(rb));
+
+    if (rb->flags & RAM_GUEST_MEMFD_SHARED_BINDING) {
+        error_setg(&rb->cpr_blocker,
+                   "HugeTLB guest_memfd direct bindings do not support "
+                   "migration or dirty logging");
+        migrate_add_blocker(&rb->cpr_blocker, errp);
+        return;
+    }
 
     if (ram_is_cpr_compatible(rb)) {
         return;
