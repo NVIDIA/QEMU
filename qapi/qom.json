@@ -1213,10 +1213,14 @@
 #
 # Properties for rme-guest objects.
 #
+# @convert-in-place: use a single guest_memfd for shared and private
+#     Realm memory, preserving the backing pages across conversions.
+#     Required for hugetlb guest_memfd.  (default: false, since: 11.2)
+#
 # Since: 11.0
 ##
 { 'struct': 'RmeGuestProperties',
-  'data': {} }
+  'data': { '*convert-in-place': 'bool' } }
 
 ##
 # @ObjectType:
