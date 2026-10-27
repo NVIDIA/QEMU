@@ -590,6 +590,17 @@ static bool rme_guest_can_be_deleted(UserCreatable *uc)
 
 static void rme_guest_unparent(Object *obj);
 
+static bool rme_guest_get_convert_in_place(Object *obj, Error **errp)
+{
+    return CONFIDENTIAL_GUEST_SUPPORT(obj)->convert_in_place;
+}
+
+static void rme_guest_set_convert_in_place(Object *obj, bool value,
+                                           Error **errp)
+{
+    CONFIDENTIAL_GUEST_SUPPORT(obj)->convert_in_place = value;
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     ConfidentialGuestSupportClass *klass = CONFIDENTIAL_GUEST_SUPPORT_CLASS(oc);
@@ -598,6 +609,11 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
     oc->unparent = rme_guest_unparent;
     klass->kvm_init = kvm_arm_rme_init;
     ucc->can_be_deleted = rme_guest_can_be_deleted;
+    object_class_property_add_bool(oc, "convert-in-place",
+                                   rme_guest_get_convert_in_place,
+                                   rme_guest_set_convert_in_place);
+    object_class_property_set_description(oc, "convert-in-place",
+                                          "Convert Realm memory in place");
 }
 
 static void rme_guest_init(Object *obj)
