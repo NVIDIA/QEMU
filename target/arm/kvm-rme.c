@@ -478,16 +478,18 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
                                                rme_compare_ram_regions);
 }
 
+/* Keep the downstream Arm fallback out of the global UAPI namespace. */
+#define NVIDIA_KVM_CAP_ARM_RMI_LEGACY 249
+
 #define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
 
 /*
  * Returns the KVM CCA capability number for the running kernel.
  *
  * The capability number is not stable: it shifts whenever other KVM
- * capabilities land ahead of it, so the value in linux-headers only matches
- * hosts built from the same snapshot. NVIDIA kernels export the live value
- * as a module parameter; prefer it and fall back to the compile-time
- * constant.
+ * capabilities land ahead of it. NVIDIA kernels export the live value
+ * as a module parameter; prefer it and fall back to the legacy Arm ABI
+ * number when that parameter is absent.
  *
  * FIXME: this is a downstream-only workaround and must be dropped before the
  * series is posted upstream, where KVM_CAP_ARM_RMI will have a fixed value.
@@ -503,7 +505,7 @@ static unsigned int kvm_arm_rme_get_cap(void)
         FILE *f;
         int cap;
 
-        rme_cap = KVM_CAP_ARM_RMI;
+        rme_cap = NVIDIA_KVM_CAP_ARM_RMI_LEGACY;
 
         f = fopen(KVM_CAP_ARM_RMI_SYSFS_PATH, "r");
         if (f) {
@@ -517,14 +519,15 @@ static unsigned int kvm_arm_rme_get_cap(void)
             } else {
                 warn_report("ignoring out-of-range %s, falling back to "
                             "KVM_CAP_ARM_RMI=%d",
-                            KVM_CAP_ARM_RMI_SYSFS_PATH, KVM_CAP_ARM_RMI);
+                            KVM_CAP_ARM_RMI_SYSFS_PATH,
+                            NVIDIA_KVM_CAP_ARM_RMI_LEGACY);
             }
             fclose(f);
         } else {
             warn_report("cannot read %s: %s; falling back to "
                         "KVM_CAP_ARM_RMI=%d",
                         KVM_CAP_ARM_RMI_SYSFS_PATH, strerror(errno),
-                        KVM_CAP_ARM_RMI);
+                        NVIDIA_KVM_CAP_ARM_RMI_LEGACY);
         }
         detected = true;
     }
