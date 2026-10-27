@@ -85,9 +85,45 @@ On a 4 KiB ARM64 host with 1 GiB HugeTLB pages reserved, use a
 share=on,hugetlb=on,hugetlbsize=1G.  guest-memfd=auto selects guest_memfd
 when the Realm has convert-in-place=on.  The backend requests
 GUEST_MEMFD_FLAG_MMAP and GUEST_MEMFD_FLAG_HUGETLB with page_order=18.
-HugeTLB guest_memfd starts private, so this path does not request
+For a Realm, HugeTLB guest_memfd starts private and this path omits
 GUEST_MEMFD_FLAG_INIT_SHARED.  The kernel must have in-place conversion
-enabled for a Realm.
+enabled for a Realm.  For an ordinary VM, QEMU additionally requests
+GUEST_MEMFD_FLAG_INIT_SHARED so firmware and guest images can be loaded
+through the host mapping.  The kernel must support this flag combination.
+QEMU binds ordinary HugeTLB backing directly with KVM_MEM_GUEST_MEMFD;
+migration and dirty logging are unsupported for these direct bindings.
+
+The ARM64 integration test reserves two 1 GiB HugeTLB pages and restores
+the original pool after the VM exits.  It builds a static validation
+initramfs with gcc, boots the running host's kernel as a guest, verifies
+1 GiB of guest memory and direct virtio block I/O, checks the host disk
+contents, and asserts an actual 1 GiB stage-2 leaf from a trace instance
+filtered to the QEMU threads::
+
+    sudo tests/functional/aarch64/guest_memfd_hugetlb.py \
+      --qemu build/qemu-system-aarch64 --output results-gmem
+
+The host needs gcc with static libc, modprobe, and matching guest kernel
+modules.  The default guest kernel is /boot/vmlinuz-RELEASE.  For a
+different guest, use --kernel and --guest-release to select matching
+installed modules, or --initrd to supply a validation initramfs containing
+the accompanying guest_memfd_hugetlb_guest.c PID 1 program.  The test
+records the command, guest console, QEMU diagnostics, stage-2 trace, and
+HugeTLB accounting in the output directory.
+
+For a quick paused-VM creation check using one HugeTLB page, add
+--create-only.  That mode does not prove guest access or stage-2 leaves.
+
+On a CCA host, add --realm to test the private Realm path.  The guest
+kernel must support CCA.  Its image is staged in host buffers before ROM
+reset can write private RAM, then populated through the RMM interface.
+The test requires a private 1 GiB stage-2 leaf in Realm mode.
+
+Shared backing may use order-0 folio descriptors after restructuring.
+The allocator's original 1 GiB allocation and the actual stage-2 leaf
+size are separate properties; an order-0 trace field does not imply a
+4 KiB stage-2 leaf.  Host and guest base pages remain 4 KiB.
+
 
 References
 ----------
