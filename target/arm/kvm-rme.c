@@ -15,6 +15,7 @@
 #include "hw/core/loader.h"
 #include "hw/pci/pci.h"
 #include "kvm_arm.h"
+#include "kvm-rme-rom.h"
 #include "migration/blocker.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -138,7 +139,8 @@ static int rme_population_chunk_size(hwaddr base, hwaddr size,
 
     section = memory_region_find(get_system_memory(), base, size);
     mr = section.mr;
-    if (!mr) {
+    if (!mr || section.offset_within_address_space != base) {
+        memory_region_unref(mr);
         error_setg(errp, "Realm population GPA 0x%" HWADDR_PRIx
                    " is not backed by RAM", base);
         return -EINVAL;
@@ -380,7 +382,8 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
     }
 
     guest->activated = true;
-    if (guest->rom_load_notifier_registered) {
+    if (guest->rom_load_notifier_registered &&
+        !CONFIDENTIAL_GUEST_SUPPORT(guest)->convert_in_place) {
         notifier_remove(&guest->rom_load_notifier);
         guest->rom_load_notifier_registered = false;
     }
@@ -406,10 +409,6 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
     RomLoaderNotifyData *rom = data;
     uint8_t *copy;
 
-    if (guest->activated) {
-        return;
-    }
-
     if (rom->addr == -1) {
         /*
          * These blobs (ACPI tables) are not loaded into guest RAM at reset.
@@ -419,6 +418,26 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
         return;
     }
     if (!rom->len) {
+        return;
+    }
+    if (CONFIDENTIAL_GUEST_SUPPORT(guest)->convert_in_place) {
+        Error *err = NULL;
+        bool private_ram;
+
+        if (rme_rom_private_range(rom->addr, rom->len, &private_ram, &err)) {
+            error_report_err(err);
+            exit(EXIT_FAILURE);
+        }
+        if (!private_ram) {
+            return;
+        }
+        if (guest->activated) {
+            error_report("Resetting an activated Realm with in-place "
+                         "guest_memfd memory is unsupported");
+            exit(EXIT_FAILURE);
+        }
+        rom->handled = true;
+    } else if (guest->activated) {
         return;
     }
     if (rom->data_len > rom->len) {

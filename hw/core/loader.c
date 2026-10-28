@@ -1278,6 +1278,22 @@ static void rom_reset(void *unused)
         if (!rom->data_available) {
             continue;
         }
+        notify = (RomLoaderNotifyData) {
+            .addr = rom->addr,
+            .len = rom->romsize,
+            .data_len = rom->datasize,
+            .data = rom->data,
+        };
+        if (!notifier_list_empty(&rom_loader_notifier)) {
+            notifier_list_notify(&rom_loader_notifier, &notify);
+        }
+        if (notify.handled) {
+            /* Private loaders also own zero-fill and instruction coherency. */
+            if (rom->isrom) {
+                rom_free_data(rom);
+            }
+            continue;
+        }
         if (rom->mr) {
             void *host = memory_region_get_ram_ptr(rom->mr);
 
@@ -1309,16 +1325,6 @@ static void rom_reset(void *unused)
         address_space_flush_icache_range(rom->as, rom->addr, rom->datasize);
 
         trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
-
-        if (!notifier_list_empty(&rom_loader_notifier)) {
-            notify = (RomLoaderNotifyData) {
-                .addr = rom->addr,
-                .len = rom->romsize,
-                .data_len = rom->datasize,
-                .data = rom->data,
-            };
-            notifier_list_notify(&rom_loader_notifier, &notify);
-        }
 
         if (rom->isrom) {
             /* rom needs to be written only once */
