@@ -351,13 +351,17 @@ typedef struct RomLoaderNotifyData {
     size_t data_len;
     /* File-backed data, valid only for the duration of the notification */
     uint8_t *data;
+    /* Listener owns loading this blob; do not touch the destination mapping. */
+    bool handled;
 } RomLoaderNotifyData;
 
 /**
  * rom_add_load_notifier - Add a notifier for loaded images
  *
  * Add a notifier that will be invoked with a RomLoaderNotifyData structure for
- * each blob loaded into guest memory, after the blob is loaded.
+ * each blob before ROM reset writes it into guest memory. A listener may
+ * set handled to take responsibility for loading a private-memory image.
+ * Notifications with addr == -1 describe fw_cfg data instead of a RAM write.
  */
 void rom_add_load_notifier(Notifier *notifier);
 
