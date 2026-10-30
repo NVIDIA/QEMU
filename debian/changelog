@@ -1,3 +1,9 @@
+qemu (1:11.0.0+nvidia-unstable13-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: WAR: hw/arm/smmuv3: Preserve the STE-only HWPT ABI in accel mode
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 30 Oct 2026 11:39:09 -0500
+
 qemu (1:11.0.0+nvidia-unstable12-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Block hot-unplug of the vIOMMU owner
