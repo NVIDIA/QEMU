@@ -17,7 +17,8 @@
 #endif
 
 #define VSMMU_IDR0_VALUE \
-    ((1 << 26) | /* terminate with RAZ/WI */ \
+    ((1 << 27) | /* Linear and 2-level Stream Tables */ \
+     (1 << 26) | /* terminate with RAZ/WI */ \
      (1 << 24) | /* no stalls supported */ \
      (2 << 21) | /* little endian */ \
      (1 << 12) | /* 16-bit ASID support */ \
