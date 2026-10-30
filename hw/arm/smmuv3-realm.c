@@ -15,6 +15,7 @@
 #include "hw/pci-host/gpex.h"
 #include "hw/core/iommu.h"
 #include "hw/vfio/pci.h"
+#include "hw/arm/smmuv3-common.h"
 
 #include "smmuv3-realm.h"
 
@@ -235,6 +236,43 @@ static bool smmuv3_realm_viommu_alloc_bypass(SMMURealmViommu *viommu,
                                       &viommu->bypass_ats_hwpt_id, errp);
 }
 
+/*
+ * The RMM requires the VSMMU to report exactly the translation table formats
+ * (IDR0.TTF and IDR0.TTENDIAN) and granules of the physical SMMU, which reads
+ * the Realm's CDs by itself, but allows an OAS up to that of the physical SMMU
+ * capped at 48 bits. Take them from the SMMU behind @hiodi, the OAS up to that
+ * cap, and fill the other IDR0 fields as VSMMU_IDR0_VALUE does.
+ */
+static bool smmuv3_realm_host_idrs(HostIOMMUDeviceIOMMUFD *hiodi,
+                                   uint32_t *idr0, uint32_t *idr5,
+                                   Error **errp)
+{
+    struct iommu_hw_info_arm_smmuv3 info;
+    uint32_t data_type = IOMMU_HW_INFO_TYPE_DEFAULT;
+    uint64_t caps;
+
+    if (!iommufd_backend_get_device_info(hiodi->iommufd, hiodi->devid,
+                                         &data_type, &info, sizeof(info), &caps,
+                                         NULL, errp)) {
+        return false;
+    }
+
+    if (data_type != IOMMU_HW_INFO_TYPE_ARM_SMMUV3) {
+        error_setg(errp, "Wrong data type (%d) for Host SMMUv3 device info",
+                   data_type);
+        return false;
+    }
+
+    *idr0 = (VSMMU_IDR0_VALUE & ~(R_IDR0_TTF_MASK | R_IDR0_TTENDIAN_MASK)) |
+            (info.idr[0] & (R_IDR0_TTF_MASK | R_IDR0_TTENDIAN_MASK));
+    *idr5 = info.idr[5] & (R_IDR5_GRAN4K_MASK | R_IDR5_GRAN16K_MASK |
+                           R_IDR5_GRAN64K_MASK);
+    *idr5 = FIELD_DP32(*idr5, IDR5, OAS,
+                       MIN(FIELD_EX32(info.idr[5], IDR5, OAS),
+                           SMMU_IDR5_OAS_48));
+    return true;
+}
+
 static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
                                          Error **errp)
 {
@@ -244,6 +282,8 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
     SMMUv3RealmState *realm = s->s_realm;
     SMMURealmViommu *viommu = realm->viommu;
     bool alloc = !viommu;
+    uint32_t idr0;
+    uint32_t idr5;
 
     if (realm_dev->viommu) {
         return true;
@@ -254,10 +294,13 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
         args.reg_base = s->mmio_base;
         args.reg_top = s->mmio_base + 0x20000;
         args.aidr = VSMMU_AIDR_VALUE;
-        args.idr[0] = VSMMU_IDR0_VALUE;
+        if (!smmuv3_realm_host_idrs(hiodi, &idr0, &idr5, errp)) {
+            return false;
+        }
+        args.idr[0] = idr0;
         args.idr[1] = VSMMU_IDR1_VALUE;
         args.idr[3] = VSMMU_IDR3_VALUE;
-        args.idr[5] = VSMMU_IDR5_VALUE;
+        args.idr[5] = idr5;
 
         viommu = smmuv3_realm_viommu_alloc(hiodi, &args, sizeof(args), errp);
         if (!viommu) {
@@ -268,6 +311,9 @@ static bool smmuv3_realm_dev_get_viommu(SMMUv3RealmDevice *realm_dev,
             return false;
         }
         realm->viommu = viommu;
+        /* Keep the IDRs of the model in step with those of the VSMMU */
+        s->idr[0] = idr0;
+        s->idr[5] = idr5;
     }
 
     /*
