@@ -126,6 +126,7 @@ if have_system
   tests += {
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
+    'test-rme-rom': [meson.project_source_root() / 'target/arm/kvm-rme-rom.c'],
     'test-opts-visitor': [testqapi],
     'test-xs-node': [qom],
     'test-virtio-dmabuf': [meson.project_source_root() / 'hw/display/virtio-dmabuf.c'],

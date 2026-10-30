@@ -21,6 +21,7 @@
 
 #include "qemu/atomic.h"
 #include "qemu/option.h"
+#include "qemu/host-utils.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
@@ -107,8 +108,12 @@ bool kvm_pre_fault_memory_supported;
 static bool kvm_has_guest_debug;
 static int kvm_sstep_flags;
 static bool kvm_immediate_exit;
+/* Attributes for the selected private-memory conversion interface. */
 static uint64_t kvm_supported_memory_attributes;
+static uint64_t kvm_supported_vm_memory_attributes;
+static uint64_t kvm_supported_guest_memfd_memory_attributes;
 static bool kvm_guest_memfd_supported;
+static uint64_t kvm_guest_memfd_flags_supported;
 static hwaddr kvm_max_slot_size = ~0;
 
 static const KVMCapabilityInfo kvm_required_capabilities[] = {
@@ -795,6 +800,9 @@ static int kvm_mem_flags(MemoryRegion *mr)
     }
     if (memory_region_has_guest_memfd(mr)) {
         assert(kvm_guest_memfd_supported);
+        if (machine_require_guest_memfd(current_machine)) {
+            assert(kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
+        }
         flags |= KVM_MEM_GUEST_MEMFD;
     }
     return flags;
@@ -1604,7 +1612,7 @@ static int kvm_set_memory_attributes(hwaddr start, uint64_t size, uint64_t attr)
     struct kvm_memory_attributes attrs;
     int r;
 
-    assert((attr & kvm_supported_memory_attributes) == attr);
+    assert((attr & kvm_supported_vm_memory_attributes) == attr);
     attrs.attributes = attr;
     attrs.address = start;
     attrs.size = size;
@@ -1619,14 +1627,83 @@ static int kvm_set_memory_attributes(hwaddr start, uint64_t size, uint64_t attr)
     return r;
 }
 
-int kvm_set_memory_attributes_private(hwaddr start, uint64_t size)
+static int kvm_gmem_ioctl(int guest_memfd, unsigned long type, ...)
 {
-    return kvm_set_memory_attributes(start, size, KVM_MEMORY_ATTRIBUTE_PRIVATE);
+    int ret;
+    void *arg;
+    va_list ap;
+
+    va_start(ap, type);
+    arg = va_arg(ap, void *);
+    va_end(ap);
+
+    ret = ioctl(guest_memfd, type, arg);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    return ret;
 }
 
-int kvm_set_memory_attributes_shared(hwaddr start, uint64_t size)
+static int guest_memfd_set_memory_attributes_fd(int guest_memfd, hwaddr offset,
+                                                uint64_t size, uint64_t attr)
 {
-    return kvm_set_memory_attributes(start, size, 0);
+    struct kvm_memory_attributes2 attrs = {0};
+    int r;
+
+    assert((attr & kvm_supported_guest_memfd_memory_attributes) == attr);
+    attrs.attributes = attr;
+    attrs.offset = offset;
+    attrs.size = size;
+    attrs.flags = 0;
+
+    /*
+     * guest_memfd may need to delay conversion requests due to
+     * the memory being in-use by the kernel. In most cases these
+     * will be transient uses. In some cases, userspace itself may
+     * be the cause of the memory being considered in-use, though
+     * QEMU currently takes steps to avoid this (e.g. via
+     * RamBlockAttributes). On that basis, this code loops
+     * indefinitely with the assumption that only transient cases
+     * will block, and that those will be for relatively short
+     * periods vs. the overall conversion path.
+     * If those assumptions at some point prove false, most likely
+     * this will manifest as guest-side lockups on their conversion
+     * path, which seems like the appropriate way to surface this
+     * situation to the guest owner rather than some hard timeout.
+     */
+    do {
+        r = kvm_gmem_ioctl(guest_memfd, KVM_SET_MEMORY_ATTRIBUTES2, &attrs);
+    } while (r == -EAGAIN);
+
+    if (r) {
+        error_report("failed to set memory (0x%" HWADDR_PRIx "+0x%" PRIx64 ") "
+                     "with attr 0x%" PRIx64 " error '%s'",
+                     offset, size, attr, strerror(-r));
+    }
+    return r;
+}
+
+static int guest_memfd_set_memory_section_attributes(MemoryRegionSection *section, uint64_t attr)
+{
+    hwaddr convert_offset, convert_size;
+    MemoryRegion *mr = section->mr;
+    RAMBlock *rb;
+
+    assert(mr);
+    rb = mr->ram_block;
+    assert(rb->guest_memfd >= 0);
+    convert_offset = section->offset_within_region;
+    convert_size = int128_get64(section->size);
+
+    return guest_memfd_set_memory_attributes_fd(rb->guest_memfd,
+                                                convert_offset,
+                                                convert_size,
+                                                attr);
+}
+
+bool kvm_private_memory_attribute_supported(void)
+{
+    return !!(kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
 }
 
 /* Called with KVMMemoryListener.slots_lock held */
@@ -1668,7 +1745,7 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
         bool clear_attrs =
             machine_has_assigned_device_memory(current_machine) &&
             memory_region_is_ram_device(mr) &&
-            (kvm_supported_memory_attributes &
+            (kvm_supported_vm_memory_attributes &
              KVM_MEMORY_ATTRIBUTE_PRIVATE);
 
         do {
@@ -1723,7 +1800,7 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
              * kvm_arch_post_set_memory_attributes() / kvm_unmap_gfn_range().
              */
             if (clear_attrs) {
-                if (kvm_set_memory_attributes_shared(start_addr, slot_size)) {
+                if (kvm_set_memory_attributes(start_addr, slot_size, 0)) {
                     error_report("failed to clear memory attributes while "
                                  "removing slot [0x%" HWADDR_PRIx
                                  ", 0x%" HWADDR_PRIx ")",
@@ -1760,7 +1837,15 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
             abort();
         }
 
-        if (memory_region_has_guest_memfd(mr)) {
+        /*
+         * In-place memory attributes belong to the guest_memfd inode.
+         * Ordinary files can start shared via INIT_SHARED; HugeTLB files
+         * start private and Realm population converts the required ranges.
+         * Do not impose VM-wide private attributes in either case.
+         */
+        if (memory_region_has_guest_memfd(mr) &&
+            machine_require_guest_memfd(current_machine) &&
+            !machine_require_guest_memfd_convert_in_place(current_machine)) {
             err = kvm_set_memory_attributes_private(start_addr, slot_size);
             if (err) {
                 error_report("%s: failed to set memory attribute private: %s",
@@ -3094,12 +3179,33 @@ static int kvm_init(AccelState *as, MachineState *ms)
         goto err;
     }
 
-    kvm_supported_memory_attributes = kvm_vm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES);
+    kvm_supported_vm_memory_attributes =
+        kvm_vm_check_extension(s, KVM_CAP_MEMORY_ATTRIBUTES);
+    kvm_supported_memory_attributes = kvm_supported_vm_memory_attributes;
     kvm_guest_memfd_supported =
         kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD) &&
-        kvm_vm_check_extension(s, KVM_CAP_USER_MEMORY2) &&
-        (kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE);
+        kvm_vm_check_extension(s, KVM_CAP_USER_MEMORY2);
     kvm_pre_fault_memory_supported = kvm_vm_check_extension(s, KVM_CAP_PRE_FAULT_MEMORY);
+    kvm_guest_memfd_flags_supported =
+        kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD_FLAGS);
+
+    if (machine_require_guest_memfd_convert_in_place(ms)) {
+        kvm_supported_guest_memfd_memory_attributes =
+            kvm_vm_check_extension(s, KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES);
+
+        if (!(kvm_supported_guest_memfd_memory_attributes &
+              KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+            ret = -EINVAL;
+            error_report("In-place conversion is only supported if private "
+                         "memory attributes can be set via guest_memfd. "
+                         "Please ensure the 'gmem_in_place_conversion' KVM "
+                         "module parameter is set to 1.");
+            goto err;
+        }
+
+        kvm_supported_memory_attributes =
+            kvm_supported_guest_memfd_memory_attributes;
+    }
 
     if (s->kernel_irqchip_split == ON_OFF_AUTO_AUTO) {
         s->kernel_irqchip_split = mc->default_kernel_irqchip_split ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
@@ -3370,13 +3476,226 @@ static void kvm_eat_signals(CPUState *cpu)
     } while (sigismember(&chkset, SIG_IPI));
 }
 
-int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
+/*
+ * This handles checking whether a conversion overlaps with any holes in
+ * the given section/range, and indicates whether or not the section/range
+ * can be safely skipped (which is generally allowed as long as the
+ * conversion is private->shared and not the other way around).
+ *
+ * Returns 0 if section is normal guest-memfd-backed memory, or is a hole or
+ * non-RAM/ROM region that should be skipped as MMIO. In the latter case, the
+ * 'skip' parameter will be set. Returns < 0 if the conversion request is not
+ * valid.
+ *
+ * 'start' corresponds to the starting range memory_region_find() was
+ * called for, and is used to determine if there are any MMIO holes preceding
+ * the region passed in so the appropriate checks can be made on those
+ * ranges.
+ */
+static int handle_memory_hole(MemoryRegionSection *section, bool to_private,
+                              hwaddr start, bool *skip)
 {
-    MemoryRegionSection section;
+    MemoryRegion *mr = section->mr;
+
+    if (!mr) {
+        /*
+         * TDX requires vMMIO region to be shared to inject #VE to guest.
+         * OVMF issues conservatively MapGPA(shared) on 32bit PCI MMIO
+         * region, and vIO-APIC 0xFEC00000 4K page.
+         * OVMF assigns 32bit PCI MMIO region to
+         * [top of low memory: typically 2GB=0xC000000,  0xFC00000)
+         *
+         * If the current lookup failed to find any regions, then skip the
+         * entire remaining range as a hole/MMIO.
+         */
+        if (!to_private) {
+            *skip = true;
+            return 0;
+        }
+        return -EINVAL;
+    }
+
+    /* Shared-only bindings have no private-memory attribute tracker. */
+    if (memory_region_is_ram(mr) &&
+        (mr->ram_block->flags & RAM_GUEST_MEMFD_SHARED_BINDING)) {
+        error_report("Cannot convert shared-only guest_memfd memory "
+                     "region (0x%" HWADDR_PRIx " + 0x%" HWADDR_PRIx ")",
+                     section->offset_within_address_space,
+                     int128_get64(section->size));
+        return -EINVAL;
+    }
+
+    /*
+     * Because vMMIO region must be shared, guest TD may convert vMMIO
+     * region to shared explicitly.  Don't complain such case.  See
+     * memory_region_type() for checking if the region is MMIO region.
+     */
+    if (!memory_region_has_guest_memfd(mr)) {
+        bool assigned_ram_device =
+            machine_has_assigned_device_memory(current_machine) &&
+            memory_region_is_ram_device(mr);
+
+        if (!to_private &&
+            (!memory_region_is_ram(mr) || assigned_ram_device) &&
+            !memory_region_is_rom(mr) &&
+            !memory_region_is_romd(mr)) {
+            /*
+             * NVIDIA Realms may have marked a device GFN PRIVATE during
+             * validation. Clear that VM attribute when the guest releases
+             * the mapping; silently skipping it would leave stale state.
+             */
+            if (assigned_ram_device &&
+                (kvm_supported_vm_memory_attributes &
+                 KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+                int ret = kvm_set_memory_attributes(
+                    section->offset_within_address_space,
+                    int128_get64(section->size), 0);
+
+                if (ret) {
+                    return ret;
+                }
+            }
+            *skip = true;
+            return 0;
+        }
+        error_report("Convert non guest_memfd backed memory region "
+                     "(0x%" HWADDR_PRIx " + 0x%" HWADDR_PRIx ") to %s",
+                     section->offset_within_address_space,
+                     int128_get64(section->size),
+                     to_private ? "private" : "shared");
+        return -EINVAL;
+    }
+
+    /*
+     * At this point it has been determined that the region is itself
+     * can be processed as normal memory. However the caller still needs
+     * to know if there was a preceeding hole relative to 'start', so
+     * handle that case here.
+     */
+    if (start < section->offset_within_address_space && to_private) {
+        return -EINVAL;
+    }
+
+    *skip = false;
+    return 0;
+}
+
+static int kvm_convert_section(MemoryRegionSection *section, bool to_private)
+{
+    hwaddr start = section->offset_within_address_space;
+    hwaddr size = int128_get64(section->size);
+    int ret;
+
+    if (machine_require_guest_memfd_convert_in_place(current_machine)) {
+        ret = guest_memfd_set_memory_section_attributes(section,
+                                                        to_private ? KVM_MEMORY_ATTRIBUTE_PRIVATE
+                                                                   : 0);
+    } else {
+        /*
+         * Without in-place conversion, attribute-tracking is handled by KVM
+         * across all guest memory rather than on a per-section/slot basis.
+         */
+        ret = kvm_set_memory_attributes(start, size,
+                                        to_private ? KVM_MEMORY_ATTRIBUTE_PRIVATE
+                                                   : 0);
+    }
+
+    return ret;
+}
+
+static int kvm_pre_convert_section(MemoryRegionSection *section, bool to_private)
+{
+    hwaddr start = section->offset_within_address_space;
+    hwaddr size = int128_get64(section->size);
+    MemoryRegion *mr = section->mr;
     ram_addr_t offset;
-    MemoryRegion *mr;
     RAMBlock *rb;
     void *addr;
+    int ret;
+
+    if (!to_private)
+        return 0;
+
+    addr = memory_region_get_ram_ptr(mr) + section->offset_within_region;
+    rb = qemu_ram_block_from_host(addr, false, &offset);
+
+    /*
+     * The attributes need to be set to private *after* the notification
+     * of a shared->private conversion, since when using VFIO it may not
+     * be possible to update the attribute while it remains pinned due
+     * to the IOMMU mapping, so issue the notification first to ensure
+     * unmappings are done in advance.
+     *
+     * There is an asymmetry here in that if the subsequent memory
+     * attribute update fails, this notification is out of sync with the
+     * state as tracked by guest_memfd, which isn't ideal, but memory
+     * attribute failures are not expected to be recoverable any way so
+     * there it would be a waste of time to roll back the notification and
+     * re-trigger things like mapping the page via iommufd.
+     */
+    ret = ram_block_attributes_state_change(rb->attributes,
+                                            offset, size, to_private);
+    if (ret) {
+        error_report("Failed to notify the listener the state change of "
+                     "(0x%"HWADDR_PRIx" + 0x%"HWADDR_PRIx") to %s, ret %d",
+                     start, size, to_private ? "private" : "shared", ret);
+    }
+
+    return ret;
+}
+
+static int kvm_post_convert_section(MemoryRegionSection *section, bool to_private)
+{
+    hwaddr start = section->offset_within_address_space;
+    hwaddr size = int128_get64(section->size);
+    MemoryRegion *mr = section->mr;
+    ram_addr_t offset;
+    RAMBlock *rb;
+    void *addr;
+    int ret = 0;
+
+    addr = memory_region_get_ram_ptr(mr) + section->offset_within_region;
+    rb = qemu_ram_block_from_host(addr, false, &offset);
+
+    /*
+     * The attributes need to have been set to shared *before* the notification
+     * of a private->shared conversion, since it will possibly result in the
+     * page being mapped into an IOMMU when using VFIO and trigger
+     * guest_memfd's fault handler, which will expect the page to have its
+     * attributes set to shared.
+     */
+    if (!to_private) {
+        ret = ram_block_attributes_state_change(rb->attributes,
+                                                offset, size, to_private);
+        if (ret) {
+            error_report("Failed to notify the listener the state change of "
+                         "(0x%"HWADDR_PRIx" + 0x%"HWADDR_PRIx") to %s, ret %d",
+                         start, size, to_private ? "private" : "shared", ret);
+            return ret;
+        }
+    }
+
+    if (!machine_require_guest_memfd_convert_in_place(current_machine)) {
+        if (to_private) {
+            if (rb->page_size != qemu_real_host_page_size()) {
+                /*
+                 * shared memory is backed by hugetlb, which is supposed to be
+                 * pre-allocated and doesn't need to be discarded
+                 */
+                return 0;
+            }
+            ret = ram_block_discard_range(rb, offset, size);
+        } else {
+            ret = ram_block_discard_guest_memfd_range(rb, offset, size);
+        }
+    }
+
+    return ret;
+}
+
+static int kvm_convert_memory_full(hwaddr start, hwaddr size, bool to_private,
+                                   bool pre_hooks, bool post_hooks)
+{
     int ret = -EINVAL;
 
     trace_kvm_convert_memory(start, size, to_private ? "shared_to_private" : "private_to_shared");
@@ -3386,118 +3705,87 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
         return ret;
     }
 
-    if (!size) {
-        return ret;
-    }
+    /*
+     * Page conversions can span multiple memory regions, for example, if two
+     * memory backends are added to support two different NUMA nodes/policies.
+     * Handle the covered sections accordingly.
+     */
+    while (size) {
+        MemoryRegionSection section = memory_region_find(get_system_memory(),
+                                                         start, size);
+        hwaddr section_end;
+        bool skip;
 
-    section = memory_region_find(get_system_memory(), start, size);
-    mr = section.mr;
-    if (!mr) {
         /*
-         * Ignore converting non-assigned region to shared.
-         *
-         * TDX requires vMMIO region to be shared to inject #VE to guest.
-         * OVMF issues conservatively MapGPA(shared) on 32bit PCI MMIO region,
-         * and vIO-APIC 0xFEC00000 4K page.
-         * OVMF assigns 32bit PCI MMIO region to
-         * [top of low memory: typically 2GB=0xC000000,  0xFC00000)
+         * If there's no region present, then the current hole "section"
+         * consumes the entire remaining range. In that case, update the
+         * relevant indices to terminate the loop after this iteration.
          */
-        if (!to_private) {
-            return 0;
-        }
-        return ret;
-    }
+        section_end = section.mr
+            ? section.offset_within_address_space + int128_get64(section.size)
+            : start + size;
+        assert(section_end > start);
+        assert(section_end - start <= size);
 
-    if (!int128_eq(section.size, int128_make64(size))) {
-        error_report("Convert memory range (0x%" HWADDR_PRIx
-                     " + 0x%" HWADDR_PRIx ") crosses a memory-region "
-                     "boundary", start, size);
-        goto out_unref;
-    }
-
-    if (!memory_region_has_guest_memfd(mr)) {
-        /*
-         * Because vMMIO region may be shared, guest TD may convert vMMIO
-         * region to shared explicitly. Don't complain such case. See
-         * memory_region_type() for checking if the region is MMIO region.
-         */
-        if (!to_private &&
-            (!memory_region_is_ram(mr) ||
-             (machine_has_assigned_device_memory(current_machine) &&
-              memory_region_is_ram_device(mr))) &&
-            !memory_region_is_rom(mr) &&
-            !memory_region_is_romd(mr)) {
-            /*
-             * For ram_device regions (e.g. VFIO BARs), the realm may
-             * have marked individual gfns PRIVATE through
-             * iommufd_tsm_dev_memmap_exit() when validating a VDEV
-             * mapping. When the realm later asks to release the
-             * mapping with RSI_IPA_STATE_SET(EMPTY), the kernel
-             * surfaces it here as a !to_private convert. A silent
-             * ret=0 would leave PRIVATE set with no DEV mapping
-             * behind it; honour the release by actually clearing the
-             * attribute. The kvm_arch_post_set_memory_attributes()
-             * side-effect then tears down any leftover ASSIGNED-DEV
-             * S2 via kvm_unmap_gfn_range(KVM_FILTER_PRIVATE), keeping
-             * userspace's view in sync with the kernel's.
-             *
-             * For the non-ram_device legs of this branch (e.g. TDX
-             * vMMIO traps) no PRIVATE attribute was ever installed,
-             * so preserve the original ret=0 fast path.
-             */
-            if (machine_has_assigned_device_memory(current_machine) &&
-                memory_region_is_ram_device(mr) &&
-                (kvm_supported_memory_attributes &
-                 KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
-                ret = kvm_set_memory_attributes_shared(start, size);
-            } else {
-                ret = 0;
+        ret = handle_memory_hole(&section, to_private, start, &skip);
+        if (ret || skip) {
+            memory_region_unref(section.mr);
+            if (ret) {
+                break;
             }
-        } else {
-            error_report("Convert non guest_memfd backed memory region "
-                        "(0x%"HWADDR_PRIx" ,+ 0x%"HWADDR_PRIx") to %s",
-                        start, size, to_private ? "private" : "shared");
+            size -= section_end - start;
+            start = section_end;
+            continue;
         }
-        goto out_unref;
-    }
 
-    if (to_private) {
-        ret = kvm_set_memory_attributes_private(start, size);
-    } else {
-        ret = kvm_set_memory_attributes_shared(start, size);
-    }
-    if (ret) {
-        goto out_unref;
-    }
-
-    addr = memory_region_get_ram_ptr(mr) + section.offset_within_region;
-    rb = qemu_ram_block_from_host(addr, false, &offset);
-
-    ret = ram_block_attributes_state_change(rb->attributes,
-                                            offset, size, to_private);
-    if (ret) {
-        error_report("Failed to notify the listener the state change of "
-                     "(0x%"HWADDR_PRIx" + 0x%"HWADDR_PRIx") to %s",
-                     start, size, to_private ? "private" : "shared");
-        goto out_unref;
-    }
-
-    if (to_private) {
-        if (rb->page_size != qemu_real_host_page_size()) {
-            /*
-             * shared memory is backed by hugetlb, which is supposed to be
-             * pre-allocated and doesn't need to be discarded
-             */
-            goto out_unref;
+        if (pre_hooks) {
+            ret = kvm_pre_convert_section(&section, to_private);
+            if (ret) {
+                memory_region_unref(section.mr);
+                break;
+            }
         }
-        ret = ram_block_discard_range(rb, offset, size);
-    } else {
-        ret = ram_block_discard_guest_memfd_range(rb, offset, size);
+
+        ret = kvm_convert_section(&section, to_private);
+        if (ret) {
+            memory_region_unref(section.mr);
+            break;
+        }
+
+        if (post_hooks) {
+            ret = kvm_post_convert_section(&section, to_private);
+            if (ret) {
+                memory_region_unref(section.mr);
+                break;
+            }
+        }
+
+        memory_region_unref(section.mr);
+        size -= section_end - start;
+        start = section_end;
     }
 
-out_unref:
-    memory_region_unref(mr);
     return ret;
+}
+
+int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
+{
+    return kvm_convert_memory_full(start, size, to_private, true, true);
+}
+
+static int kvm_convert_memory_attributes(hwaddr start, hwaddr size, bool to_private)
+{
+    return kvm_convert_memory_full(start, size, to_private, false, false);
+}
+
+int kvm_set_memory_attributes_private(hwaddr start, uint64_t size)
+{
+    return kvm_convert_memory_attributes(start, size, true);
+}
+
+int kvm_set_memory_attributes_shared(hwaddr start, uint64_t size)
+{
+    return kvm_convert_memory_attributes(start, size, false);
 }
 
 int kvm_cpu_exec(CPUState *cpu)
@@ -4832,16 +5120,25 @@ bool kvm_guest_state_protected(void)
     return kvm_state && kvm_state->guest_state_protected;
 }
 
-int kvm_create_guest_memfd(uint64_t size, uint64_t flags, Error **errp)
+static int kvm_create_guest_memfd_flags(uint64_t size, uint64_t flags,
+                                        uint8_t page_order, Error **errp)
 {
     int fd;
     struct kvm_create_guest_memfd guest_memfd = {
         .size = size,
         .flags = flags,
+        .page_order = page_order,
     };
 
     if (!kvm_guest_memfd_supported) {
         error_setg(errp, "KVM does not support guest_memfd");
+        return -1;
+    }
+
+    if (flags & ~kvm_guest_memfd_flags_supported) {
+        error_setg(errp, "Current KVM instance does not support "
+                   "guest-memfd flag: 0x%"PRIx64,
+                   flags & ~kvm_guest_memfd_flags_supported);
         return -1;
     }
 
@@ -4851,5 +5148,64 @@ int kvm_create_guest_memfd(uint64_t size, uint64_t flags, Error **errp)
         return -1;
     }
 
+    return fd;
+}
+
+int kvm_create_guest_memfd(uint64_t size, Error **errp)
+{
+    /*
+     * There isn't currently any use for non-mmap()'able gmem instances
+     * outside of kvm_create_guest_memfd_private(), so hardcode it here
+     * for general use.
+     *
+     * Additionally, *_INIT_SHARED is needed for non-confidential VMs, and
+     * confidential VMs will default to this as well to allow similar flows
+     * for initializing the VM's initial memory contents as with normal
+     * guests. In the future, the initial state may become a global policy
+     * decision based on the confidential VM configuration, in which case
+     * this would likely be the right place to decide whether or not to set
+     * the flag since it would likely be a globally-configured option.
+     */
+    return kvm_create_guest_memfd_flags(size,
+                                        GUEST_MEMFD_FLAG_MMAP |
+                                        GUEST_MEMFD_FLAG_INIT_SHARED,
+                                        0, errp);
+}
+
+int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
+{
+    if (!(kvm_supported_memory_attributes & KVM_MEMORY_ATTRIBUTE_PRIVATE)) {
+        error_setg(errp, "KVM does not support using guest_memfd for private memory");
+        return -1;
+    }
+
+    return kvm_create_guest_memfd_flags(size, 0, 0, errp);
+}
+
+int kvm_create_guest_memfd_hugetlb(uint64_t size, uint64_t hugetlbsize,
+                                    Error **errp)
+{
+    uint64_t host_page_size = qemu_real_host_page_size();
+    uint64_t flags = GUEST_MEMFD_FLAG_MMAP | GUEST_MEMFD_FLAG_HUGETLB;
+    uint8_t page_order;
+    int fd;
+
+    if (!hugetlbsize || (hugetlbsize & (hugetlbsize - 1)) ||
+        hugetlbsize <= host_page_size || size % hugetlbsize) {
+        error_setg(errp, "guest-memfd hugetlb requires an explicit "
+                   "power-of-two hugetlbsize larger than the host page "
+                   "size and aligned memory size");
+        return -1;
+    }
+
+    page_order = ctz64(hugetlbsize) - ctz64(host_page_size);
+    if (!machine_require_guest_memfd(current_machine)) {
+        flags |= GUEST_MEMFD_FLAG_INIT_SHARED;
+    }
+    fd = kvm_create_guest_memfd_flags(size, flags, page_order, errp);
+    if (fd < 0 && errno == EINVAL && (flags & GUEST_MEMFD_FLAG_INIT_SHARED)) {
+        error_append_hint(errp, "The kernel must support shared HugeTLB "
+                          "guest_memfd initialization.\n");
+    }
     return fd;
 }

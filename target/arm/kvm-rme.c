@@ -15,6 +15,7 @@
 #include "hw/core/loader.h"
 #include "hw/pci/pci.h"
 #include "kvm_arm.h"
+#include "kvm-rme-rom.h"
 #include "migration/blocker.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -138,7 +139,8 @@ static int rme_population_chunk_size(hwaddr base, hwaddr size,
 
     section = memory_region_find(get_system_memory(), base, size);
     mr = section.mr;
-    if (!mr) {
+    if (!mr || section.offset_within_address_space != base) {
+        memory_region_unref(mr);
         error_setg(errp, "Realm population GPA 0x%" HWADDR_PRIx
                    " is not backed by RAM", base);
         return -EINVAL;
@@ -380,7 +382,8 @@ static void rme_vm_state_change(void *opaque, bool running, RunState state)
     }
 
     guest->activated = true;
-    if (guest->rom_load_notifier_registered) {
+    if (guest->rom_load_notifier_registered &&
+        !CONFIDENTIAL_GUEST_SUPPORT(guest)->convert_in_place) {
         notifier_remove(&guest->rom_load_notifier);
         guest->rom_load_notifier_registered = false;
     }
@@ -406,10 +409,6 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
     RomLoaderNotifyData *rom = data;
     uint8_t *copy;
 
-    if (guest->activated) {
-        return;
-    }
-
     if (rom->addr == -1) {
         /*
          * These blobs (ACPI tables) are not loaded into guest RAM at reset.
@@ -419,6 +418,26 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
         return;
     }
     if (!rom->len) {
+        return;
+    }
+    if (CONFIDENTIAL_GUEST_SUPPORT(guest)->convert_in_place) {
+        Error *err = NULL;
+        bool private_ram;
+
+        if (rme_rom_private_range(rom->addr, rom->len, &private_ram, &err)) {
+            error_report_err(err);
+            exit(EXIT_FAILURE);
+        }
+        if (!private_ram) {
+            return;
+        }
+        if (guest->activated) {
+            error_report("Resetting an activated Realm with in-place "
+                         "guest_memfd memory is unsupported");
+            exit(EXIT_FAILURE);
+        }
+        rom->handled = true;
+    } else if (guest->activated) {
         return;
     }
     if (rom->data_len > rom->len) {
@@ -478,16 +497,18 @@ static void rme_rom_load_notify(Notifier *notifier, void *data)
                                                rme_compare_ram_regions);
 }
 
+/* Keep the downstream Arm fallback out of the global UAPI namespace. */
+#define NVIDIA_KVM_CAP_ARM_RMI_LEGACY 249
+
 #define KVM_CAP_ARM_RMI_SYSFS_PATH "/sys/module/kvm/parameters/kvm_cap_arm_rmi"
 
 /*
  * Returns the KVM CCA capability number for the running kernel.
  *
  * The capability number is not stable: it shifts whenever other KVM
- * capabilities land ahead of it, so the value in linux-headers only matches
- * hosts built from the same snapshot. NVIDIA kernels export the live value
- * as a module parameter; prefer it and fall back to the compile-time
- * constant.
+ * capabilities land ahead of it. NVIDIA kernels export the live value
+ * as a module parameter; prefer it and fall back to the legacy Arm ABI
+ * number when that parameter is absent.
  *
  * FIXME: this is a downstream-only workaround and must be dropped before the
  * series is posted upstream, where KVM_CAP_ARM_RMI will have a fixed value.
@@ -503,7 +524,7 @@ static unsigned int kvm_arm_rme_get_cap(void)
         FILE *f;
         int cap;
 
-        rme_cap = KVM_CAP_ARM_RMI;
+        rme_cap = NVIDIA_KVM_CAP_ARM_RMI_LEGACY;
 
         f = fopen(KVM_CAP_ARM_RMI_SYSFS_PATH, "r");
         if (f) {
@@ -517,14 +538,15 @@ static unsigned int kvm_arm_rme_get_cap(void)
             } else {
                 warn_report("ignoring out-of-range %s, falling back to "
                             "KVM_CAP_ARM_RMI=%d",
-                            KVM_CAP_ARM_RMI_SYSFS_PATH, KVM_CAP_ARM_RMI);
+                            KVM_CAP_ARM_RMI_SYSFS_PATH,
+                            NVIDIA_KVM_CAP_ARM_RMI_LEGACY);
             }
             fclose(f);
         } else {
             warn_report("cannot read %s: %s; falling back to "
                         "KVM_CAP_ARM_RMI=%d",
                         KVM_CAP_ARM_RMI_SYSFS_PATH, strerror(errno),
-                        KVM_CAP_ARM_RMI);
+                        NVIDIA_KVM_CAP_ARM_RMI_LEGACY);
         }
         detected = true;
     }
@@ -587,6 +609,17 @@ static bool rme_guest_can_be_deleted(UserCreatable *uc)
 
 static void rme_guest_unparent(Object *obj);
 
+static bool rme_guest_get_convert_in_place(Object *obj, Error **errp)
+{
+    return CONFIDENTIAL_GUEST_SUPPORT(obj)->convert_in_place;
+}
+
+static void rme_guest_set_convert_in_place(Object *obj, bool value,
+                                           Error **errp)
+{
+    CONFIDENTIAL_GUEST_SUPPORT(obj)->convert_in_place = value;
+}
+
 static void rme_guest_class_init(ObjectClass *oc, const void *data)
 {
     ConfidentialGuestSupportClass *klass = CONFIDENTIAL_GUEST_SUPPORT_CLASS(oc);
@@ -595,6 +628,11 @@ static void rme_guest_class_init(ObjectClass *oc, const void *data)
     oc->unparent = rme_guest_unparent;
     klass->kvm_init = kvm_arm_rme_init;
     ucc->can_be_deleted = rme_guest_can_be_deleted;
+    object_class_property_add_bool(oc, "convert-in-place",
+                                   rme_guest_get_convert_in_place,
+                                   rme_guest_set_convert_in_place);
+    object_class_property_set_description(oc, "convert-in-place",
+                                          "Convert Realm memory in place");
 }
 
 static void rme_guest_init(Object *obj)
