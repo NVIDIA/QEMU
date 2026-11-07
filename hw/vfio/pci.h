@@ -122,20 +122,6 @@ typedef struct VFIOMSIXInfo {
 
 OBJECT_DECLARE_SIMPLE_TYPE(VFIOPCIDevice, VFIO_PCI_DEVICE)
 
-typedef struct VFIOCXL {
-    uint8_t  hdm_regs_bar_index;
-    uint64_t hdm_regs_offset;
-    uint64_t hdm_regs_size;
-    uint64_t hdm_decoder_offset;
-    uint8_t  hdm_count;
-    uint64_t dpa_size;
-    hwaddr   fmws_base;         /* GPA base programmed into HDM decoder 0 */
-    bool     dpa_in_system_mem;
-    bool     machine_done_registered;
-    VFIORegion region;
-    VFIORegion comp_regs_region;
-} VFIOCXL;
-
 struct VFIOPCIDevice {
     PCIDevice parent_obj;
 
@@ -208,7 +194,6 @@ struct VFIOPCIDevice {
     VFIODisplay *dpy;
     Notifier irqchip_change_notifier;
     VFIOPCICPR cpr;
-    VFIOCXL cxl;
     VMChangeStateEntry *vmstate;
 };
 
