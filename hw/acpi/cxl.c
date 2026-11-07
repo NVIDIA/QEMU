@@ -23,7 +23,6 @@
 #include "hw/pci/pci_host.h"
 #include "hw/cxl/cxl.h"
 #include "hw/cxl/cxl_host.h"
-#include "hw/pci-host/gpex.h"
 #include "hw/mem/memory-device.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/aml-build.h"
@@ -325,12 +324,11 @@ static Aml *__build_cxl_osc_method(void)
     return method;
 }
 
-void acpi_dsdt_add_cxl_host_bridge_methods(Aml *dev, bool preserve_config)
+void build_cxl_osc_method(Aml *dev)
 {
     aml_append(dev, aml_name_decl("SUPP", aml_int(0)));
     aml_append(dev, aml_name_decl("CTRL", aml_int(0)));
     aml_append(dev, aml_name_decl("SUPC", aml_int(0)));
     aml_append(dev, aml_name_decl("CTRC", aml_int(0)));
     aml_append(dev, __build_cxl_osc_method());
-    aml_append(dev, build_pci_host_bridge_dsm_method(preserve_config));
 }

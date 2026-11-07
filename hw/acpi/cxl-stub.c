@@ -6,7 +6,7 @@
 #include "hw/acpi/aml-build.h"
 #include "hw/acpi/cxl.h"
 
-void acpi_dsdt_add_cxl_host_bridge_methods(Aml *dev, bool preserve_config)
+void build_cxl_osc_method(Aml *dev)
 {
     g_assert_not_reached();
 }
