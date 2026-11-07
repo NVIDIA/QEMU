@@ -228,9 +228,8 @@ static int vfio_setup_region_sparse_mmaps(VFIORegion *region,
     return 0;
 }
 
-int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
-                               VFIORegion *region, int index, const char *name,
-                               Error **errp, const MemoryRegionOps *ops)
+int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
+                      int index, const char *name, Error **errp)
 {
     struct vfio_region_info *info = NULL;
     int ret;
@@ -250,8 +249,7 @@ int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
 
     if (region->size) {
         region->mem = g_new0(MemoryRegion, 1);
-        memory_region_init_io(region->mem, obj,
-                              ops ? ops : &vfio_region_ops,
+        memory_region_init_io(region->mem, obj, &vfio_region_ops,
                               region, name, region->size);
 
         if (!vbasedev->no_mmap &&
@@ -274,13 +272,6 @@ int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
     trace_vfio_region_setup(vbasedev->name, index, name,
                             region->flags, region->fd_offset, region->size);
     return 0;
-}
-
-int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
-                      int index, const char *name, Error **errp)
-{
-    return vfio_region_setup_with_ops(obj, vbasedev, region, index,
-                                      name, errp, NULL);
 }
 
 static void vfio_subregion_unmap(VFIORegion *region, int index)
