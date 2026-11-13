@@ -5153,23 +5153,27 @@ static int kvm_create_guest_memfd_flags(uint64_t size, uint64_t flags,
 
 int kvm_create_guest_memfd(uint64_t size, Error **errp)
 {
+    uint64_t flags = GUEST_MEMFD_FLAG_MMAP;
+    int fd;
+
     /*
-     * There isn't currently any use for non-mmap()'able gmem instances
-     * outside of kvm_create_guest_memfd_private(), so hardcode it here
-     * for general use.
-     *
-     * Additionally, *_INIT_SHARED is needed for non-confidential VMs, and
-     * confidential VMs will default to this as well to allow similar flows
-     * for initializing the VM's initial memory contents as with normal
-     * guests. In the future, the initial state may become a global policy
-     * decision based on the confidential VM configuration, in which case
-     * this would likely be the right place to decide whether or not to set
-     * the flag since it would likely be a globally-configured option.
+     * Ordinary and legacy confidential VMs need shared initialization so
+     * the initial memory contents can be populated through the mmap().
+     * Guests using in-place conversion (e.g. Arm Realms) use private
+     * initialization instead, and KVM does not advertise INIT_SHARED for
+     * them.
      */
-    return kvm_create_guest_memfd_flags(size,
-                                        GUEST_MEMFD_FLAG_MMAP |
-                                        GUEST_MEMFD_FLAG_INIT_SHARED,
-                                        0, errp);
+    if (!machine_require_guest_memfd_convert_in_place(current_machine)) {
+        flags |= GUEST_MEMFD_FLAG_INIT_SHARED;
+    }
+
+    fd = kvm_create_guest_memfd_flags(size, flags, 0, errp);
+    if (fd < 0 && errno == EINVAL &&
+        (flags & GUEST_MEMFD_FLAG_INIT_SHARED)) {
+        error_append_hint(errp, "The kernel must support shared guest_memfd "
+                          "initialization.\n");
+    }
+    return fd;
 }
 
 int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
@@ -5199,7 +5203,7 @@ int kvm_create_guest_memfd_hugetlb(uint64_t size, uint64_t hugetlbsize,
     }
 
     page_order = ctz64(hugetlbsize) - ctz64(host_page_size);
-    if (!machine_require_guest_memfd(current_machine)) {
+    if (!machine_require_guest_memfd_convert_in_place(current_machine)) {
         flags |= GUEST_MEMFD_FLAG_INIT_SHARED;
     }
     fd = kvm_create_guest_memfd_flags(size, flags, page_order, errp);
