@@ -763,13 +763,27 @@
 # @seal: if true, create a sealed-file, which will block further
 #     resizing of the memory (default: true)
 #
+# @guest-memfd: if 'on', use guest-memfd to back the memory region.
+#     See the :doc:`/system/guest-memfd` documentation for more
+#     details.  If 'auto', the option will default to 'off'
+#     unless the QEMU configuration explicitly requires it to be set,
+#     e.g. if in-place conversion is enabled for confidential guest
+#     types like sev-snp-guest.
+#     (default: auto, since: 11.2)
+#
+# Features:
+#
+# @unstable: Member @guest-memfd is experimental.
+#
 # Since: 2.12
 ##
 { 'struct': 'MemoryBackendMemfdProperties',
   'base': 'MemoryBackendProperties',
   'data': { '*hugetlb': 'bool',
             '*hugetlbsize': 'size',
-            '*seal': 'bool' },
+            '*seal': 'bool',
+            '*guest-memfd': { 'type': 'OnOffAuto',
+                              'features': [ 'unstable' ] } },
   'if': 'CONFIG_LINUX' }
 
 ##
@@ -1199,10 +1213,14 @@
 #
 # Properties for rme-guest objects.
 #
+# @convert-in-place: use a single guest_memfd for shared and private
+#     Realm memory, preserving the backing pages across conversions.
+#     Required for hugetlb guest_memfd.  (default: false, since: 11.2)
+#
 # Since: 11.0
 ##
 { 'struct': 'RmeGuestProperties',
-  'data': {} }
+  'data': { '*convert-in-place': 'bool' } }
 
 ##
 # @ObjectType:

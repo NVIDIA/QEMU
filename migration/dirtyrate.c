@@ -30,6 +30,7 @@
 #include "system/memory.h"
 #include "qemu/xxhash.h"
 #include "migration.h"
+#include "hw/core/boards.h"
 
 /*
  * total_dirty_pages is procted by BQL and is used
@@ -86,6 +87,24 @@ static int64_t do_calculate_dirtyrate(DirtyPageRecord dirty_pages,
      */
     return qemu_target_pages_to_MiB(increased_dirty_pages * 1000) /
         calc_time_ms;
+}
+
+bool dirtyrate_check_logging_supported(Error **errp)
+{
+    RAMBlock *block;
+
+    /* KVM cannot enable dirty logging on guest_memfd memslots. */
+    WITH_RCU_READ_LOCK_GUARD() {
+        RAMBLOCK_FOREACH(block) {
+            if (block->guest_memfd >= 0) {
+                error_setg(errp, "Dirty logging is unsupported for "
+                           "guest_memfd memory");
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 void global_dirty_log_change(unsigned int flag, bool start)
@@ -803,6 +822,20 @@ void qmp_calc_dirty_rate(int64_t calc_time,
         }
     } else {
         sample_pages = DIRTYRATE_DEFAULT_SAMPLE_PAGES;
+    }
+
+    if (mode == DIRTY_RATE_MEASURE_MODE_PAGE_SAMPLING) {
+        /*
+         * Private in-place pages are inaccessible through the host mapping.
+         * Checking page attributes before sampling would race conversions.
+         */
+        if (machine_require_guest_memfd_convert_in_place(current_machine)) {
+            error_setg(errp, "Page sampling is unsupported for "
+                       "in-place confidential memory");
+            return;
+        }
+    } else if (!dirtyrate_check_logging_supported(errp)) {
+        return;
     }
 
     /*

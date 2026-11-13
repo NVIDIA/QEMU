@@ -139,8 +139,21 @@ bool kvm_hwpoisoned_mem(void)
     return false;
 }
 
-int kvm_create_guest_memfd(uint64_t size, uint64_t flags, Error **errp)
+int kvm_create_guest_memfd(uint64_t size, Error **errp)
 {
+    return -ENOSYS;
+}
+
+int kvm_create_guest_memfd_private(uint64_t size, Error **errp)
+{
+    error_setg(errp, "KVM is not enabled");
+    return -ENOSYS;
+}
+
+int kvm_create_guest_memfd_hugetlb(uint64_t size, uint64_t hugetlbsize,
+                                 Error **errp)
+{
+    error_setg(errp, "KVM is not enabled");
     return -ENOSYS;
 }
 
@@ -152,4 +165,9 @@ int kvm_set_memory_attributes_private(hwaddr start, uint64_t size)
 int kvm_set_memory_attributes_shared(hwaddr start, uint64_t size)
 {
     return -ENOSYS;
+}
+
+bool kvm_private_memory_attribute_supported(void)
+{
+    return false;
 }
