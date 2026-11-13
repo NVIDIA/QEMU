@@ -1,3 +1,10 @@
+qemu (1:11.0.0+nvidia-unstable14-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Take VSMMU IDR0/IDR5 from host SMMU
+  * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Report 2-level Stream Table support
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Fri, 13 Nov 2026 10:25:39 -0500
+
 qemu (1:11.0.0+nvidia-unstable13-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: WAR: hw/arm/smmuv3: Preserve the STE-only HWPT ABI in accel mode
