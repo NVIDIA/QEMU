@@ -43,7 +43,6 @@ struct GPEXConfig {
     MemMapEntry mmio32;
     MemMapEntry mmio64;
     MemMapEntry pio;
-    MemMapEntry cxl_mmio;
     int         irq;
     PCIBus      *bus;
     bool        pci_native_hotplug;
