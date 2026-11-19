@@ -969,8 +969,10 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
     if (pci_bus_is_express(pci_bus) && pci_bus_is_root(pci_bus) &&
         object_dynamic_cast(OBJECT(pci_bus)->parent, TYPE_PCI_HOST_BRIDGE)) {
         /*
-         * pcie.0 has no parent_dev; pxb-pcie and pxb-cxl do.  Accept both
-         * bus types explicitly so other root complexes are still rejected.
+         * pcie.0 has no parent_dev; pxb-pcie and pxb-cxl do. Accept both bus
+         * types explicitly so other root complexes are still rejected. A
+         * pxb-cxl uses the same PCIe-compatible bus, so a CXL device behind it
+         * needs the SMMU just like a pxb-pcie one.
          */
         if (pci_bus->parent_dev) {
             if (!object_dynamic_cast(OBJECT(pci_bus), TYPE_PXB_PCIE_BUS) &&

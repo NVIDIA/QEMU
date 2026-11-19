@@ -43,7 +43,6 @@ struct GPEXConfig {
     MemMapEntry mmio32;
     MemMapEntry mmio64;
     MemMapEntry pio;
-    MemMapEntry cxl_mmio;
     int         irq;
     PCIBus      *bus;
     bool        pci_native_hotplug;
@@ -73,7 +72,6 @@ struct GPEXHost {
 int gpex_set_irq_num(GPEXHost *s, int index, int gsi);
 
 void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg);
-Aml *build_pci_host_bridge_dsm_method(bool preserve_config);
 void acpi_dsdt_add_gpex_host(Aml *scope, uint32_t irq);
 
 #define PCI_HOST_PIO_BASE               "x-pio-base"

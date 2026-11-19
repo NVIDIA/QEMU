@@ -212,8 +212,6 @@ static const MemMapEntry base_memmap[] = {
 #define DEFAULT_HIGH_PCIE_MMIO_SIZE_GB 512
 #define DEFAULT_HIGH_PCIE_MMIO_SIZE (DEFAULT_HIGH_PCIE_MMIO_SIZE_GB * GiB)
 
-#define DEFAULT_HIGH_CXL_MMIO_SIZE  DEFAULT_HIGH_PCIE_MMIO_SIZE
-
 /*
  * Highmem IO Regions: This memory map is floating, located after the RAM.
  * Each MemMapEntry base (GPA) will be dynamically computed, depending on the
@@ -230,8 +228,8 @@ static const MemMapEntry base_memmap[] = {
  * has been disabled or doesn't fit into the PA space. However, the PA space
  * for the region won't be reserved in these circumstances with compact layout.
  *
- * Note that the highmem-mmio-size property will update the high PCIe and CXL
- * MMIO size fields in this array.
+ * Note that the highmem-mmio-size property will update the high PCIE MMIO size
+ * field in this array.
  */
 static MemMapEntry extended_memmap[] = {
     /* Additional 64 MB redist region (can contain up to 512 redistributors) */
@@ -240,11 +238,6 @@ static MemMapEntry extended_memmap[] = {
     [VIRT_HIGH_PCIE_ECAM] =     { 0x0, 256 * MiB },
     /* Second PCIe window */
     [VIRT_HIGH_PCIE_MMIO] =     { 0x0, DEFAULT_HIGH_PCIE_MMIO_SIZE },
-    /*
-     * CXL FMWS guest PA window - separate from PCIe MMIO so the two are
-     * independently sizeable. Same default size for now.
-     */
-    [VIRT_HIGH_CXL_MMIO] =      { 0x0, DEFAULT_HIGH_CXL_MMIO_SIZE },
     /* Any CXL Fixed memory windows come here */
 };
 
@@ -2037,7 +2030,6 @@ static inline bool *virt_get_high_memmap_enabled(VirtMachineState *vms,
         &vms->highmem_cxl,
         &vms->highmem_ecam,
         &vms->highmem_mmio,
-        &vms->highmem_cxl_mmio,
     };
 
     assert(ARRAY_SIZE(extended_memmap) - VIRT_LOWMEMMAP_LAST ==
@@ -2146,7 +2138,6 @@ static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
 
     if (vms->cxl_devices_state.is_enabled) {
         vms->highmem_cxl = true;
-        vms->highmem_cxl_mmio = true;
     }
 
     virt_set_high_memmap(vms, base, pa_bits);
@@ -2925,7 +2916,6 @@ static void virt_set_highmem_mmio_size(Object *obj, Visitor *v,
     }
 
     extended_memmap[VIRT_HIGH_PCIE_MMIO].size = size;
-    extended_memmap[VIRT_HIGH_CXL_MMIO].size = size;
 }
 
 static char *virt_get_msi(Object *obj, Error **errp)
@@ -3802,7 +3792,7 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                    NULL, NULL);
     object_class_property_set_description(oc, "highmem-mmio-size",
                                           "Set the high memory region size "
-                                          "for PCIe and CXL MMIO");
+                                          "for PCI MMIO");
 
     object_class_property_add(oc, "virtio-mmio-transports", "uint8",
                                    virt_get_virtio_transports,

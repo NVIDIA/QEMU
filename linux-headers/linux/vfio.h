@@ -258,19 +258,6 @@ struct vfio_device_info_cap_pci_atomic_comp {
 	__u32 reserved;
 };
 
-#define VFIO_DEVICE_INFO_CAP_CXL			6
-struct vfio_device_info_cap_cxl {
-	struct vfio_info_cap_header header; /* id=6, version=1 */
-	__u8  hdm_regs_bar_index; /* PCI BAR containing CXL component registers */
-	__u8  reserved[3];
-	__u32 flags;             /* VFIO_CXL_CAP_* flags */
-#define VFIO_CXL_CAP_FIRMWARE_COMMITTED (1 << 0)
-#define VFIO_CXL_CAP_CACHE_CAPABLE      (1 << 1)
-	__u64 hdm_regs_offset;   /* byte offset within BAR to CXL.mem register area */
-	__u32 dpa_region_index;  /* VFIO region index for DPA memory */
-	__u32 comp_regs_region_index; /* VFIO region index for COMP_REGS */
-};
-
 /**
  * VFIO_DEVICE_GET_REGION_INFO - _IOWR(VFIO_TYPE, VFIO_BASE + 8,
  *				       struct vfio_region_info)
@@ -384,12 +371,14 @@ struct vfio_region_info_cap_type {
  */
 #define VFIO_REGION_SUBTYPE_IBM_NVLINK2_ATSD	(1)
 
+/* CXL Type-2 device (0x1e98) sub-types for VFIO_REGION_TYPE_PCI_VENDOR_TYPE */
+/* CXL.mem HDM region of a Type-2 device, mmap-able */
+#define VFIO_REGION_SUBTYPE_CXL_MEM		(1)
+/* CXL HDM decoder registers: read live, guest writes are absorbed */
+#define VFIO_REGION_SUBTYPE_CXL_COMP_REGS	(2)
+
 /* sub-types for VFIO_REGION_TYPE_GFX */
 #define VFIO_REGION_SUBTYPE_GFX_EDID            (1)
-
-/* sub-types for VFIO CXL regions */
-#define VFIO_REGION_SUBTYPE_CXL           (1) /* DPA memory region */
-#define VFIO_REGION_SUBTYPE_CXL_COMP_REGS (2) /* HDM register shadow */
 
 /**
  * struct vfio_region_gfx_edid - EDID region layout.
@@ -513,6 +502,23 @@ struct vfio_region_info_cap_nvlink2_lnkspd {
 	struct vfio_info_cap_header header;
 	__u32 link_speed;
 	__u32 __pad;
+};
+
+/*
+ * Geometry of a CXL Type-2 device's HDM decoder registers, so a VMM can place
+ * the trapped component register window where the guest expects it. The trapped
+ * region spans the whole HDM decoder block (every decoder), not just decoder 0:
+ * a VMM reads the decoder count and each decoder's committed base from the block
+ * itself. Additional trapped component capabilities, such as CXL RAS, are
+ * exposed as their own region subtypes rather than by extending this cap.
+ */
+#define VFIO_REGION_INFO_CAP_CXL_COMP_REGS	6
+
+struct vfio_region_info_cap_cxl_comp_regs {
+	struct vfio_info_cap_header header;
+	__u32 bar;
+	__u32 __resv;
+	__aligned_u64 offset;
 };
 
 /**

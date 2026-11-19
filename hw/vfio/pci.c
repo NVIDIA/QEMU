@@ -26,11 +26,15 @@
 #include "hw/core/boards.h"
 #include "hw/core/hw-error.h"
 #include "hw/core/iommu.h"
-#include "hw/cxl/cxl_component.h"
-#include "hw/cxl/cxl_host.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci_bridge.h"
+#include "hw/pci/pci_host.h"
+#include "hw/pci/pcie_port.h"
+#include "hw/cxl/cxl.h"
+#include "hw/cxl/cxl_host.h"
+#include "hw/cxl/cxl_component.h"
+#include "system/system.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "hw/vfio/vfio-cpr.h"
@@ -1437,6 +1441,39 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
     return val;
 }
 
+static void vfio_cxl_decoder_changed(VFIOPCIDevice *vdev);
+static void vfio_cxl_unmap_mem(VFIOPCIDevice *vdev);
+
+/*
+ * Return true if this config write sets a Function Level Reset bit the kernel
+ * acts on: the PCIe Device Control FLR bit or the Advanced Features FLR bit.
+ * FLR bits are write-1-to-trigger and self-clearing, so inspect the written
+ * value rather than the post-write config.
+ */
+static bool vfio_cxl_flr_write(VFIOPCIDevice *vdev, uint32_t addr,
+                               uint32_t val, int len)
+{
+    PCIDevice *pdev = &vdev->parent_obj;
+    uint32_t off;
+
+    if (pdev->exp.exp_cap) {
+        /* PCI_EXP_DEVCTL_BCR_FLR (bit 15) is the high byte of Device Ctrl. */
+        off = pdev->exp.exp_cap + PCI_EXP_DEVCTL + 1;
+        if (off >= addr && off < addr + len &&
+            ((val >> (8 * (off - addr))) & (PCI_EXP_DEVCTL_BCR_FLR >> 8))) {
+            return true;
+        }
+    }
+    if (vdev->cxl.af_offset) {
+        off = vdev->cxl.af_offset + PCI_AF_CTRL;
+        if (off >= addr && off < addr + len &&
+            ((val >> (8 * (off - addr))) & PCI_AF_CTRL_FLR)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void vfio_pci_write_config(PCIDevice *pdev,
                            uint32_t addr, uint32_t val, int len)
 {
@@ -1515,9 +1552,74 @@ void vfio_pci_write_config(PCIDevice *pdev,
                 vfio_sub_page_bar_update_mapping(pdev, bar);
             }
         }
+
+        /*
+         * A firmware-committed CXL decoder is already committed at boot, so no
+         * guest control write triggers the HDM mapping. Map it once the guest
+         * enables memory decoding, so the region enters the guest address space
+         * and the IOAS while the device is live. On a clear of memory decoding,
+         * withdraw the overlay: the kernel revokes the HDM PTEs on the same
+         * write, so a retained memslot would fault a guest access during the
+         * disabled interval onto a zapped VMA and stop the VM; the enable path
+         * re-maps it.
+         */
+        if (vdev->cxl.enabled &&
+            range_covers_byte(addr, len, PCI_COMMAND)) {
+            if (pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MEMORY) {
+                vfio_cxl_decoder_changed(vdev);
+            } else {
+                vfio_cxl_unmap_mem(vdev);
+            }
+        }
     } else {
         /* Write everything to QEMU to keep emulated bits correct */
         pci_default_write_config(pdev, addr, val, len);
+
+        /*
+         * A guest CXL reset is a write to the CXL Device DVSEC ctrl2 register,
+         * forwarded to the kernel above, which re-commits this firmware-fixed
+         * decoder. If the guest decommitted the decoder before the reset, which
+         * unmapped the HDM memory, that re-commit is not otherwise visible to
+         * QEMU, so rescan the decoder here to restore the mapping. Gated on
+         * memory decoding still being enabled, like the enable path above.
+         */
+        if (vdev->cxl.enabled && vdev->cxl.dvsec_offset &&
+            ranges_overlap(addr, len,
+                           vdev->cxl.dvsec_offset +
+                               offsetof(CXLDVSECDevice, ctrl2),
+                           sizeof_field(CXLDVSECDevice, ctrl2)) &&
+            (pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MEMORY)) {
+            vfio_cxl_decoder_changed(vdev);
+        }
+
+        /*
+         * A NoSoftRst- device the guest cycles D3hot->D0 has its physical
+         * decoder restored by the kernel on resume, which re-commits this
+         * firmware-fixed decoder just like a reset. That re-commit is not
+         * otherwise visible to QEMU, so on the transition back to D0 rescan
+         * the decoder to restore a mapping the guest dropped before it
+         * suspended. Gated on memory decoding, like the paths above.
+         */
+        if (vdev->cxl.enabled && pdev->pm_cap &&
+            range_covers_byte(addr, len, pdev->pm_cap + PCI_PM_CTRL) &&
+            (pci_get_word(pdev->config + pdev->pm_cap + PCI_PM_CTRL) &
+             PCI_PM_CTRL_STATE_MASK) == 0 &&
+            (pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MEMORY)) {
+            vfio_cxl_decoder_changed(vdev);
+        }
+
+        /*
+         * A Function Level Reset the guest triggers through the PCIe Device
+         * Control or Advanced Features FLR bit is forwarded to the kernel,
+         * which re-commits this firmware-fixed decoder just like a CXL reset.
+         * That re-commit is not otherwise visible to QEMU, so rescan the
+         * decoder to restore a mapping the guest dropped before the FLR. Gated
+         * on memory decoding, like the paths above.
+         */
+        if (vdev->cxl.enabled && vfio_cxl_flr_write(vdev, addr, val, len) &&
+            (pci_get_word(pdev->config + PCI_COMMAND) & PCI_COMMAND_MEMORY)) {
+            vfio_cxl_decoder_changed(vdev);
+        }
     }
 
     if (ats_write && ats_was_enabled != pcie_ats_enabled(pdev) &&
@@ -2007,10 +2109,6 @@ static void vfio_bar_register(VFIOPCIDevice *vdev, int nr)
         return;
     }
 
-    bool cxl_comp_regs_bar = (vdev->vbasedev.flags & VFIO_DEVICE_FLAGS_CXL) &&
-                              nr == vdev->cxl.hdm_regs_bar_index &&
-                              vdev->cxl.comp_regs_region.mem;
-
     bar->mr = g_new0(MemoryRegion, 1);
     name = g_strdup_printf("%s base BAR %d", vdev->vbasedev.name, nr);
     memory_region_init_io(bar->mr, OBJECT(vdev), NULL, NULL, name, bar->size);
@@ -2023,21 +2121,6 @@ static void vfio_bar_register(VFIOPCIDevice *vdev, int nr)
             error_report("Failed to mmap %s BAR %d. Performance may be slow",
                          vdev->vbasedev.name, nr);
         }
-    }
-
-    if (cxl_comp_regs_bar) {
-        /*
-         * Overlay the COMP_REGS emulation at hdm_regs_offset with priority 1.
-         * The kernel excludes the HDM Decoder Capability block from the
-         * sparse-mmap list, so vfio_region_mmap() creates hardware-backed
-         * sub-regions only for accelerator register windows. The emulated
-         * COMP_REGS region sits above those at priority 1, ensuring guest
-         * accesses to the HDM range always dispatch through the emulated ops.
-         */
-        memory_region_add_subregion_overlap(bar->mr, vdev->cxl.hdm_regs_offset,
-                                            vdev->cxl.comp_regs_region.mem, 1);
-        trace_vfio_cxl_bar_subregion(vdev->vbasedev.name, nr,
-                                     vdev->cxl.hdm_regs_offset);
     }
 
     pci_register_bar(pdev, nr, bar->type, bar->mr);
@@ -2059,16 +2142,9 @@ void vfio_pci_bars_exit(VFIOPCIDevice *vdev)
 
     for (i = 0; i < PCI_ROM_SLOT; i++) {
         VFIOBAR *bar = &vdev->bars[i];
-        bool use_comp_regs = (vdev->vbasedev.flags & VFIO_DEVICE_FLAGS_CXL) &&
-                             i == vdev->cxl.hdm_regs_bar_index &&
-                             vdev->cxl.comp_regs_region.mem;
 
         vfio_bar_quirk_exit(vdev, i);
         vfio_region_exit(&bar->region);
-        if (use_comp_regs && bar->mr) {
-            memory_region_del_subregion(bar->mr,
-                                        vdev->cxl.comp_regs_region.mem);
-        }
         if (bar->region.size) {
             memory_region_del_subregion(bar->mr, bar->region.mem);
         }
@@ -3041,122 +3117,6 @@ static VFIODeviceOps vfio_pci_ops = {
     .vfio_load_config = vfio_pci_load_config,
 };
 
-/*
- * CXL Component Register Space constants (CXL 4.0 8.2.3).
- */
-
-/* CXL Capability Array Header (dword 0 of COMP_REGS) */
-#define CXL_CM_CAP_HDR_ARRAY_ID         0x0001U /* expected ID value */
-#define CXL_CM_CAP_HDR_NUM_CAPS_SHIFT   24      /* bits [31:24] = num entries */
-#define CXL_CM_CAP_HDR_NUM_CAPS_MASK    0xffU
-#define CXL_CM_CAP_ENTRY_ID_MASK        0xffffU /* bits [15:0] = cap ID */
-#define CXL_CM_CAP_ENTRY_PTR_SHIFT      20      /* bits [31:20] = byte offset */
-#define CXL_CM_CAP_ENTRY_PTR_MASK       0xfffU
-#define CXL_CM_CAP_ID_HDM               0x0005U /* HDM Decoder cap ID */
-
-/* HDM Decoder Capability (HDMC) register at hdm_decoder_offset+0x00 */
-#define CXL_HDMC_DECODER_COUNT_MASK     0xfU    /* bits [3:0]; 0→1, N→N*2 */
-
-/*
- * Per-decoder register offsets from hdm_decoder_offset (CXL 4.0 Table 8-119).
- * Decoder records begin at +0x10 and are 0x20 bytes each.
- */
-#define CXL_HDM_DECODER0_BASE_LOW_OFFSET(i)  (0x20 * (i) + 0x10)
-#define CXL_HDM_DECODER0_BASE_HIGH_OFFSET(i) (0x20 * (i) + 0x14)
-#define CXL_HDM_DECODER0_CTRL_OFFSET(i)      (0x20 * (i) + 0x20)
-
-/* HDM Decoder n Control register bits (CXL 4.0 Table 8-123) */
-#define CXL_HDM_CTRL_COMMIT_LOCK        (1U << 8)  /* decoder locked */
-#define CXL_HDM_CTRL_COMMIT             (1U << 9)  /* software trigger */
-#define CXL_HDM_CTRL_COMMITTED          (1U << 10) /* hardware status */
-
-/* HDM Decoder BASE_LO: bits [31:28] hold address bits [31:28] */
-#define CXL_HDM_BASE_LO_ADDR_MASK       0xF0000000U
-
-static bool read_region(VFIORegion *region, uint32_t *val, uint64_t offset)
-{
-    VFIODevice *vbasedev = region->vbasedev;
-    uint32_t le_val;
-
-    if (pread(vbasedev->fd, &le_val, sizeof(le_val),
-              region->fd_offset + offset) != sizeof(le_val)) {
-        error_report("vfio-cxl: pread %s offset 0x%"PRIx64" failed: %m",
-                     vbasedev->name, offset);
-        return false;
-    }
-    /* CXL registers are little-endian; convert to host byte order. */
-    *val = le32_to_cpu(le_val);
-    return true;
-}
-
-static bool write_region(VFIORegion *region, uint32_t *val, uint64_t offset)
-{
-    VFIODevice *vbasedev = region->vbasedev;
-    /* CXL registers are little-endian; convert from host byte order. */
-    uint32_t le_val = cpu_to_le32(*val);
-
-    if (pwrite(vbasedev->fd, &le_val, sizeof(le_val),
-               region->fd_offset + offset) != sizeof(le_val)) {
-        error_report("vfio-cxl: pwrite %s offset 0x%"PRIx64" failed: %m",
-                     vbasedev->name, offset);
-        return false;
-    }
-    return true;
-}
-
-/*
- * Direct pread/pwrite MemoryRegionOps for the CXL Component Register shadow.
- *
- * The generic vfio_region_ops routes guest MMIO through
- * vfio_device_io_region_read() which returns EINVAL for vendor region
- * index 10 at runtime.  The same pread() issued directly via
- * region->fd_offset works fine, as vfio_cxl_derive_hdm_info() already does.
- *
- * The kernel enforces 4-byte aligned, 4-byte accesses on this region;
- * valid and impl min/max_access_size are both set to 4 to match.
- */
-static uint64_t vfio_cxl_comp_regs_mr_read(void *opaque, hwaddr addr,
-                                            unsigned size)
-{
-    VFIORegion *region = opaque;
-    VFIODevice *vbasedev = region->vbasedev;
-    uint32_t val = 0xFFFFFFFFU;
-
-    if (pread(vbasedev->fd, &val, size,
-              region->fd_offset + addr) != size) {
-        error_report("vfio-cxl: %s COMP_REGS read at 0x%"HWADDR_PRIx
-                     " failed: %m", vbasedev->name, addr);
-    }
-
-    val = le32_to_cpu(val);
-    trace_vfio_region_read(vbasedev->name, region->nr, addr, size, val);
-    return val;
-}
-
-static void vfio_cxl_comp_regs_mr_write(void *opaque, hwaddr addr,
-                                         uint64_t data, unsigned size)
-{
-    VFIORegion *region = opaque;
-    VFIODevice *vbasedev = region->vbasedev;
-    uint32_t val = cpu_to_le32((uint32_t)data);
-
-    if (pwrite(vbasedev->fd, &val, size,
-               region->fd_offset + addr) != size) {
-        error_report("vfio-cxl: %s COMP_REGS write at 0x%"HWADDR_PRIx
-                     " failed: %m", vbasedev->name, addr);
-    }
-
-    trace_vfio_region_write(vbasedev->name, region->nr, addr, data, size);
-}
-
-static const MemoryRegionOps vfio_cxl_comp_regs_mr_ops = {
-    .read = vfio_cxl_comp_regs_mr_read,
-    .write = vfio_cxl_comp_regs_mr_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
-
 bool vfio_populate_vga(VFIOPCIDevice *vdev, Error **errp)
 {
     VFIODevice *vbasedev = &vdev->vbasedev;
@@ -3298,8 +3258,11 @@ bool vfio_pci_populate_device(VFIOPCIDevice *vdev, Error **errp)
     return true;
 }
 
+static void vfio_cxl_teardown(VFIOPCIDevice *vdev);
+
 void vfio_pci_put_device(VFIOPCIDevice *vdev)
 {
+    vfio_cxl_teardown(vdev);
 #ifdef CONFIG_IOMMUFD
     /*
      * Only TYPE_VFIO_PCI installs this handler (see vfio_pci_init()).  Sibling
@@ -3315,29 +3278,6 @@ void vfio_pci_put_device(VFIOPCIDevice *vdev)
 #endif
     vfio_display_finalize(vdev);
     vfio_bars_finalize(vdev);
-
-    /*
-     * The DPA region is not in bars[] and must be cleaned up here.
-     * Remove it from the system address space before releasing.
-     */
-    if (vdev->cxl.machine_done_registered) {
-        qemu_remove_machine_init_done_notifier(&vdev->cxl.machine_done);
-        vdev->cxl.machine_done_registered = false;
-    }
-    if (vdev->cxl.dpa_in_system_mem) {
-        memory_region_del_subregion(get_system_memory(), vdev->cxl.region.mem);
-        vdev->cxl.dpa_in_system_mem = false;
-        trace_vfio_cxl_put_device(vdev->vbasedev.name);
-    }
-    if (vdev->cxl.region.mem) {
-        vfio_region_exit(&vdev->cxl.region);
-        vfio_region_finalize(&vdev->cxl.region);
-    }
-    if (vdev->cxl.comp_regs_region.mem) {
-        vfio_region_exit(&vdev->cxl.comp_regs_region);
-        vfio_region_finalize(&vdev->cxl.comp_regs_region);
-    }
-
     vfio_cpr_pci_unregister_device(vdev);
     g_free(vdev->emulated_config_bits);
     g_free(vdev->rom);
@@ -3489,434 +3429,6 @@ void vfio_pci_register_req_notifier(VFIOPCIDevice *vdev)
         vdev->req_enabled = true;
     }
 }
-
-/*
- * vfio_cxl_derive_hdm_info - read hdm_decoder_offset and hdm_count from the
- * COMP_REGS region by traversing the CXL Capability Array.
- *
- * Dword 0: CXL Capability Array Header
- *   bits[31:24] = num_caps,
- *   bits[15:0]  = 1.
- * Dwords 1..N:
- *   bits[15:0]  = cap ID;
- *   bits[31:20] = byte offset from region start.
- * HDM Decoder cap ID = 0x5; its offset is hdm_decoder_offset.
- * HDMC register at hdm_decoder_offset+0:
- *   bits[3:0] encode count (0→1, N→N*2).
- */
-static bool vfio_cxl_derive_hdm_info(VFIODevice *vbasedev, VFIOCXL *cxl,
-                                     Error **errp)
-{
-    off_t base = cxl->comp_regs_region.fd_offset;
-    uint32_t hdr, num_caps, i;
-
-    if (pread(vbasedev->fd, &hdr, sizeof(hdr), base) != sizeof(hdr)) {
-        error_setg(errp, "vfio-cxl: failed to read CXL Capability Header");
-        return false;
-    }
-    hdr = le32_to_cpu(hdr);
-
-    if ((hdr & CXL_CM_CAP_ENTRY_ID_MASK) != CXL_CM_CAP_HDR_ARRAY_ID) {
-        error_setg(errp, "vfio-cxl: unexpected CXL Capability Array ID 0x%x",
-                   hdr & CXL_CM_CAP_ENTRY_ID_MASK);
-        return false;
-    }
-
-    num_caps = (hdr >> CXL_CM_CAP_HDR_NUM_CAPS_SHIFT) &
-        CXL_CM_CAP_HDR_NUM_CAPS_MASK;
-
-    /*
-     * Dword 0 is the CXL Capability Array Header;
-     * capability entries start at dword 1.
-     */
-    for (i = 1; i <= num_caps; i++) {
-        uint32_t entry, cap_id;
-
-        if (pread(vbasedev->fd, &entry, sizeof(entry),
-                  base + i * sizeof(entry)) != sizeof(entry)) {
-            error_setg(errp, "vfio-cxl: failed to read cap entry %u", i);
-            return false;
-        }
-        entry = le32_to_cpu(entry);
-
-        cap_id = entry & CXL_CM_CAP_ENTRY_ID_MASK;
-        if (cap_id == CXL_CM_CAP_ID_HDM) {
-            uint32_t hdmc, field;
-
-            cxl->hdm_decoder_offset = (entry >> CXL_CM_CAP_ENTRY_PTR_SHIFT) &
-                                       CXL_CM_CAP_ENTRY_PTR_MASK;
-
-            if (pread(vbasedev->fd, &hdmc, sizeof(hdmc),
-                      base + cxl->hdm_decoder_offset) != sizeof(hdmc)) {
-                error_setg(errp, "vfio-cxl: failed to read HDMC register");
-                return false;
-            }
-            hdmc = le32_to_cpu(hdmc);
-            field = hdmc & CXL_HDMC_DECODER_COUNT_MASK;
-            cxl->hdm_count = field ? (uint8_t)(field * 2) : 1;
-            return true;
-        }
-    }
-
-    error_setg(errp, "vfio-cxl: HDM Decoder capability not found in COMP_REGS");
-    return false;
-}
-
-/*
- * vfio_cxl_find_fmws_base - find the CFMWS targeting this device's pxb-cxl.
- *
- * Returns the match count: 0 none, 1 unique, >1 ambiguous. For a unique match
- * base_out, size_out and ntargets_out describe the window; nwindows_out gets the
- * total window count. Only a unique single-target match is usable; the caller
- * must reject anything else instead of guessing a base.
- *
- * Match on fw->targets[] (names), not fw->target_hbs[] (pointers), which
- * cxl_fmws_link_targets() fills from a machine_done notifier that may run after
- * this one.
- */
-static int vfio_cxl_find_fmws_base(PCIDevice *pdev, hwaddr *base_out,
-                                   uint64_t *size_out, int *nwindows_out,
-                                   int *ntargets_out)
-{
-    GSList *list = cxl_fmws_get_all_sorted();
-    PCIBus *root_bus = pci_device_root_bus(pdev);
-    PCIDevice *pxb = root_bus ? root_bus->parent_dev : NULL;
-    GSList *iter;
-    hwaddr base = 0;
-    uint64_t size = 0;
-    int match_count = 0;
-    int matched_ntargets = 0;
-
-    if (nwindows_out) {
-        *nwindows_out = g_slist_length(list);
-    }
-
-    /*
-     * The host bridge is the parent of the device's root bus, i.e. the pxb-cxl
-     * for a directly attached endpoint. Only that case is handled (no switch).
-     */
-    if (!pxb || !object_dynamic_cast(OBJECT(pxb), TYPE_PXB_CXL_DEV)) {
-        goto out;
-    }
-
-    for (iter = list; iter; iter = iter->next) {
-        CXLFixedWindow *fw = CXL_FMW(iter->data);
-        int i;
-
-        for (i = 0; i < fw->num_targets; i++) {
-            bool ambiguous = false;
-            Object *t = object_resolve_path_type(fw->targets[i],
-                                                 TYPE_PXB_CXL_DEV, &ambiguous);
-            if (t && !ambiguous && t == OBJECT(pxb)) {
-                base = fw->base;
-                size = fw->size;
-                matched_ntargets = fw->num_targets;
-                match_count++;
-                break; /* count each window at most once */
-            }
-        }
-    }
-
-out:
-    g_slist_free(list);
-
-    if (base_out) {
-        *base_out = base;
-    }
-    if (size_out) {
-        *size_out = size;
-    }
-    if (ntargets_out) {
-        *ntargets_out = matched_ntargets;
-    }
-    return match_count;
-}
-
-/*
- * Bases already claimed by a VFIO-CXL endpoint. Windows have distinct bases and
- * only single-target windows are accepted, so a repeat claim means a second
- * endpoint under the same pxb-cxl, which is not supported.
- */
-static GArray *vfio_cxl_used_fmws_bases;
-
-static bool vfio_cxl_claim_fmws_base(hwaddr base)
-{
-    guint i;
-
-    if (!vfio_cxl_used_fmws_bases) {
-        vfio_cxl_used_fmws_bases = g_array_new(false, false, sizeof(hwaddr));
-    }
-    for (i = 0; i < vfio_cxl_used_fmws_bases->len; i++) {
-        if (g_array_index(vfio_cxl_used_fmws_bases, hwaddr, i) == base) {
-            return false;
-        }
-    }
-    g_array_append_val(vfio_cxl_used_fmws_bases, base);
-    return true;
-}
-
-/*
- * vfio_cxl_program_locked_hdm - program HDM decoder 0 with the device's CFMWS
- * base and map its DPA region there, giving the guest a stable GPA for DPA.
- *
- * Requires a unique single-target CFMWS whose base is set and whose size covers
- * the DPA region. Any other case fails via errp instead of guessing.
- */
-static bool vfio_cxl_program_locked_hdm(VFIOCXL *cxl, Error **errp)
-{
-    VFIORegion *region = &cxl->comp_regs_region;
-    MemoryRegion *sys_mem = get_system_memory();
-    uint64_t hdm_base = cxl->hdm_decoder_offset;
-    const char *name = region->vbasedev->name;
-    uint32_t base_lo, base_hi, ctrl;
-
-    if (!cxl->fmws_base) {
-        VFIOPCIDevice *vdev = container_of(cxl, VFIOPCIDevice, cxl);
-        hwaddr base = 0;
-        uint64_t fmws_size = 0;
-        int nwindows = 0;
-        int ntargets = 0;
-        int matches = vfio_cxl_find_fmws_base(PCI_DEVICE(vdev), &base, &fmws_size,
-                                              &nwindows, &ntargets);
-
-        if (matches == 1 && ntargets == 1) {
-            if (!base) {
-                error_setg(errp, "vfio-cxl: %s: matched CXL fixed memory window "
-                           "has no assigned base (it did not fit in the guest "
-                           "physical address space)", name);
-                return false;
-            }
-            if (cxl->dpa_size > fmws_size) {
-                error_setg(errp, "vfio-cxl: %s: device DPA size 0x%" PRIx64
-                           " exceeds matched CFMWS size 0x%" PRIx64,
-                           name, cxl->dpa_size, fmws_size);
-                return false;
-            }
-            if (!vfio_cxl_claim_fmws_base(base)) {
-                error_setg(errp, "vfio-cxl: %s: CFMWS at 0x%" PRIx64 " is already "
-                           "used by another passthrough endpoint", name, base);
-                return false;
-            }
-            cxl->fmws_base = base;
-        } else if (matches == 1) {
-            error_setg(errp, "vfio-cxl: %s: CXL fixed memory window interleaves "
-                       "%d targets; only single-target CFMWS are supported",
-                       name, ntargets);
-            return false;
-        } else if (matches > 1) {
-            error_setg(errp, "vfio-cxl: %s: host bridge is targeted by %d CXL "
-                       "fixed memory windows; use one single-target CFMWS",
-                       name, matches);
-            return false;
-        } else {
-            error_setg(errp, "vfio-cxl: %s: no CXL fixed memory window targets "
-                       "this device's pxb-cxl (%d windows present)",
-                       name, nwindows);
-            return false;
-        }
-    }
-
-    if (!read_region(region, &ctrl,
-                     hdm_base + CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-        error_setg(errp, "vfio-cxl: %s: failed to read HDM decoder 0 CTRL", name);
-        return false;
-    }
-
-    /*
-     * If COMMIT_LOCK (bit 8) is still set in the virtual snapshot the kernel
-     * should have cleared it during open.  Warn and clear it here so the
-     * subsequent BASE write is not blocked.
-     */
-    if (ctrl & CXL_HDM_CTRL_COMMIT_LOCK) {
-        warn_report("vfio-cxl: COMMIT_LOCK set in HDM decoder 0 CTRL at "
-                    "machine_done; clearing before programming guest GPA");
-        ctrl &= ~CXL_HDM_CTRL_COMMIT_LOCK;
-        if (!write_region(region, &ctrl,
-                          hdm_base + CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-            error_setg(errp, "vfio-cxl: %s: failed to clear HDM decoder 0 "
-                       "COMMIT_LOCK", name);
-            return false;
-        }
-    }
-
-    base_lo  = (uint32_t)(cxl->fmws_base & CXL_HDM_BASE_LO_ADDR_MASK);
-    base_hi  = (uint32_t)(cxl->fmws_base >> 32);
-    ctrl    |= CXL_HDM_CTRL_COMMIT | CXL_HDM_CTRL_COMMIT_LOCK;
-
-    if (!write_region(region, &base_lo, hdm_base +
-                      CXL_HDM_DECODER0_BASE_LOW_OFFSET(0)) ||
-        !write_region(region, &base_hi, hdm_base +
-                      CXL_HDM_DECODER0_BASE_HIGH_OFFSET(0)) ||
-        !write_region(region, &ctrl, hdm_base +
-                      CXL_HDM_DECODER0_CTRL_OFFSET(0))) {
-        error_setg(errp, "vfio-cxl: %s: failed to program HDM decoder 0", name);
-        return false;
-    }
-
-    trace_vfio_cxl_locked_hdm(name, cxl->fmws_base, base_lo, base_hi, ctrl);
-
-    memory_region_transaction_begin();
-    memory_region_add_subregion_overlap(sys_mem, cxl->fmws_base,
-                                        cxl->region.mem, 1);
-    memory_region_transaction_commit();
-    cxl->dpa_in_system_mem = true;
-    return true;
-}
-
-/*
- * setup_locked_hdm - machine_done notifier around vfio_cxl_program_locked_hdm().
- * This runs before the guest starts, so a topology error is fatal: abort rather
- * than boot a device whose decoder was never programmed.
- */
-static void setup_locked_hdm(Notifier *notifier, void *data)
-{
-    VFIOCXL *cxl = container_of(notifier, VFIOCXL, machine_done);
-    Error *local_err = NULL;
-
-    if (!vfio_cxl_program_locked_hdm(cxl, &local_err)) {
-        error_report_err(local_err);
-        exit(EXIT_FAILURE);
-    }
-}
-
-static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
-{
-    VFIODevice *vbasedev = &vdev->vbasedev;
-    VFIOCXL *cxl = &vdev->cxl;
-    g_autofree struct vfio_device_info *info = NULL;
-    struct vfio_info_cap_header *hdr;
-    struct vfio_device_info_cap_cxl *cap;
-    struct vfio_region_info *region_info = NULL;
-    struct vfio_region_info *comp_info = NULL;
-    int ret;
-
-    if (!(vbasedev->flags & VFIO_DEVICE_FLAGS_CXL)) {
-        return true;
-    }
-
-    /*
-     * The decoder is programmed from a machine_done notifier that exit()s on a
-     * topology error. For a post-boot hot-add the notifier fires synchronously,
-     * so that exit() would kill the running guest. The CFMWS/HDM model is fixed
-     * at machine init, so reject hot-add and let device_add fail cleanly.
-     */
-    if (DEVICE(vdev)->hotplugged) {
-        error_setg(errp, "vfio-cxl: %s: hot-plug of a VFIO-CXL device is not "
-                   "supported; its CXL fixed memory window and HDM decoder are "
-                   "established at machine startup", vbasedev->name);
-        return false;
-    }
-
-    info = vfio_get_device_info(vbasedev->fd);
-    if (!info) {
-        error_setg(errp, "vfio-cxl: failed to get device info");
-        return false;
-    }
-
-    hdr = vfio_get_device_info_cap(info, VFIO_DEVICE_INFO_CAP_CXL);
-    if (!hdr) {
-        error_setg(errp, "vfio-cxl: CXL capability not found in device info");
-        return false;
-    }
-    cap = (void *)hdr;
-
-    if (!(cap->flags & VFIO_CXL_CAP_FIRMWARE_COMMITTED)) {
-        error_setg(errp, "vfio-cxl: only firmware-committed CXL devices are "
-                   "supported; device %s is not firmware-committed",
-                   vbasedev->name);
-        return false;
-    }
-
-    if (cap->dpa_region_index == (uint32_t)-1 ||
-        cap->comp_regs_region_index == (uint32_t)-1) {
-        error_setg(errp, "vfio-cxl: kernel did not provide region indices "
-                   "(dpa=%u comp=%u)",
-                   cap->dpa_region_index, cap->comp_regs_region_index);
-        return false;
-    }
-
-    cxl->hdm_regs_bar_index = cap->hdm_regs_bar_index;
-    cxl->hdm_regs_offset    = cap->hdm_regs_offset;
-
-    /* DPA region */
-    ret = vfio_device_get_region_info(vbasedev, cap->dpa_region_index,
-                                      &region_info);
-    if (ret || !region_info) {
-        error_setg(errp, "vfio-cxl: failed to get DPA region info");
-        return false;
-    }
-    ret = vfio_region_setup(OBJECT(vdev), vbasedev, &cxl->region,
-                            region_info->index, "cxl-dpa", errp);
-    if (ret) {
-        error_prepend(errp, "vfio-cxl: failed to set up DPA region: ");
-        return false;
-    }
-    cxl->dpa_size = region_info->size;
-
-    if (vfio_region_mmap(&cxl->region)) {
-        error_setg(errp, "vfio-cxl: failed to mmap DPA region for %s",
-                   vbasedev->name);
-        return false;
-    }
-
-    /*
-     * vfio_region_mmap() returns success without mapping anything when the
-     * kernel did not advertise VFIO_REGION_INFO_FLAG_MMAP: vfio_region_setup()
-     * leaves nr_mmaps at 0 and the mmap loop simply does not run.  The region
-     * would then stay a trap-and-emulate MemoryRegion, which is not RAM, so
-     * KVM would create no memslot for the GPA it gets mapped at and the guest
-     * could never validate the coherent range.  Reject that explicitly rather
-     * than failing much later inside the RMM device-map path.
-     */
-    if (!cxl->region.nr_mmaps) {
-        error_setg(errp, "vfio-cxl: DPA region for %s is not mmap-capable "
-                   "(kernel did not advertise VFIO_REGION_INFO_FLAG_MMAP); "
-                   "the coherent range cannot be backed by a KVM memslot",
-                   vbasedev->name);
-        return false;
-    }
-
-    /* COMP_REGS region (HDM decoder shadow) */
-    ret = vfio_device_get_region_info(vbasedev, cap->comp_regs_region_index,
-                                      &comp_info);
-    if (ret || !comp_info) {
-        error_setg(errp, "vfio-cxl: failed to get COMP_REGS region info");
-        return false;
-    }
-
-    ret = vfio_region_setup_with_ops(OBJECT(vdev), vbasedev,
-                                     &cxl->comp_regs_region,
-                                     comp_info->index, "cxl-comp-regs",
-                                     errp, &vfio_cxl_comp_regs_mr_ops);
-    if (ret) {
-        error_prepend(errp, "vfio-cxl: failed to set up COMP_REGS region: ");
-        return false;
-    }
-    cxl->hdm_regs_size = comp_info->size;
-
-    if (!vfio_cxl_derive_hdm_info(vbasedev, cxl, errp)) {
-        return false;
-    }
-
-    trace_vfio_cxl_setup_params(vbasedev->name, cxl->hdm_regs_bar_index,
-                                 cxl->hdm_regs_offset, cxl->hdm_regs_size,
-                                 cxl->dpa_size);
-
-    /*
-     * Only pre-program the HDM decoder if the kernel reported the device as
-     * firmware-committed.  Non-committed devices need guest driver involvement
-     * to commit the decoder; registering the notifier for them would write an
-     * uncommitted BASE value that the hardware ignores.
-     */
-    if (cap->flags & VFIO_CXL_CAP_FIRMWARE_COMMITTED) {
-        cxl->machine_done.notify = setup_locked_hdm;
-        qemu_add_machine_init_done_notifier(&cxl->machine_done);
-        cxl->machine_done_registered = true;
-    }
-
-    return true;
-}
-
 
 static void vfio_unregister_req_notifier(VFIOPCIDevice *vdev)
 {
@@ -4112,6 +3624,622 @@ bool vfio_pci_interrupt_setup(VFIOPCIDevice *vdev, Error **errp)
     return true;
 }
 
+/*
+ * Walk the endpoint's ancestor bridges up to its pxb-cxl host bridge. A CXL
+ * switch in the path is rejected: the guest would then have to program switch
+ * decoders, which the passthrough model does not yet cover. This is the single
+ * place the supported-topology assumption lives, so switch support later
+ * relaxes it here.
+ */
+static PXBCXLDev *vfio_cxl_find_pxb(VFIOPCIDevice *vdev, Error **errp)
+{
+    PCIBus *bus = pci_get_bus(&vdev->parent_obj);
+
+    if (!object_dynamic_cast(OBJECT(bus), TYPE_CXL_BUS)) {
+        error_setg(errp,
+                   "vfio-cxl: %s: endpoint is not on a CXL root port (cxl-rp)",
+                   vdev->vbasedev.name);
+        return NULL;
+    }
+
+    for (; bus; ) {
+        PCIDevice *bridge = bus->parent_dev;
+
+        if (!bridge) {
+            break;
+        }
+        if (object_dynamic_cast(OBJECT(bridge), TYPE_CXL_USP) ||
+            object_dynamic_cast(OBJECT(bridge), TYPE_CXL_DSP)) {
+            error_setg(errp,
+                       "vfio-cxl: %s: switch-attached topology not supported",
+                       vdev->vbasedev.name);
+            return NULL;
+        }
+        if (object_dynamic_cast(OBJECT(bridge), TYPE_PXB_CXL_DEV)) {
+            return PXB_CXL_DEV(bridge);
+        }
+        if (pci_bus_is_root(bus)) {
+            break;
+        }
+        bus = pci_get_bus(bridge);
+    }
+
+    error_setg(errp, "vfio-cxl: %s: not attached below a pxb-cxl host bridge",
+               vdev->vbasedev.name);
+    return NULL;
+}
+
+/*
+ * Only guest's endpoint decoder is programmed, so the host bridge must stay in
+ * HDM passthrough mode. Reject anything else at realize, before a mapping is
+ * built. cxl_get_hb_passthrough() reflects reset state and is not
+ * settled yet here, so gate on the static hdm_for_passthrough property.
+ */
+static bool vfio_cxl_check_topology(VFIOPCIDevice *vdev, Error **errp)
+{
+    PXBCXLDev *pxb = vfio_cxl_find_pxb(vdev, errp);
+
+    if (!pxb) {
+        return false;
+    }
+    if (pxb->hdm_for_passthrough) {
+        error_setg(errp,
+                   "vfio-cxl: %s: the pxb-cxl must be in HDM passthrough mode "
+                   "(do not set hdm_for_passthrough)", vdev->vbasedev.name);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Count the CXL fixed memory windows that target this device's pxb-cxl and
+ * report the matched window's base, size and target count. Match on the target
+ * names: cxl_fmws_link_targets() resolves target_hbs[] only at machine_done,
+ * which may run after this, so the resolved pointers can still be NULL here.
+ */
+static int vfio_cxl_match_fmws(PXBCXLDev *pxb, hwaddr *base, uint64_t *size,
+                               int *nwindows, int *ntargets)
+{
+    GSList *list = cxl_fmws_get_all_sorted();
+    GSList *iter;
+    int matches = 0;
+
+    *nwindows = g_slist_length(list);
+    *base = 0;
+    *size = 0;
+    *ntargets = 0;
+
+    for (iter = list; iter; iter = iter->next) {
+        CXLFixedWindow *fw = CXL_FMW(iter->data);
+        int i;
+
+        for (i = 0; i < fw->num_targets; i++) {
+            bool ambiguous = false;
+            Object *t = object_resolve_path_type(fw->targets[i],
+                                                 TYPE_PXB_CXL_DEV, &ambiguous);
+
+            if (t && !ambiguous && PXB_CXL_DEV(t) == pxb) {
+                *base = fw->base;
+                *size = fw->size;
+                *ntargets = fw->num_targets;
+                matches++;
+                break;
+            }
+        }
+    }
+    g_slist_free(list);
+    return matches;
+}
+
+/*
+ * Fix the bounds of the device's memory window once the topology has settled.
+ * Exactly one single-target CFMWS, with an assigned base and room for the HDM
+ * memory, is required; anything else is a misconfiguration the guest cannot
+ * recover from, so reject it rather than guess a window.
+ */
+static bool vfio_cxl_do_bind_fmws(VFIOPCIDevice *vdev, Error **errp)
+{
+    VFIOCXL *cxl = &vdev->cxl;
+    const char *name = vdev->vbasedev.name;
+    int nwindows = 0, ntargets = 0, matches;
+    hwaddr base = 0;
+    uint64_t size = 0, need;
+    PXBCXLDev *pxb;
+
+    pxb = vfio_cxl_find_pxb(vdev, errp);
+    if (!pxb) {
+        return false;
+    }
+
+    if (pcie_count_ds_ports(PCI_HOST_BRIDGE(pxb->cxl_host_bridge)->bus) != 1) {
+        error_setg(errp,
+                   "vfio-cxl: %s: pxb-cxl not in HDM passthrough mode "
+                   "(use a single cxl-rp)", name);
+        return false;
+    }
+
+    /*
+     * Count every present function, not one per slot, and require exactly one
+     * endpoint below the root port.
+     */
+    {
+        PCIBus *ep_bus = pci_get_bus(&vdev->parent_obj);
+        int slot, fn, nendpoints = 0;
+
+        for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
+            for (fn = 0; fn < PCI_FUNC_MAX; fn++) {
+                if (ep_bus->devices[PCI_DEVFN(slot, fn)]) {
+                    nendpoints++;
+                }
+            }
+        }
+        if (nendpoints != 1) {
+            error_setg(errp,
+                       "vfio-cxl: %s: %d devices below the cxl-rp; a passed "
+                       "through CXL endpoint must be alone below its root port",
+                       name, nendpoints);
+            return false;
+        }
+    }
+
+    matches = vfio_cxl_match_fmws(pxb, &base, &size, &nwindows, &ntargets);
+    if (matches == 1 && ntargets == 1) {
+        if (!base) {
+            error_setg(errp,
+                       "vfio-cxl: %s: matched CFMWS has no base; reduce its "
+                       "size or grow the guest PA space", name);
+            return false;
+        }
+        /*
+         * QEMU reads the endpoint's HDM size from the kernel region, so the
+         * window size is really device information, not a value to make the
+         * caller guess. Sizing the CFMWS from the device the way firmware does
+         * is not possible here: the window is placed in the guest PA map by
+         * cxl_fmws_set_memmap() before this device is realized, so its size is
+         * fixed before dpa_size is known. Until a core change can size the
+         * window from the device, take the device geometry as the source of
+         * truth: reject a window too small to hold the endpoint, and warn when
+         * it is larger than needed, since the padding becomes guest CEDT that
+         * migration has to preserve.
+         */
+        need = ROUND_UP(cxl->dpa_size, 256 * MiB);
+        if (size < need) {
+            error_setg(errp,
+                       "vfio-cxl: %s: CFMWS size 0x%" PRIx64 " cannot hold the "
+                       "endpoint; set the cxl-fmw size to 0x%" PRIx64,
+                       name, size, need);
+            return false;
+        }
+        if (size > need) {
+            warn_report("vfio-cxl: %s: CFMWS size 0x%" PRIx64 " exceeds the "
+                        "endpoint's 0x%" PRIx64 "; set the cxl-fmw size to 0x%"
+                        PRIx64 " to keep the guest memory map stable across "
+                        "migration", name, size, cxl->dpa_size, need);
+        }
+        cxl->fmws_base = base;
+        cxl->fmws_size = size;
+        return true;
+    }
+
+    if (matches == 1) {
+        error_setg(errp,
+                   "vfio-cxl: %s: its CFMWS interleaves %d targets; use a "
+                   "single-target window", name, ntargets);
+    } else if (matches > 1) {
+        error_setg(errp,
+                   "vfio-cxl: %s: pxb-cxl is targeted by %d CFMWS; use one",
+                   name, matches);
+    } else {
+        error_setg(errp,
+                   "vfio-cxl: %s: no CFMWS targets this device (%d present)",
+                   name, nwindows);
+    }
+    return false;
+}
+
+/*
+ * Cold-plug path: the CFMWS windows are placed at machine init done, so the
+ * binding can only be validated from this notifier. The VM has not run yet, so
+ * a configuration error is fatal to startup. A hotplugged device is validated
+ * in realize instead (see vfio_cxl_setup), where the failure fails device_add
+ * without taking down the running VM.
+ */
+static void vfio_cxl_bind_fmws(Notifier *n, void *data)
+{
+    VFIOCXL *cxl = container_of(n, VFIOCXL, machine_done);
+    VFIOPCIDevice *vdev = container_of(cxl, VFIOPCIDevice, cxl);
+    Error *err = NULL;
+
+    if (!vfio_cxl_do_bind_fmws(vdev, &err)) {
+        error_report_err(err);
+        exit(1);
+    }
+}
+
+/*
+ * HDM decoder registers, relative to the trapped decoder block. The block holds
+ * the HDM Decoder Capability register followed by one register set per decoder,
+ * each VFIO_CXL_HDM_DECODER_STRIDE apart, indexed by decoder.
+ */
+#define VFIO_CXL_HDM_CAP                  0x00
+#define VFIO_CXL_HDM_DECODER_STRIDE       0x20
+#define VFIO_CXL_HDM_DECODER_BASE_LOW(n) \
+    (0x10 + (n) * VFIO_CXL_HDM_DECODER_STRIDE)
+#define VFIO_CXL_HDM_DECODER_BASE_HIGH(n) \
+    (0x14 + (n) * VFIO_CXL_HDM_DECODER_STRIDE)
+#define VFIO_CXL_HDM_DECODER_CTRL(n) \
+    (0x20 + (n) * VFIO_CXL_HDM_DECODER_STRIDE)
+#define VFIO_CXL_HDM_CTRL_COMMITTED       (1 << 10)
+#define VFIO_CXL_HDM_BASE_LOW_MASK        0xf0000000U
+
+static void vfio_cxl_unmap_mem(VFIOPCIDevice *vdev)
+{
+    VFIOCXL *cxl = &vdev->cxl;
+
+    if (!cxl->dpa_mapped) {
+        return;
+    }
+    memory_region_del_subregion(get_system_memory(), cxl->mem_region.mem);
+    cxl->dpa_mapped = false;
+    cxl->mapped_base = 0;
+}
+
+/*
+ * The HDM Decoder Capability register encodes the decoder count in its low
+ * nibble (CXL r3.1 8.2.4.20.1, encodings 0h..Ch for 1..32). Decode it with the
+ * shared cxl_decoder_count_dec() helper so the commit handler walks every
+ * decoder rather than assuming decoder 0. An unreadable register or a reserved
+ * encoding (which the helper decodes to 0) is treated as a single decoder.
+ */
+static unsigned vfio_cxl_decoder_count(VFIOPCIDevice *vdev)
+{
+    off_t off = vdev->cxl.comp_regs_region.fd_offset;
+    uint32_t cap = 0;
+    int count;
+
+    if (pread(vdev->vbasedev.fd, &cap, 4, off + VFIO_CXL_HDM_CAP) != 4) {
+        return 1;
+    }
+    count = cxl_decoder_count_dec(le32_to_cpu(cap) & 0xf);
+    return count > 0 ? count : 1;
+}
+
+/*
+ * The guest committed or tore down an endpoint decoder. Walk each decoder in
+ * the trapped HDM block and (un)map the HDM memory at the CFMWS window base,
+ * not the base the guest programmed (see vfio_cxl_comp_regs_read). This
+ * generation commits one non-interleaved decoder, so the walk stops at the
+ * first committed decoder.
+ */
+static void vfio_cxl_decoder_changed(VFIOPCIDevice *vdev)
+{
+    VFIOCXL *cxl = &vdev->cxl;
+    VFIODevice *vbasedev = &vdev->vbasedev;
+    off_t off = cxl->comp_regs_region.fd_offset;
+    unsigned n, count = vfio_cxl_decoder_count(vdev);
+
+    for (n = 0; n < count; n++) {
+        uint32_t ctrl = 0;
+
+        if (pread(vbasedev->fd, &ctrl, 4,
+                  off + VFIO_CXL_HDM_DECODER_CTRL(n)) != 4) {
+            return;
+        }
+        if (!(le32_to_cpu(ctrl) & VFIO_CXL_HDM_CTRL_COMMITTED)) {
+            continue;
+        }
+
+        /*
+         * QEMU always maps at the device's CFMWS base and presents that base
+         * back to the guest, so a decoder the guest committed at any other base
+         * would leave the guest's view and the actual mapping diverged. Reject
+         * it rather than silently relocate. A firmware-committed decoder the
+         * guest never reprogrammed (guest_base_written == false) keeps the
+         * CFMWS base.
+         */
+        if (cxl->guest_base_written) {
+            hwaddr guest_base = ((hwaddr)cxl->guest_base_hi << 32) |
+                                cxl->guest_base_lo;
+
+            if (guest_base != cxl->fmws_base) {
+                warn_report("vfio-cxl: %s: guest committed decoder %u at 0x%"
+                            HWADDR_PRIx ", not the CFMWS base 0x%" HWADDR_PRIx
+                            "; not mapping", vbasedev->name, n, guest_base,
+                            cxl->fmws_base);
+                vfio_cxl_unmap_mem(vdev);
+                return;
+            }
+        }
+
+        if (cxl->dpa_mapped && cxl->mapped_base == cxl->fmws_base) {
+            return;
+        }
+        /*
+         * Overlap the CFMWS window MemoryRegion the CXL host bridge already
+         * maps at this base, at a higher priority, so precedence is defined by
+         * priority rather than subregion insertion order.
+         */
+        memory_region_transaction_begin();
+        vfio_cxl_unmap_mem(vdev);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            cxl->fmws_base,
+                                            cxl->mem_region.mem, 1);
+        memory_region_transaction_commit();
+        cxl->mapped_base = cxl->fmws_base;
+        cxl->dpa_mapped = true;
+        return;
+    }
+
+    /* No committed decoder in the block: tear down any existing mapping. */
+    vfio_cxl_unmap_mem(vdev);
+}
+
+static uint64_t vfio_cxl_comp_regs_read(void *opaque, hwaddr addr,
+                                        unsigned size)
+{
+    VFIORegion *region = opaque;
+    VFIODevice *vbasedev = region->vbasedev;
+    VFIOPCIDevice *vdev =
+        container_of(region, VFIOPCIDevice, cxl.comp_regs_region);
+    VFIOCXL *cxl = &vdev->cxl;
+    uint32_t val = 0xffffffff;
+
+    if (pread(vbasedev->fd, &val, size, region->fd_offset + addr) != size) {
+        error_report("vfio-cxl: %s: HDM decoder read at 0x%" HWADDR_PRIx
+                     " failed", vbasedev->name, addr);
+    }
+    val = le32_to_cpu(val);
+
+    /*
+     * The kernel shadow holds the host physical base for a firmware-committed
+     * decoder. Never expose that to the guest: present the guest physical base
+     * QEMU maps the HDM memory at (the device's CFMWS window). Any decoder's
+     * base registers are virtualized; ctrl, size and the capability header pass
+     * through. The base registers repeat every VFIO_CXL_HDM_DECODER_STRIDE.
+     */
+    if (addr >= VFIO_CXL_HDM_DECODER_BASE_LOW(0) &&
+        (addr - VFIO_CXL_HDM_DECODER_BASE_LOW(0)) %
+                VFIO_CXL_HDM_DECODER_STRIDE == 0) {
+        val = (val & ~VFIO_CXL_HDM_BASE_LOW_MASK) |
+              ((uint32_t)cxl->fmws_base & VFIO_CXL_HDM_BASE_LOW_MASK);
+    } else if (addr >= VFIO_CXL_HDM_DECODER_BASE_HIGH(0) &&
+               (addr - VFIO_CXL_HDM_DECODER_BASE_HIGH(0)) %
+                       VFIO_CXL_HDM_DECODER_STRIDE == 0) {
+        val = (uint32_t)(cxl->fmws_base >> 32);
+    }
+
+    return val;
+}
+
+static void vfio_cxl_comp_regs_write(void *opaque, hwaddr addr, uint64_t data,
+                                     unsigned size)
+{
+    VFIORegion *region = opaque;
+    VFIODevice *vbasedev = region->vbasedev;
+    VFIOPCIDevice *vdev =
+        container_of(region, VFIOPCIDevice, cxl.comp_regs_region);
+    uint32_t val = cpu_to_le32((uint32_t)data);
+
+    if (pwrite(vbasedev->fd, &val, size, region->fd_offset + addr) != size) {
+        error_report("vfio-cxl: %s: HDM decoder write at 0x%" HWADDR_PRIx
+                     " failed", vbasedev->name, addr);
+        return;
+    }
+
+    /*
+     * Record the base the guest programs into a decoder so the commit handler
+     * can reject a base other than the device's CFMWS window. The base low
+     * register carries HPA bits [31:28]; the high register carries [63:32].
+     */
+    if (addr >= VFIO_CXL_HDM_DECODER_BASE_LOW(0) &&
+        (addr - VFIO_CXL_HDM_DECODER_BASE_LOW(0)) %
+                VFIO_CXL_HDM_DECODER_STRIDE == 0) {
+        vdev->cxl.guest_base_lo = (uint32_t)data & VFIO_CXL_HDM_BASE_LOW_MASK;
+        vdev->cxl.guest_base_written = true;
+    } else if (addr >= VFIO_CXL_HDM_DECODER_BASE_HIGH(0) &&
+               (addr - VFIO_CXL_HDM_DECODER_BASE_HIGH(0)) %
+                       VFIO_CXL_HDM_DECODER_STRIDE == 0) {
+        vdev->cxl.guest_base_hi = (uint32_t)data;
+        vdev->cxl.guest_base_written = true;
+    }
+
+    /*
+     * The kernel runs the lock-on-commit FSM in the write above, so the
+     * committed state is settled by now; a control write on any decoder can
+     * change the mapping.
+     */
+    if (addr >= VFIO_CXL_HDM_DECODER_CTRL(0) &&
+        (addr - VFIO_CXL_HDM_DECODER_CTRL(0)) %
+        VFIO_CXL_HDM_DECODER_STRIDE == 0) {
+        vfio_cxl_decoder_changed(vdev);
+    }
+}
+
+static const MemoryRegionOps vfio_cxl_comp_regs_ops = {
+    .read = vfio_cxl_comp_regs_read,
+    .write = vfio_cxl_comp_regs_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
+ * Locate the CXL Device DVSEC (CXL r3.1 8.1.3) in config space. The guest
+ * triggers a CXL reset by writing its ctrl2 register; QEMU rescans the decoder
+ * after that write so the HDM mapping is restored (see vfio_pci_write_config).
+ * Returns the DVSEC config offset, or 0 if the device does not expose it.
+ */
+static uint16_t vfio_cxl_find_device_dvsec(PCIDevice *pdev)
+{
+    uint16_t offset;
+
+    for (offset = PCI_CONFIG_SPACE_SIZE; offset;
+         offset = PCI_EXT_CAP_NEXT(pci_get_long(pdev->config + offset))) {
+        uint32_t hdr = pci_get_long(pdev->config + offset);
+
+        if (PCI_EXT_CAP_ID(hdr) == PCI_EXT_CAP_ID_DVSEC &&
+            (pci_get_long(pdev->config + offset + PCI_DVSEC_HEADER1) & 0xffff)
+                == CXL_VENDOR_ID &&
+            pci_get_word(pdev->config + offset + PCI_DVSEC_HEADER2)
+                == PCIE_CXL_DEVICE_DVSEC) {
+            return offset;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Learn the CXL geometry the kernel reports: the HPA-backed HDM memory region
+ * and the trapped HDM decoder block (which BAR carries it and at what offset).
+ * A non-CXL device leaves cxl.enabled false and takes no CXL paths.
+ */
+static bool vfio_cxl_setup(VFIOPCIDevice *vdev, Error **errp)
+{
+    VFIODevice *vbasedev = &vdev->vbasedev;
+    VFIOCXL *cxl = &vdev->cxl;
+    struct vfio_region_info *mem_info = NULL, *comp_info = NULL;
+    struct vfio_region_info_cap_cxl_comp_regs *cap;
+    struct vfio_info_cap_header *hdr;
+
+    if (!(vbasedev->flags & VFIO_DEVICE_FLAGS_CXL)) {
+        return true;
+    }
+
+    if (vfio_device_get_region_info_type(vbasedev,
+                                         VFIO_REGION_TYPE_PCI_VENDOR_TYPE |
+                                         CXL_VENDOR_ID,
+                                         VFIO_REGION_SUBTYPE_CXL_MEM,
+                                         &mem_info)) {
+        error_setg(errp, "vfio-cxl: %s: CXL memory region not found",
+                   vbasedev->name);
+        return false;
+    }
+
+    if (vfio_device_get_region_info_type(vbasedev,
+                                         VFIO_REGION_TYPE_PCI_VENDOR_TYPE |
+                                         CXL_VENDOR_ID,
+                                         VFIO_REGION_SUBTYPE_CXL_COMP_REGS,
+                                         &comp_info)) {
+        error_setg(errp,
+                   "vfio-cxl: %s: CXL component-register region not found",
+                   vbasedev->name);
+        return false;
+    }
+
+    hdr = vfio_get_region_info_cap(comp_info,
+                                   VFIO_REGION_INFO_CAP_CXL_COMP_REGS);
+    if (!hdr) {
+        error_setg(errp,
+                   "vfio-cxl: %s: component-register geometry not reported",
+                   vbasedev->name);
+        return false;
+    }
+    cap = container_of(hdr, struct vfio_region_info_cap_cxl_comp_regs, header);
+
+    cxl->mem_region_index = mem_info->index;
+    cxl->comp_regs_region_index = comp_info->index;
+    cxl->dpa_size = mem_info->size;
+    cxl->comp_bar = cap->bar;
+    cxl->hdm_offset = cap->offset;
+    cxl->dvsec_offset = vfio_cxl_find_device_dvsec(&vdev->parent_obj);
+    cxl->af_offset = pci_find_capability(&vdev->parent_obj, PCI_CAP_ID_AF);
+
+    if (!vfio_cxl_check_topology(vdev, errp)) {
+        return false;
+    }
+
+    /*
+     * The HDM memory is host physical. Set up the region, which installs the
+     * fd read/write path, and mmap it for direct guest access; it is added to
+     * the guest address space only once the guest commits its endpoint decoder.
+     */
+    if (vfio_region_setup(OBJECT(vdev), vbasedev, &cxl->mem_region,
+                          cxl->mem_region_index, "cxl-mem", errp)) {
+        return false;
+    }
+    if (vfio_region_mmap(&cxl->mem_region)) {
+        /*
+         * Without mmap the region falls back to the kernel's fd read/write
+         * path, which works but traps every access. Warn rather than fail.
+         */
+        warn_report("vfio-cxl: %s: failed to mmap the HDM memory region; "
+                    "performance may be slow", vbasedev->name);
+    }
+
+    /*
+     * Trap the HDM decoder block: overlay it, priority 1, over the directly
+     * mapped component BAR, so guest decoder accesses reach the kernel FSM and
+     * the commit becomes visible to QEMU.
+     */
+    if (!vdev->bars[cxl->comp_bar].mr) {
+        error_setg(errp, "vfio-cxl: %s: component BAR %u is not present",
+                   vbasedev->name, cxl->comp_bar);
+        goto err;
+    }
+    if (vfio_region_setup_with_ops(OBJECT(vdev), vbasedev,
+                                   &cxl->comp_regs_region,
+                                   cxl->comp_regs_region_index, "cxl-comp-regs",
+                                   &vfio_cxl_comp_regs_ops, errp)) {
+        goto err;
+    }
+    memory_region_add_subregion_overlap(vdev->bars[cxl->comp_bar].mr,
+                                        cxl->hdm_offset,
+                                        cxl->comp_regs_region.mem, 1);
+
+    if (DEVICE(vdev)->hotplugged) {
+        /*
+         * The machine is already up, so the CFMWS windows are placed and the
+         * binding can be validated now. Report a failure through errp so a bad
+         * device_add fails cleanly instead of aborting the running VM.
+         */
+        if (!vfio_cxl_do_bind_fmws(vdev, errp)) {
+            goto err;
+        }
+    } else {
+        cxl->machine_done.notify = vfio_cxl_bind_fmws;
+        qemu_add_machine_init_done_notifier(&cxl->machine_done);
+    }
+
+    cxl->enabled = true;
+
+    return true;
+
+err:
+    vfio_cxl_teardown(vdev);
+    return false;
+}
+
+static void vfio_cxl_teardown(VFIOPCIDevice *vdev)
+{
+    VFIOCXL *cxl = &vdev->cxl;
+
+    if (!cxl->enabled) {
+        return;
+    }
+
+    if (cxl->comp_regs_region.mem) {
+        if (vdev->bars[cxl->comp_bar].mr) {
+            memory_region_del_subregion(vdev->bars[cxl->comp_bar].mr,
+                                        cxl->comp_regs_region.mem);
+        }
+        vfio_region_exit(&cxl->comp_regs_region);
+        vfio_region_finalize(&cxl->comp_regs_region);
+    }
+
+    vfio_cxl_unmap_mem(vdev);
+
+    if (cxl->mem_region.mem) {
+        vfio_region_exit(&cxl->mem_region);
+        vfio_region_finalize(&cxl->mem_region);
+    }
+
+    if (cxl->machine_done.notify) {
+        qemu_remove_machine_init_done_notifier(&cxl->machine_done);
+        cxl->machine_done.notify = NULL;
+    }
+}
+
 static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
 {
     ERRP_GUARD();
@@ -4188,10 +4316,6 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
     }
 
     if (!vfio_pci_populate_device(vdev, errp)) {
-        goto error;
-    }
-
-    if (!vfio_cxl_setup(vdev, errp)) {
         goto error;
     }
 
@@ -4276,6 +4400,20 @@ static void vfio_pci_realize(PCIDevice *pdev, Error **errp)
     }
 #endif
 
+    if (!vfio_cxl_setup(vdev, errp)) {
+        /*
+         * vfio_migration_realize() above installed a migration blocker in auto
+         * mode (generic vfio-pci exposes no migration ops). out_deregister does
+         * not remove it, so a rejected CXL setup would leave VM migration
+         * blocked until QEMU restarts. Drop it here, under the same
+         * failover-pair condition used to install it.
+         */
+        if (!pdev->failover_pair_id) {
+            vfio_migration_exit(vbasedev);
+        }
+        goto out_deregister;
+    }
+
     vfio_pci_register_err_notifier(vdev);
     vfio_pci_register_req_notifier(vdev);
     vfio_setup_resetfn_quirk(vdev);
@@ -4334,6 +4472,14 @@ static void vfio_exitfn(PCIDevice *pdev)
     vfio_pci_teardown_msi(vdev);
     vfio_pci_disable_rp_atomics(vdev);
     vfio_pci_bars_exit(vdev);
+    /*
+     * The committed HDM overlay is a subregion of system memory owned by this
+     * device, so it holds a reference that would keep the object alive past
+     * unrealize and block instance_finalize (where vfio_cxl_teardown otherwise
+     * runs). Drop it here; the call is idempotent for a device that never
+     * mapped or is not CXL.
+     */
+    vfio_cxl_unmap_mem(vdev);
     vfio_migration_exit(vbasedev);
 #ifdef CONFIG_IOMMUFD
     /* The vDEVICE must go before the vIOMMU, and both before the hiod */

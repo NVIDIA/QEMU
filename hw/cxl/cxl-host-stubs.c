@@ -16,9 +16,15 @@ hwaddr cxl_fmws_set_memmap(hwaddr base, hwaddr max_addr)
     return base;
 };
 void cxl_fmws_update_mmio(void) {};
-GSList *cxl_fmws_get_all_sorted(void)
-{
-    return NULL;
-}
 
 const MemoryRegionOps cfmws_ops;
+
+GSList *cxl_fmws_get_all_sorted(void)
+{
+    g_assert_not_reached();
+}
+
+int cxl_decoder_count_dec(int enc_cnt)
+{
+    g_assert_not_reached();
+}

@@ -228,9 +228,9 @@ static int vfio_setup_region_sparse_mmaps(VFIORegion *region,
     return 0;
 }
 
-int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
-                               VFIORegion *region, int index, const char *name,
-                               Error **errp, const MemoryRegionOps *ops)
+static int vfio_region_do_setup(Object *obj, VFIODevice *vbasedev,
+                                VFIORegion *region, int index, const char *name,
+                                const MemoryRegionOps *ops, Error **errp)
 {
     struct vfio_region_info *info = NULL;
     int ret;
@@ -250,8 +250,7 @@ int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
 
     if (region->size) {
         region->mem = g_new0(MemoryRegion, 1);
-        memory_region_init_io(region->mem, obj,
-                              ops ? ops : &vfio_region_ops,
+        memory_region_init_io(region->mem, obj, ops,
                               region, name, region->size);
 
         if (!vbasedev->no_mmap &&
@@ -279,8 +278,21 @@ int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
 int vfio_region_setup(Object *obj, VFIODevice *vbasedev, VFIORegion *region,
                       int index, const char *name, Error **errp)
 {
-    return vfio_region_setup_with_ops(obj, vbasedev, region, index,
-                                      name, errp, NULL);
+    return vfio_region_do_setup(obj, vbasedev, region, index, name,
+                                &vfio_region_ops, errp);
+}
+
+/*
+ * Like vfio_region_setup() but traps the region through @ops instead of the
+ * default pass-through, so a caller can intercept accesses (the CXL HDM
+ * decoder block). A NULL @ops keeps the default.
+ */
+int vfio_region_setup_with_ops(Object *obj, VFIODevice *vbasedev,
+                               VFIORegion *region, int index, const char *name,
+                               const MemoryRegionOps *ops, Error **errp)
+{
+    return vfio_region_do_setup(obj, vbasedev, region, index, name,
+                                ops ? ops : &vfio_region_ops, errp);
 }
 
 static void vfio_subregion_unmap(VFIORegion *region, int index)
@@ -471,21 +483,6 @@ no_mmap:
     }
 
     return ret;
-}
-
-void vfio_region_unmap(VFIORegion *region)
-{
-    int i;
-
-    if (!region->mem) {
-        return;
-    }
-
-    for (i = 0; i < region->nr_mmaps; i++) {
-        if (region->mmaps[i].mmap) {
-            vfio_subregion_unmap(region, i);
-        }
-    }
 }
 
 void vfio_region_exit(VFIORegion *region)

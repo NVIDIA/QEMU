@@ -8,7 +8,6 @@
 #include "hw/pci/pcie_host.h"
 #include "hw/acpi/cxl.h"
 #include "hw/acpi/acpi_egm_memory.h"
-#include "qemu/error-report.h"
 
 static void acpi_dsdt_add_pci_route_table(Aml *dev, uint32_t irq,
                                           Aml *scope, uint8_t bus_num)
@@ -53,45 +52,6 @@ static void acpi_dsdt_add_pci_route_table(Aml *dev, uint32_t irq,
     }
 }
 
-Aml *build_pci_host_bridge_dsm_method(bool preserve_config)
-{
-    Aml *method = aml_method("_DSM", 4, AML_NOTSERIALIZED);
-    Aml *UUID, *ifctx, *ifctx1, *buf;
-    uint8_t byte_list[1] = {0};
-
-    /* PCI Firmware Specification 3.0
-     * 4.6.1. _DSM for PCI Express Slot Information
-     * The UUID in _DSM in this context is
-     * {E5C937D0-3553-4D7A-9117-EA4D19C3434D}
-     */
-    UUID = aml_touuid("E5C937D0-3553-4D7A-9117-EA4D19C3434D");
-    ifctx = aml_if(aml_equal(aml_arg(0), UUID));
-    ifctx1 = aml_if(aml_equal(aml_arg(2), aml_int(0)));
-    if (preserve_config) {
-        /* support functions other than 0, specifically function 5 */
-        byte_list[0] = 0x21;
-    }
-    buf = aml_buffer(1, byte_list);
-    aml_append(ifctx1, aml_return(buf));
-    aml_append(ifctx, ifctx1);
-    if (preserve_config) {
-        Aml *ifctx2 = aml_if(aml_equal(aml_arg(2), aml_int(5)));
-        /*
-         * 0 - The operating system must not ignore the PCI configuration that
-         *     firmware has done at boot time.
-         */
-        aml_append(ifctx2, aml_return(aml_int(0)));
-        aml_append(ifctx, ifctx2);
-    }
-
-    aml_append(method, ifctx);
-
-    byte_list[0] = 0;
-    buf = aml_buffer(1, byte_list);
-    aml_append(method, aml_return(buf));
-    return method;
-}
-
 static void acpi_dsdt_add_host_bridge_methods(Aml *dev,
                                               bool enable_native_pcie_hotplug,
                                               bool preserve_config)
@@ -110,7 +70,6 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
     CrsRangeSet crs_range_set;
     CrsRangeEntry *entry;
     int i;
-    bool first_cxl = true;
 
     /* Reset GPU ID for each complete ACPI table build */
     acpi_egm_memory_reset_gpu_id();
@@ -169,44 +128,6 @@ void acpi_dsdt_add_gpex(Aml *scope, struct GPEXConfig *cfg)
              */
             crs = build_crs(PCI_HOST_BRIDGE(BUS(bus)->parent), &crs_range_set,
                             cfg->pio.base, 0, 0, 0);
-            if (is_cxl && first_cxl && cfg->cxl_mmio.size) {
-                uint64_t cfmws_end = cfg->cxl_mmio.base +
-                                     cfg->cxl_mmio.size - 1;
-
-                /*
-                 * The CXL Fixed Memory Window (CFMWS) is a system-wide GPA
-                 * range.  Only the first CXL root bridge emits the QWord
-                 * descriptor; adding it to every bridge would give the OS
-                 * duplicate resource claims for the same range.
-                 *
-                 * build_crs() has already appended the bridge's own 64-bit
-                 * ranges into crs.  Do not copy them again here; only append
-                 * the CFMWS window itself as a new QWord descriptor.
-                 *
-                 * Warn if the CFMWS window overlaps any range already claimed
-                 * by the bridge; in the current address layout they should be
-                 * disjoint, but catch it early if the layout ever changes.
-                 */
-                for (i = 0; i < crs_range_set.mem_64bit_ranges->len; i++) {
-                    entry = g_ptr_array_index(crs_range_set.mem_64bit_ranges,
-                                              i);
-                    if (entry->base <= cfmws_end &&
-                        entry->limit >= cfg->cxl_mmio.base) {
-                        warn_report("CXL CFMWS [0x%"PRIx64"-0x%"PRIx64"] "
-                                    "overlaps CXL root bridge 64-bit range "
-                                    "[0x%"PRIx64"-0x%"PRIx64"]",
-                                    cfg->cxl_mmio.base, cfmws_end,
-                                    entry->base, entry->limit);
-                    }
-                }
-                aml_append(crs,
-                    aml_qword_memory(AML_POS_DECODE, AML_MIN_FIXED,
-                        AML_MAX_FIXED, AML_NON_CACHEABLE, AML_READ_WRITE,
-                        0x0000, cfg->cxl_mmio.base, cfmws_end, 0x0000,
-                        cfg->cxl_mmio.size));
-                first_cxl = false;
-            }
-
             aml_append(dev, aml_name_decl("_CRS", crs));
 
             if (is_cxl) {

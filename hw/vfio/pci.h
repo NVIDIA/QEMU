@@ -122,25 +122,37 @@ typedef struct VFIOMSIXInfo {
 
 OBJECT_DECLARE_SIMPLE_TYPE(VFIOPCIDevice, VFIO_PCI_DEVICE)
 
+/*
+ * State for a CXL Type-2 device. The kernel owns the host physical placement
+ * of the device memory; QEMU only maps it at the guest physical address the
+ * guest commits into its endpoint HDM decoder.
+ */
 typedef struct VFIOCXL {
-    uint8_t  hdm_regs_bar_index;
-    uint64_t hdm_regs_offset;
-    uint64_t hdm_regs_size;
-    uint64_t hdm_decoder_offset;
-    uint8_t  hdm_count;
-    uint64_t dpa_size;
-    hwaddr   fmws_base;         /* GPA base programmed into HDM decoder 0 */
-    bool     dpa_in_system_mem;
-    bool     machine_done_registered;
-    VFIORegion region;
-    VFIORegion comp_regs_region;
-    Notifier   machine_done;
+    bool enabled;
+    uint32_t mem_region_index;       /* HPA-backed HDM memory VFIO region */
+    uint32_t comp_regs_region_index; /* trapped HDM decoder register block */
+    uint32_t comp_bar;               /* component BAR carrying that block */
+    uint64_t hdm_offset;             /* block offset within the component BAR */
+    uint16_t dvsec_offset;           /* CXL Device DVSEC offset, 0 if none */
+    uint16_t af_offset;              /* PCI Advanced Features cap, 0 if none */
+    uint64_t dpa_size;               /* size of the HDM memory region */
+    VFIORegion mem_region;           /* HDM memory, mapped at committed GPA */
+    Notifier machine_done;           /* CFMWS validated at machine_done */
+    hwaddr fmws_base;                /* base of the memory window */
+    uint64_t fmws_size;              /* size of the memory window */
+    VFIORegion comp_regs_region;     /* trapped HDM decoder block */
+    hwaddr mapped_base;              /* GPA the HDM memory is mapped at */
+    bool dpa_mapped;                 /* HDM memory currently in system memory */
+    uint32_t guest_base_lo;          /* decoder base low the guest wrote */
+    uint32_t guest_base_hi;          /* decoder base high the guest wrote */
+    bool guest_base_written;         /* the guest wrote a decoder base */
 } VFIOCXL;
 
 struct VFIOPCIDevice {
     PCIDevice parent_obj;
 
     VFIODevice vbasedev;
+    VFIOCXL cxl;
     VFIOINTx intx;
     unsigned int config_size;
     uint8_t *emulated_config_bits; /* QEMU emulated bits, little-endian */
@@ -209,7 +221,6 @@ struct VFIOPCIDevice {
     VFIODisplay *dpy;
     Notifier irqchip_change_notifier;
     VFIOPCICPR cpr;
-    VFIOCXL cxl;
     VMChangeStateEntry *vmstate;
 };
 
