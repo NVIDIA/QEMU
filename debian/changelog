@@ -1,3 +1,32 @@
+qemu (1:11.0.0+nvidia-unstable15-1) noble; urgency=medium
+
+  * NVIDIA: SAUCE: Set INIT_SHARED flag only when guest requires it
+  * NVIDIA: SAUCE: arm/rme: Stage private images before ROM writes
+  * kvm: Decouple memory attribute check from kvm_guest_memfd_supported
+  * NVIDIA: SAUCE: tests/arm64: Check QEMU 1 GiB guest_memfd creation
+  * NVIDIA: SAUCE: kvm: Create HugeTLB guest_memfd with page order
+  * NVIDIA: SAUCE: arm/rme: Expose guest_memfd in-place conversion
+  * NVIDIA: SAUCE: hostmem: Automatically select set guest-memfd=on for in-place conversion
+  * NVIDIA: SAUCE: accel/kvm: Disable discard for in-place conversion
+  * NVIDIA: SAUCE: accel/kvm: Don't default to private attributes for in-place conversion
+  * NVIDIA: SAUCE: accel/kvm: Support shared/private conversions via guest_memfd ioctls
+  * NVIDIA: SAUCE: accel/kvm: Re-order attribute notifications for in-place conversion
+  * NVIDIA: SAUCE: accel/kvm: Move post-conversion updates to a separate helper
+  * NVIDIA: SAUCE: system/memory: Default to guest_memfd for RAM for in-place conversion
+  * NVIDIA: SAUCE: accel/kvm: Handle guest_memfd flags internally when creating instances
+  * NVIDIA: SAUCE: system/memory: Re-use memory-backend-guest-memfd inode for private memory
+  * NVIDIA: SAUCE: accel/kvm: Add CGS flag to control in-place conversion support
+  * NVIDIA: SAUCE: linux-headers: Match guest_memfd UAPI to target kernel
+  * NVIDIA: SAUCE: accel/kvm: Use dedicated helper for creating private-only gmem instances
+  * NVIDIA: SAUCE: accel/kvm: Fix handling of conversion ranges with multiple MMIO holes
+  * NVIDIA: SAUCE: accel/kvm: Fix handling of MMIO holes at start of conversion ranges
+  * NVIDIA: SAUCE: accel/kvm: Fix kvm_convert_memory() calls crossing memory regions
+  * NVIDIA: SAUCE: accel/kvm: Add helper for handling conversions of MMIO holes
+  * hostmem: Support fully shared guest memfd to back a VM
+  * kvm: Detect guest-memfd flags supported
+
+ -- Matthew R. Ochs <mochs@nvidia.com>  Thu, 19 Nov 2026 15:15:38 -0500
+
 qemu (1:11.0.0+nvidia-unstable14-1) noble; urgency=medium
 
   * NVIDIA: SAUCE: hw/arm/smmuv3-realm: Take VSMMU IDR0/IDR5 from host SMMU
